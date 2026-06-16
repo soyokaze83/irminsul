@@ -1,0 +1,34 @@
+[package]
+name = "wa-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["sqlite-store", "bundled-sqlite", "rustls", "noise"]
+sqlite-store = ["wa-store/sqlite"]
+bundled-sqlite = ["sqlite-store", "wa-store/bundled-sqlite"]
+memory-store = ["wa-store/memory"]
+websocket = ["wa-core/websocket"]
+rustls = ["websocket", "wa-core/rustls"]
+native-tls = ["websocket", "wa-core/native-tls"]
+noise = ["wa-core/noise"]
+http-media = ["noise", "wa-core/http-media"]
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+wa-core = { path = "../wa-core", default-features = false }
+wa-binary = { path = "../wa-binary" }
+wa-store = { path = "../wa-store", default-features = false }
+
+[dev-dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+prost.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+wa-crypto = { path = "../wa-crypto" }
+wa-proto = { path = "../wa-proto" }

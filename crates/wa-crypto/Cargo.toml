@@ -1,0 +1,27 @@
+[package]
+name = "wa-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+aes.workspace = true
+aes-gcm.workspace = true
+bytes.workspace = true
+cbc = { workspace = true, features = ["alloc"] }
+ctr.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+md-5.workspace = true
+pbkdf2.workspace = true
+prost.workspace = true
+rand.workspace = true
+rand_xeddsa = { package = "rand", version = "0.10.1" }
+sha2.workspace = true
+thiserror.workspace = true
+wa-proto = { path = "../wa-proto" }
+xeddsa.workspace = true
+x25519-dalek = { workspace = true, features = ["static_secrets", "getrandom"] }
+zeroize.workspace = true

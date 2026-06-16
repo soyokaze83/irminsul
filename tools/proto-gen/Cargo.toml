@@ -1,0 +1,12 @@
+[package]
+name = "proto-gen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace]
+
+[dependencies]
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.2.0"

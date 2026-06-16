@@ -1,0 +1,11 @@
+[package]
+name = "wa-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytes.workspace = true
+prost.workspace = true
