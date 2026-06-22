@@ -373,10 +373,21 @@ fn write_pre_key_to_tx(
     result
 }
 
-fn read_pre_key_from_tx(tx: &mut dyn StoreTransaction, key_id: u32) -> StoreResult<KeyPair> {
-    let value = tx
-        .get(KeyNamespace::PreKey, &key_id.to_string())?
-        .ok_or_else(|| StoreError::InvalidData(format!("missing pre-key {key_id}")))?;
+pub(crate) fn read_pre_key_from_tx(
+    tx: &mut dyn StoreTransaction,
+    key_id: u32,
+) -> StoreResult<KeyPair> {
+    read_optional_pre_key_from_tx(tx, key_id)?
+        .ok_or_else(|| StoreError::InvalidData(format!("missing pre-key {key_id}")))
+}
+
+pub(crate) fn read_optional_pre_key_from_tx(
+    tx: &mut dyn StoreTransaction,
+    key_id: u32,
+) -> StoreResult<Option<KeyPair>> {
+    let Some(value) = tx.get(KeyNamespace::PreKey, &key_id.to_string())? else {
+        return Ok(None);
+    };
     if value.len() != 64 {
         return Err(StoreError::InvalidData(format!(
             "invalid pre-key {key_id} length: {}",
@@ -391,10 +402,10 @@ fn read_pre_key_from_tx(tx: &mut dyn StoreTransaction, key_id: u32) -> StoreResu
         .try_into()
         .map_err(|_| StoreError::InvalidData(format!("invalid private pre-key {key_id} length")))?;
 
-    Ok(KeyPair {
+    Ok(Some(KeyPair {
         public,
         private: SecretBytes::from(private),
-    })
+    }))
 }
 
 fn parse_encrypt_ack_result(node: &BinaryNode, operation: &str) -> CoreResult<()> {

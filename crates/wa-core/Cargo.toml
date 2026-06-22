@@ -12,7 +12,9 @@ websocket = ["dep:futures", "dep:tokio-tungstenite", "tokio/net"]
 rustls = ["websocket", "tokio-tungstenite/rustls-tls-webpki-roots"]
 native-tls = ["websocket", "tokio-tungstenite/native-tls"]
 noise = ["dep:base64", "dep:wa-crypto", "dep:zeroize"]
-http-media = ["noise", "dep:reqwest", "reqwest/rustls"]
+http-media = ["noise", "dep:reqwest", "reqwest/rustls", "reqwest/stream", "dep:futures"]
+image = ["dep:image"]
+link-preview = ["noise", "dep:reqwest", "reqwest/rustls", "reqwest/stream", "dep:futures"]
 
 [dependencies]
 async-trait.workspace = true
@@ -20,6 +22,7 @@ base64 = { workspace = true, optional = true }
 bytes.workspace = true
 flate2.workspace = true
 futures = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 md-5.workspace = true
 prost.workspace = true
 rand.workspace = true
@@ -38,4 +41,5 @@ wa-store = { path = "../wa-store" }
 zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
+proptest = "1.9.0"
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

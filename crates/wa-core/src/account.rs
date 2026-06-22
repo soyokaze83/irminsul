@@ -153,6 +153,17 @@ impl MessageCappingStatus {
             value => Self::Unknown(value.to_owned()),
         }
     }
+
+    #[must_use]
+    pub fn as_wire_str(&self) -> &str {
+        match self {
+            Self::None => "NONE",
+            Self::FirstWarning => "FIRST_WARNING",
+            Self::SecondWarning => "SECOND_WARNING",
+            Self::Capped => "CAPPED",
+            Self::Unknown(value) => value,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,6 +186,17 @@ impl MessageCappingMultiVariationStatus {
             value => Self::Unknown(value.to_owned()),
         }
     }
+
+    #[must_use]
+    pub fn as_wire_str(&self) -> &str {
+        match self {
+            Self::NotEligible => "NOT_ELIGIBLE",
+            Self::NotActive => "NOT_ACTIVE",
+            Self::Active => "ACTIVE",
+            Self::ActiveUpgradeAvailable => "ACTIVE_UPGRADE_AVAILABLE",
+            Self::Unknown(value) => value,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -195,6 +217,17 @@ impl MessageCappingOneTimeExtensionStatus {
             "ACTIVE_IN_CURRENT_CYCLE" => Self::ActiveInCurrentCycle,
             "EXHAUSTED" => Self::Exhausted,
             value => Self::Unknown(value.to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn as_wire_str(&self) -> &str {
+        match self {
+            Self::NotEligible => "NOT_ELIGIBLE",
+            Self::Eligible => "ELIGIBLE",
+            Self::ActiveInCurrentCycle => "ACTIVE_IN_CURRENT_CYCLE",
+            Self::Exhausted => "EXHAUSTED",
+            Self::Unknown(value) => value,
         }
     }
 }

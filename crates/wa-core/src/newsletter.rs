@@ -550,11 +550,11 @@ pub fn parse_newsletter_linked_profile_notification(
     let updates = linked_profile_updates(&value)?;
     let mut mappings = Vec::new();
     for update in updates {
-        let Some(lid) = string_field(update, "jid") else {
+        let Some(lid) = linked_profile_lid(update) else {
             continue;
         };
         let lid = validate_lid_jid(&lid)?;
-        let Some(profiles) = update.get("added_profiles").and_then(Value::as_array) else {
+        let Some(profiles) = linked_profile_added_profiles(update) else {
             continue;
         };
         for profile in profiles {
@@ -777,6 +777,9 @@ fn linked_profile_updates(value: &Value) -> CoreResult<Vec<&Value>> {
     }
     let data = value.get("data").and_then(Value::as_object);
     if let Some(payload) = data.and_then(|data| data.get(PATH_NOTIFY_LINKED_PROFILES)) {
+        if let Some(updates) = payload.get("updates").and_then(Value::as_array) {
+            return Ok(updates.iter().collect());
+        }
         return Ok(match payload {
             Value::Array(updates) => updates.iter().collect(),
             Value::Object(_) => vec![payload],
@@ -788,20 +791,41 @@ fn linked_profile_updates(value: &Value) -> CoreResult<Vec<&Value>> {
     ))
 }
 
-fn notification_updates<'a>(value: &'a Value, label: &str) -> CoreResult<Vec<&'a Value>> {
-    value
-        .get("updates")
-        .and_then(Value::as_array)
-        .map(|updates| updates.iter().collect())
-        .ok_or_else(|| CoreError::Protocol(format!("{label} missing updates")))
+fn notification_updates<'a>(
+    value: &'a Value,
+    label: &str,
+    data_keys: &[&str],
+) -> CoreResult<Vec<&'a Value>> {
+    if let Some(updates) = value.get("updates").and_then(Value::as_array) {
+        return Ok(updates.iter().collect());
+    }
+    let data = value.get("data").and_then(Value::as_object);
+    for key in data_keys {
+        let Some(payload) = data.and_then(|data| data.get(*key)) else {
+            continue;
+        };
+        if let Some(updates) = payload.get("updates").and_then(Value::as_array) {
+            return Ok(updates.iter().collect());
+        }
+        return Ok(match payload {
+            Value::Array(updates) => updates.iter().collect(),
+            Value::Object(_) => vec![payload],
+            _ => Vec::new(),
+        });
+    }
+    Err(CoreError::Protocol(format!("{label} missing updates")))
 }
 
 fn parse_newsletter_settings_notifications(
     value: &Value,
 ) -> CoreResult<Vec<NewsletterNotificationUpdate>> {
     let mut out = Vec::new();
-    for update in notification_updates(value, "newsletter settings notification")? {
-        let Some(jid) = string_field(update, "jid") else {
+    for update in notification_updates(
+        value,
+        "newsletter settings notification",
+        &[PATH_UPDATE_METADATA, OP_NEWSLETTER_UPDATE],
+    )? {
+        let Some(jid) = newsletter_notification_jid(update) else {
             continue;
         };
         let jid = validate_newsletter_jid(&jid)?.to_owned();
@@ -823,11 +847,15 @@ fn parse_newsletter_participant_promote_notifications(
     value: &Value,
 ) -> CoreResult<Vec<NewsletterNotificationUpdate>> {
     let mut out = Vec::new();
-    for update in notification_updates(value, "newsletter admin promotion notification")? {
-        let Some(jid) = string_field(update, "jid") else {
+    for update in notification_updates(
+        value,
+        "newsletter admin promotion notification",
+        &[OP_NEWSLETTER_ADMIN_PROMOTE],
+    )? {
+        let Some(jid) = newsletter_notification_jid(update) else {
             continue;
         };
-        let Some(user) = string_field(update, "user") else {
+        let Some(user) = newsletter_notification_user(update) else {
             continue;
         };
         let jid = validate_newsletter_jid(&jid)?.to_owned();
@@ -864,6 +892,25 @@ fn setting_field_value(value: &Value) -> Option<String> {
     }
 }
 
+fn newsletter_notification_jid(value: &Value) -> Option<String> {
+    ["jid", "newsletter_id", "newsletterId", "id"]
+        .into_iter()
+        .find_map(|key| string_field(value, key))
+}
+
+fn newsletter_notification_user(value: &Value) -> Option<String> {
+    [
+        "user",
+        "user_jid",
+        "userJid",
+        "participant",
+        "participant_jid",
+        "participantJid",
+    ]
+    .into_iter()
+    .find_map(|key| string_field(value, key))
+}
+
 fn stanza_error_suffix(node: &BinaryNode) -> String {
     let code = node.attrs.get("code").or_else(|| node.attrs.get("error"));
     let text = node.attrs.get("text").or_else(|| node.attrs.get("reason"));
@@ -877,25 +924,51 @@ fn stanza_error_suffix(node: &BinaryNode) -> String {
     }
 }
 
+fn linked_profile_lid(value: &Value) -> Option<String> {
+    ["jid", "lid", "lid_jid", "lidJid"]
+        .into_iter()
+        .find_map(|key| string_field(value, key))
+}
+
+fn linked_profile_added_profiles(value: &Value) -> Option<&[Value]> {
+    ["added_profiles", "addedProfiles"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_array).map(Vec::as_slice))
+}
+
 fn linked_profile_pn(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
-        Value::Object(object) => object
-            .get("pn")
-            .or_else(|| object.get("jid"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        Value::Object(object) => ["pn", "jid", "phone_number", "phoneNumber"]
+            .into_iter()
+            .find_map(|key| object.get(key).and_then(Value::as_str).map(str::to_owned)),
         _ => None,
     }
 }
 
 fn notification_operation(node: &BinaryNode, value: &Value) -> Option<String> {
-    string_field(value, "operation").or_else(|| {
-        node.attrs
-            .get("op_name")
-            .filter(|value| !value.is_empty())
-            .cloned()
-    })
+    string_field(value, "operation")
+        .or_else(|| {
+            node.attrs
+                .get("op_name")
+                .filter(|value| !value.is_empty())
+                .cloned()
+        })
+        .or_else(|| newsletter_notification_operation_from_data(value))
+}
+
+fn newsletter_notification_operation_from_data(value: &Value) -> Option<String> {
+    let data = value.get("data").and_then(Value::as_object)?;
+    if data.contains_key(PATH_UPDATE_METADATA) {
+        return Some(OP_NEWSLETTER_UPDATE.to_owned());
+    }
+    if data.contains_key(OP_NEWSLETTER_UPDATE) {
+        return Some(OP_NEWSLETTER_UPDATE.to_owned());
+    }
+    if data.contains_key(OP_NEWSLETTER_ADMIN_PROMOTE) {
+        return Some(OP_NEWSLETTER_ADMIN_PROMOTE.to_owned());
+    }
+    None
 }
 
 fn notification_json(node: &BinaryNode) -> CoreResult<Value> {
@@ -1373,6 +1446,28 @@ mod tests {
             }]
         );
 
+        let notification = BinaryNode::new("notification").with_content(vec![
+            BinaryNode::new("update")
+                .with_attr("op_name", OP_LINKED_PROFILE_UPDATES)
+                .with_content(
+                    br#"{"data":{"xwa2_notify_linked_profiles":{"updates":[{"lid":"ghi:9@lid","addedProfiles":[{"phone_number":"654@c.us"},{"phoneNumber":"987@s.whatsapp.net"}]}]}}}"#.to_vec(),
+                ),
+        ]);
+        let mappings = parse_newsletter_linked_profile_notification(&notification).unwrap();
+        assert_eq!(
+            mappings,
+            vec![
+                NewsletterLinkedProfileMapping {
+                    lid_jid: "ghi@lid".to_owned(),
+                    pn_jid: "654@s.whatsapp.net".to_owned(),
+                },
+                NewsletterLinkedProfileMapping {
+                    lid_jid: "ghi@lid".to_owned(),
+                    pn_jid: "987@s.whatsapp.net".to_owned(),
+                },
+            ]
+        );
+
         let ignored = BinaryNode::new("notification").with_content(vec![
             BinaryNode::new("update")
                 .with_attr("op_name", "OtherOperation")
@@ -1439,6 +1534,37 @@ mod tests {
                 NewsletterParticipantNotification {
                     jid: "abc@newsletter".to_owned(),
                     user_jid: "222@s.whatsapp.net".to_owned(),
+                    action: "promote".to_owned(),
+                    new_role: "ADMIN".to_owned(),
+                }
+            )]
+        );
+
+        let nested_settings = BinaryNode::new("notification").with_content(vec![
+            BinaryNode::new("update").with_content(
+                br#"{"data":{"xwa2_newsletter_update":{"updates":[{"newsletter_id":"abc@newsletter","settings":{"name":"Nested Updates"}}]}}}"#.to_vec(),
+            ),
+        ]);
+        let updates = parse_newsletter_notification_updates(&nested_settings).unwrap();
+        assert_eq!(updates.len(), 1);
+        let NewsletterNotificationUpdate::Settings(update) = &updates[0] else {
+            panic!("expected nested newsletter settings update");
+        };
+        assert_eq!(update.jid, "abc@newsletter");
+        assert_eq!(update.fields["name"], "Nested Updates");
+
+        let nested_promote = BinaryNode::new("notification").with_content(vec![
+            BinaryNode::new("update").with_content(
+                br#"{"data":{"NotificationNewsletterAdminPromote":{"updates":[{"newsletterId":"abc@newsletter","participant_jid":"333@s.whatsapp.net"}]}}}"#.to_vec(),
+            ),
+        ]);
+        let updates = parse_newsletter_notification_updates(&nested_promote).unwrap();
+        assert_eq!(
+            updates,
+            vec![NewsletterNotificationUpdate::Participant(
+                NewsletterParticipantNotification {
+                    jid: "abc@newsletter".to_owned(),
+                    user_jid: "333@s.whatsapp.net".to_owned(),
                     action: "promote".to_owned(),
                     new_role: "ADMIN".to_owned(),
                 }

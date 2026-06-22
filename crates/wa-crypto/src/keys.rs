@@ -14,12 +14,16 @@ pub struct KeyPair {
 #[must_use]
 pub fn generate_key_pair() -> KeyPair {
     let private_bytes: [u8; 32] = rand::random();
-    let private = StaticSecret::from(private_bytes);
-    let public = PublicKey::from(&private);
     KeyPair {
-        public: public.to_bytes(),
-        private: private.to_bytes().into(),
+        public: public_key_from_private(&private_bytes),
+        private: private_bytes.into(),
     }
+}
+
+#[must_use]
+pub fn public_key_from_private(private_key: &[u8; 32]) -> [u8; 32] {
+    let private = StaticSecret::from(*private_key);
+    PublicKey::from(&private).to_bytes()
 }
 
 #[must_use]
@@ -70,6 +74,13 @@ mod tests {
         let prefixed = prefixed_signal_public_key(&public);
         assert_eq!(prefixed[0], SIGNAL_PUBLIC_KEY_VERSION);
         assert_eq!(&prefixed[1..], &public);
+    }
+
+    #[test]
+    fn derives_public_key_from_private_key() {
+        let private = [7u8; 32];
+        let expected = PublicKey::from(&StaticSecret::from(private)).to_bytes();
+        assert_eq!(public_key_from_private(&private), expected);
     }
 
     #[test]

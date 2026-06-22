@@ -206,6 +206,13 @@ pub struct AppStateSyncKeyShareItem {
 }
 
 #[cfg(feature = "noise")]
+#[derive(Clone, PartialEq)]
+pub enum AppStateStoreKeySnapshotDecode {
+    Decoded(DecodedAppStateSnapshot),
+    Blocked(AppStateBlockedCollection),
+}
+
+#[cfg(feature = "noise")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppStateCollectionSyncOutcome {
     pub collection: AppStateCollection,
@@ -1223,6 +1230,30 @@ where
 }
 
 #[cfg(feature = "noise")]
+pub fn decoded_app_state_mutation_from_chat_mutation_patch(
+    patch: &ChatMutationPatch,
+) -> CoreResult<DecodedAppStateMutation> {
+    Ok(DecodedAppStateMutation {
+        operation: patch.operation,
+        key_id: Bytes::new(),
+        index_mac: Bytes::new(),
+        value_mac: Bytes::new(),
+        encrypted_value: Bytes::new(),
+        index: patch.index.clone(),
+        sync_action: build_sync_action_data(patch)?,
+    })
+}
+
+#[cfg(feature = "noise")]
+pub fn event_batch_from_chat_mutation_patch(
+    patch: &ChatMutationPatch,
+    is_initial_sync: bool,
+) -> CoreResult<EventBatch> {
+    let mutation = decoded_app_state_mutation_from_chat_mutation_patch(patch)?;
+    event_batch_from_decoded_app_state_mutations(std::iter::once(&mutation), is_initial_sync)
+}
+
+#[cfg(feature = "noise")]
 pub async fn load_app_state_patch_state<S>(
     store: &S,
     collection: AppStateCollection,
@@ -1272,6 +1303,11 @@ pub fn app_state_sync_key_store_id(key_id: &[u8]) -> CoreResult<String> {
 #[cfg(feature = "noise")]
 pub fn app_state_patch_key_id(patch: &SyncdPatch) -> CoreResult<Bytes> {
     patch_key_id(patch).cloned()
+}
+
+#[cfg(feature = "noise")]
+pub fn app_state_snapshot_key_id(snapshot: &SyncdSnapshot) -> CoreResult<Bytes> {
+    snapshot_key_id(snapshot).cloned()
 }
 
 #[cfg(feature = "noise")]
@@ -1397,6 +1433,26 @@ where
 }
 
 #[cfg(feature = "noise")]
+pub async fn load_app_state_blocked_collections_with_store_keys<S>(
+    store: &S,
+) -> CoreResult<Vec<AppStateBlockedCollection>>
+where
+    S: AuthStore,
+{
+    let mut blocked = Vec::new();
+    for collection in AppStateCollection::all() {
+        if let Some(entry) = load_app_state_blocked_collection(store, *collection).await?
+            && load_app_state_sync_key_data(store, &entry.key_id)
+                .await?
+                .is_some()
+        {
+            blocked.push(entry);
+        }
+    }
+    Ok(blocked)
+}
+
+#[cfg(feature = "noise")]
 pub fn app_state_sync_key_share_from_message(
     message: &ProtoMessage,
     from_me: bool,
@@ -1490,6 +1546,7 @@ where
 {
     let batch = event_batch_from_decoded_app_state_patch(patch, is_initial_sync)?;
     save_app_state_patch_state(store, patch.collection, &patch.next_state).await?;
+    delete_app_state_blocked_collection(store, patch.collection).await?;
     Ok(batch)
 }
 
@@ -1503,6 +1560,7 @@ where
 {
     let batch = event_batch_from_decoded_app_state_snapshot(snapshot)?;
     save_app_state_patch_state(store, snapshot.collection, &snapshot.state).await?;
+    delete_app_state_blocked_collection(store, snapshot.collection).await?;
     Ok(batch)
 }
 
@@ -1540,6 +1598,7 @@ where
                 reference: reference.clone(),
             });
         }
+        delete_app_state_blocked_collection(store, collection.collection).await?;
 
         outcome.collections.push(AppStateCollectionSyncOutcome {
             collection: collection.collection,
@@ -1911,6 +1970,35 @@ where
 }
 
 #[cfg(feature = "noise")]
+pub async fn download_and_decode_app_state_snapshot_with_store_key<S, T>(
+    store: &S,
+    transfer: &MediaTransfer<T>,
+    collection: AppStateCollection,
+    reference: &ExternalBlobReference,
+    fallback_host: Option<&str>,
+) -> CoreResult<AppStateStoreKeySnapshotDecode>
+where
+    S: AuthStore,
+    T: MediaTransport,
+{
+    let snapshot = download_app_state_external_snapshot(transfer, reference, fallback_host).await?;
+    let key_id = app_state_snapshot_key_id(&snapshot)?;
+    let Some(key_data) = load_app_state_sync_key_data(store, &key_id).await? else {
+        let state = load_app_state_patch_state(store, collection).await?;
+        let blocked = AppStateBlockedCollection {
+            collection,
+            key_id,
+            previous_version: state.version(),
+        };
+        save_app_state_blocked_collection(store, &blocked).await?;
+        return Ok(AppStateStoreKeySnapshotDecode::Blocked(blocked));
+    };
+
+    decode_app_state_snapshot(collection, &snapshot, &key_data)
+        .map(AppStateStoreKeySnapshotDecode::Decoded)
+}
+
+#[cfg(feature = "noise")]
 pub async fn download_app_state_external_mutations<T>(
     transfer: &MediaTransfer<T>,
     reference: &ExternalBlobReference,
@@ -1941,14 +2029,20 @@ pub fn build_clean_dirty_bits_node(
 }
 
 pub fn parse_dirty_notification_node(node: &BinaryNode) -> CoreResult<Option<DirtyNotification>> {
-    let dirty = if node.tag == "dirty" {
-        Some(node)
-    } else {
-        child_node(node, "dirty")
-    };
-    let Some(dirty) = dirty else {
-        return Ok(None);
-    };
+    Ok(parse_dirty_notification_nodes(node)?.into_iter().next())
+}
+
+pub fn parse_dirty_notification_nodes(node: &BinaryNode) -> CoreResult<Vec<DirtyNotification>> {
+    if node.tag == "dirty" {
+        return Ok(vec![parse_dirty_notification(node)?]);
+    }
+    node_children(node, "dirty")
+        .into_iter()
+        .map(parse_dirty_notification)
+        .collect()
+}
+
+fn parse_dirty_notification(dirty: &BinaryNode) -> CoreResult<DirtyNotification> {
     let dirty_type = dirty
         .attrs
         .get("type")
@@ -1956,10 +2050,10 @@ pub fn parse_dirty_notification_node(node: &BinaryNode) -> CoreResult<Option<Dir
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| CoreError::Protocol("dirty notification missing type".to_owned()))?;
     let timestamp = optional_u64_attr(dirty, "timestamp")?.or(optional_u64_attr(dirty, "t")?);
-    Ok(Some(DirtyNotification {
+    Ok(DirtyNotification {
         dirty_type: dirty_type.to_owned(),
         timestamp,
-    }))
+    })
 }
 
 pub fn build_app_state_sync_query<I>(
@@ -3054,6 +3148,41 @@ mod tests {
                 timestamp: Some(123),
             })
         );
+        let multi = BinaryNode::new("ib").with_content(vec![
+            BinaryNode::new("dirty")
+                .with_attr("type", "status")
+                .with_attr("timestamp", "111"),
+            BinaryNode::new("dirty")
+                .with_attr("type", "groups")
+                .with_attr("timestamp", "222"),
+            BinaryNode::new("dirty")
+                .with_attr("type", "communities")
+                .with_attr("t", "333"),
+        ]);
+        assert_eq!(
+            parse_dirty_notification_node(&multi).unwrap(),
+            Some(DirtyNotification {
+                dirty_type: "status".to_owned(),
+                timestamp: Some(111),
+            })
+        );
+        assert_eq!(
+            parse_dirty_notification_nodes(&multi).unwrap(),
+            vec![
+                DirtyNotification {
+                    dirty_type: "status".to_owned(),
+                    timestamp: Some(111),
+                },
+                DirtyNotification {
+                    dirty_type: "groups".to_owned(),
+                    timestamp: Some(222),
+                },
+                DirtyNotification {
+                    dirty_type: "communities".to_owned(),
+                    timestamp: Some(333),
+                },
+            ]
+        );
 
         let direct = BinaryNode::new("dirty")
             .with_attr("type", "groups")
@@ -3069,6 +3198,13 @@ mod tests {
         assert_eq!(
             parse_dirty_notification_node(&BinaryNode::new("message")).unwrap(),
             None
+        );
+        assert!(
+            parse_dirty_notification_nodes(&BinaryNode::new("ib").with_content(vec![
+                BinaryNode::new("dirty").with_attr("type", "groups"),
+                BinaryNode::new("dirty"),
+            ]))
+            .is_err()
         );
         assert!(
             parse_dirty_notification_node(
@@ -3469,6 +3605,22 @@ mod tests {
     }
 
     #[cfg(feature = "noise")]
+    #[test]
+    fn maps_chat_mutation_patch_to_local_event_batch() {
+        let patch = build_pin_chat_patch("123@s.whatsapp.net", true, 13).unwrap();
+        let mutation = decoded_app_state_mutation_from_chat_mutation_patch(&patch).unwrap();
+        assert_eq!(mutation.operation, AppStatePatchOperation::Set);
+        assert!(mutation.key_id.is_empty());
+        assert_eq!(mutation.index, patch.index);
+
+        let batch = event_batch_from_chat_mutation_patch(&patch, false).unwrap();
+        assert_eq!(batch.pending_items(), 1);
+        assert_eq!(batch.chats_update.len(), 1);
+        assert_eq!(batch.chats_update[0].jid, "123@s.whatsapp.net");
+        assert_eq!(batch.chats_update[0].fields["pinned"], "13");
+    }
+
+    #[cfg(feature = "noise")]
     #[tokio::test]
     async fn applies_decoded_app_state_patch_to_native_store() {
         let store = temp_store().await;
@@ -3498,6 +3650,16 @@ mod tests {
             &key_data,
         )
         .unwrap();
+        save_app_state_blocked_collection(
+            &store,
+            &AppStateBlockedCollection {
+                collection: AppStateCollection::Regular,
+                key_id: Bytes::copy_from_slice(&key_id),
+                previous_version: 0,
+            },
+        )
+        .await
+        .unwrap();
 
         let batch = apply_decoded_app_state_patch_to_store(&store, &decoded, false)
             .await
@@ -3514,6 +3676,12 @@ mod tests {
             reloaded.index_value_mac_count(),
             bundle.next_state.index_value_mac_count()
         );
+        assert!(
+            load_app_state_blocked_collection(&store, AppStateCollection::Regular)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         store
             .set(
@@ -3528,6 +3696,71 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "noise")]
+    #[tokio::test]
+    async fn applies_decoded_app_state_snapshot_clears_stale_blocked_collection() {
+        let store = temp_store().await;
+        let chat_patch = build_pin_chat_patch("123@s.whatsapp.net", true, 13).unwrap();
+        let key_id = [4u8; 32];
+        let key_data = [8u8; 32];
+        let mutation =
+            encrypt_chat_mutation_patch_with_iv(&chat_patch, &key_id, &key_data, &[3u8; 16])
+                .unwrap();
+        let expected_state = AppStatePatchState::empty()
+            .apply_hash_mutations_at_version(
+                11,
+                [AppStateHashMutation::from_encrypted(&mutation).unwrap()],
+            )
+            .unwrap();
+        let keys = wa_crypto::derive_app_state_keys(&key_data).unwrap();
+        let snapshot_mac = wa_crypto::app_state_snapshot_mac(
+            expected_state.hash(),
+            11,
+            AppStateCollection::RegularLow.name(),
+            &keys,
+        )
+        .unwrap();
+        let snapshot = SyncdSnapshot {
+            version: Some(SyncdVersion { version: Some(11) }),
+            records: vec![mutation.mutation.record.clone().unwrap()],
+            mac: Some(Bytes::copy_from_slice(&snapshot_mac)),
+            key_id: Some(KeyId {
+                id: Some(Bytes::copy_from_slice(&key_id)),
+            }),
+        };
+        let decoded =
+            decode_app_state_snapshot(AppStateCollection::RegularLow, &snapshot, &key_data)
+                .unwrap();
+        save_app_state_blocked_collection(
+            &store,
+            &AppStateBlockedCollection {
+                collection: AppStateCollection::RegularLow,
+                key_id: Bytes::copy_from_slice(&key_id),
+                previous_version: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let batch = apply_decoded_app_state_snapshot_to_store(&store, &decoded)
+            .await
+            .unwrap();
+        assert_eq!(batch.chats_update.len(), 1);
+        assert_eq!(batch.chats_update[0].jid, "123@s.whatsapp.net");
+        assert_eq!(batch.chats_update[0].fields["pinned"], "13");
+        assert!(
+            load_app_state_blocked_collection(&store, AppStateCollection::RegularLow)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let stored = load_app_state_patch_state(&store, AppStateCollection::RegularLow)
+            .await
+            .unwrap();
+        assert_eq!(stored.version(), expected_state.version());
+        assert_eq!(stored.hash(), expected_state.hash());
     }
 
     #[cfg(feature = "noise")]
@@ -3625,6 +3858,75 @@ mod tests {
 
     #[cfg(feature = "noise")]
     #[tokio::test]
+    async fn explicit_key_app_state_sync_response_clears_stale_blocked_collection() {
+        let store = temp_store().await;
+        let previous = load_app_state_patch_state(&store, AppStateCollection::Regular)
+            .await
+            .unwrap();
+        let key_id = [4u8; 32];
+        let key_data = [8u8; 32];
+        let patch =
+            build_quick_reply_patch(QuickReplyMutation::new("qr-1", "/hi", "hello"), 19).unwrap();
+        let mutation =
+            encrypt_chat_mutation_patch_with_iv(&patch, &key_id, &key_data, &[3u8; 16]).unwrap();
+        let bundle = build_app_state_patch_bundle(
+            AppStateCollection::Regular,
+            &previous,
+            &key_id,
+            &key_data,
+            [mutation],
+        )
+        .unwrap();
+        save_app_state_blocked_collection(
+            &store,
+            &AppStateBlockedCollection {
+                collection: AppStateCollection::Regular,
+                key_id: Bytes::copy_from_slice(&key_id),
+                previous_version: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            load_app_state_blocked_collection(&store, AppStateCollection::Regular)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let response = AppStateSyncResponse {
+            collections: vec![AppStateSyncCollection {
+                collection: AppStateCollection::Regular,
+                version: Some(bundle.next_state.version()),
+                has_more_patches: false,
+                snapshot: None,
+                patches: vec![bundle.patch.clone()],
+            }],
+        };
+        let outcome = apply_app_state_sync_response_to_store(&store, &response, &key_data, false)
+            .await
+            .unwrap();
+        assert!(outcome.blocked.is_empty());
+        assert_eq!(outcome.batches.len(), 1);
+        assert_eq!(outcome.batches[0].quick_replies_update[0].id, "qr-1");
+        assert_eq!(outcome.collections[0].applied_patches, 1);
+        assert!(
+            load_app_state_blocked_collection(&store, AppStateCollection::Regular)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            load_app_state_patch_state(&store, AppStateCollection::Regular)
+                .await
+                .unwrap()
+                .version(),
+            bundle.next_state.version()
+        );
+    }
+
+    #[cfg(feature = "noise")]
+    #[tokio::test]
     async fn app_state_sync_response_with_store_keys_blocks_missing_key_then_applies() {
         let store = temp_store().await;
         let previous = load_app_state_patch_state(&store, AppStateCollection::Regular)
@@ -3708,6 +4010,82 @@ mod tests {
                 .version(),
             bundle.next_state.version()
         );
+        assert!(
+            load_app_state_blocked_collection(&store, AppStateCollection::Regular)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "noise")]
+    #[tokio::test]
+    async fn saving_app_state_sync_key_share_reports_matching_blocked_collection() {
+        let store = temp_store().await;
+        let previous = load_app_state_patch_state(&store, AppStateCollection::Regular)
+            .await
+            .unwrap();
+        let key_id = [4u8; 32];
+        let key_data = [8u8; 32];
+        let unrelated_key_id = [5u8; 32];
+        let unrelated_key_data = [9u8; 32];
+        let patch =
+            build_quick_reply_patch(QuickReplyMutation::new("qr-1", "/hi", "hello"), 19).unwrap();
+        let mutation =
+            encrypt_chat_mutation_patch_with_iv(&patch, &key_id, &key_data, &[3u8; 16]).unwrap();
+        let bundle = build_app_state_patch_bundle(
+            AppStateCollection::Regular,
+            &previous,
+            &key_id,
+            &key_data,
+            [mutation],
+        )
+        .unwrap();
+        let response = AppStateSyncResponse {
+            collections: vec![AppStateSyncCollection {
+                collection: AppStateCollection::Regular,
+                version: Some(bundle.next_state.version()),
+                has_more_patches: false,
+                snapshot: None,
+                patches: vec![bundle.patch.clone()],
+            }],
+        };
+
+        let blocked = apply_app_state_sync_response_with_store_keys(&store, &response, false)
+            .await
+            .unwrap();
+        assert_eq!(blocked.blocked.len(), 1);
+
+        let unblocked = save_app_state_sync_key_share(
+            &store,
+            [
+                AppStateSyncKeyShareItem {
+                    key_id: Bytes::copy_from_slice(&unrelated_key_id),
+                    key_data: Bytes::copy_from_slice(&unrelated_key_data),
+                },
+                AppStateSyncKeyShareItem {
+                    key_id: Bytes::copy_from_slice(&key_id),
+                    key_data: Bytes::copy_from_slice(&key_data),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(unblocked, blocked.blocked);
+        assert_eq!(
+            load_app_state_sync_key_data(&store, &unrelated_key_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            Bytes::copy_from_slice(&unrelated_key_data)
+        );
+
+        let applied = apply_app_state_sync_response_with_store_keys(&store, &response, false)
+            .await
+            .unwrap();
+        assert!(applied.blocked.is_empty());
+        assert_eq!(applied.batches.len(), 1);
+        assert_eq!(applied.batches[0].quick_replies_update[0].id, "qr-1");
         assert!(
             load_app_state_blocked_collection(&store, AppStateCollection::Regular)
                 .await
@@ -4178,6 +4556,94 @@ mod tests {
                 "https://blob.test/app-state/snapshot".to_owned(),
             ]
         );
+    }
+
+    #[cfg(feature = "noise")]
+    #[tokio::test]
+    async fn downloads_external_app_state_snapshot_with_store_key_blocks_then_decodes() {
+        let store = temp_store().await;
+        let chat_patch = build_pin_chat_patch("123@s.whatsapp.net", true, 13).unwrap();
+        let key_id = [4u8; 32];
+        let key_data = [8u8; 32];
+        let mutation =
+            encrypt_chat_mutation_patch_with_iv(&chat_patch, &key_id, &key_data, &[3u8; 16])
+                .unwrap();
+        let expected_state = AppStatePatchState::empty()
+            .apply_hash_mutations_at_version(
+                11,
+                [AppStateHashMutation::from_encrypted(&mutation).unwrap()],
+            )
+            .unwrap();
+        let keys = wa_crypto::derive_app_state_keys(&key_data).unwrap();
+        let snapshot_mac = wa_crypto::app_state_snapshot_mac(
+            expected_state.hash(),
+            11,
+            AppStateCollection::Regular.name(),
+            &keys,
+        )
+        .unwrap();
+        let snapshot = SyncdSnapshot {
+            version: Some(SyncdVersion { version: Some(11) }),
+            records: vec![mutation.mutation.record.clone().unwrap()],
+            mac: Some(Bytes::copy_from_slice(&snapshot_mac)),
+            key_id: Some(KeyId {
+                id: Some(Bytes::copy_from_slice(&key_id)),
+            }),
+        };
+        let snapshot_bytes = Bytes::from(snapshot.encode_to_vec());
+        let encrypted = wa_crypto::encrypt_media_bytes_with_key(
+            &snapshot_bytes,
+            wa_crypto::MediaKind::AppState,
+            &[6u8; 32],
+        )
+        .unwrap();
+        let reference = app_state_external_blob_reference(&encrypted, "/app-state/snapshot");
+        let transport = AppStateBlobTransport::default();
+        transport.add_download(
+            "https://blob.test/app-state/snapshot",
+            encrypted.ciphertext_with_mac.clone(),
+        );
+        let transfer = crate::media::MediaTransfer::new(transport);
+
+        let missing = download_and_decode_app_state_snapshot_with_store_key(
+            &store,
+            &transfer,
+            AppStateCollection::Regular,
+            &reference,
+            Some("blob.test"),
+        )
+        .await
+        .unwrap();
+        let AppStateStoreKeySnapshotDecode::Blocked(blocked) = missing else {
+            panic!("missing store key should block snapshot recovery");
+        };
+        assert_eq!(blocked.collection, AppStateCollection::Regular);
+        assert_eq!(blocked.key_id, Bytes::copy_from_slice(&key_id));
+        assert_eq!(blocked.previous_version, 0);
+        assert_eq!(
+            load_app_state_blocked_collection(&store, AppStateCollection::Regular)
+                .await
+                .unwrap(),
+            Some(blocked)
+        );
+
+        save_app_state_sync_key_data(&store, &key_id, &key_data)
+            .await
+            .unwrap();
+        let decoded = download_and_decode_app_state_snapshot_with_store_key(
+            &store,
+            &transfer,
+            AppStateCollection::Regular,
+            &reference,
+            Some("blob.test"),
+        )
+        .await
+        .unwrap();
+        let AppStateStoreKeySnapshotDecode::Decoded(decoded) = decoded else {
+            panic!("stored key should decode snapshot");
+        };
+        assert_eq!(decoded.state, expected_state);
+        assert_eq!(decoded.mutations.len(), 1);
     }
 
     #[cfg(feature = "noise")]

@@ -3,16 +3,20 @@ use prost::Message as _;
 use wa_binary::{BinaryNode, jid_decode};
 use wa_proto::proto::{Message, MessageKey};
 
+use crate::message::future_proof_inner_message;
 use crate::{CoreError, CoreResult};
 
 const REPORTING_TOKEN_VERSION: &str = "2";
 const REPORT_TOKEN_INFO: &[u8] = b"Report Token";
 const REPORTING_TOKEN_BYTES: usize = 16;
+const MESSAGE_SECRET_BYTES: usize = 32;
+const MAX_FUTURE_PROOF_MESSAGE_SECRET_WRAPPERS: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ReportingField {
     num: u32,
     recursive: bool,
+    recurse_as_message: bool,
     children: &'static [ReportingField],
 }
 
@@ -33,6 +37,7 @@ const fn keep(num: u32) -> ReportingField {
     ReportingField {
         num,
         recursive: false,
+        recurse_as_message: false,
         children: &[],
     }
 }
@@ -41,13 +46,23 @@ const fn nested(num: u32, children: &'static [ReportingField]) -> ReportingField
     ReportingField {
         num,
         recursive: true,
+        recurse_as_message: false,
         children,
+    }
+}
+
+const fn nested_message(num: u32) -> ReportingField {
+    ReportingField {
+        num,
+        recursive: true,
+        recurse_as_message: true,
+        children: &[],
     }
 }
 
 const CONTEXT_21_22: &[ReportingField] = &[keep(21), keep(22)];
 const PAIR_1_2: &[ReportingField] = &[keep(1), keep(2)];
-const SINGLE_MESSAGE: &[ReportingField] = &[nested(1, &[])];
+const SINGLE_MESSAGE: &[ReportingField] = &[nested_message(1)];
 
 const IMAGE_FIELDS: &[ReportingField] = &[
     keep(2),
@@ -113,6 +128,20 @@ const POLL_FIELDS: &[ReportingField] = &[
 ];
 const POLL_RESULT_FIELDS: &[ReportingField] =
     &[keep(1), nested(2, &[keep(1)]), nested(3, CONTEXT_21_22)];
+const EVENT_FIELDS: &[ReportingField] = &[
+    nested(1, CONTEXT_21_22),
+    keep(2),
+    keep(3),
+    keep(4),
+    nested(5, LOCATION_FIELDS),
+    keep(6),
+    keep(7),
+    keep(8),
+    keep(9),
+    keep(10),
+    keep(11),
+    keep(12),
+];
 
 const REPORTING_FIELDS: &[ReportingField] = &[
     keep(1),
@@ -137,6 +166,7 @@ const REPORTING_FIELDS: &[ReportingField] = &[
     nested(64, POLL_FIELDS),
     nested(66, VIDEO_FIELDS),
     nested(74, SINGLE_MESSAGE),
+    nested(75, EVENT_FIELDS),
     nested(87, SINGLE_MESSAGE),
     nested(88, POLL_RESULT_FIELDS),
     nested(92, SINGLE_MESSAGE),
@@ -169,13 +199,14 @@ pub fn build_reporting_token_node_from_encoded(
         return Ok(None);
     }
 
-    let Some(message_secret) = message
-        .message_context_info
-        .as_ref()
-        .and_then(|context| context.message_secret.as_ref())
-    else {
+    let Some(message_secret) = reporting_message_secret(message) else {
         return Ok(None);
     };
+    if message_secret.len() != MESSAGE_SECRET_BYTES {
+        return Err(CoreError::Payload(
+            "reporting token message secret must be 32 bytes".to_owned(),
+        ));
+    }
     let Some(message_id) = key.id.as_deref().filter(|id| !id.is_empty()) else {
         return Ok(None);
     };
@@ -209,6 +240,21 @@ pub fn build_reporting_token_node_from_encoded(
             .with_attr("v", REPORTING_TOKEN_VERSION)
             .with_content(reporting_token),
     ])))
+}
+
+fn reporting_message_secret(message: &Message) -> Option<&Bytes> {
+    let mut current = message;
+    for _ in 0..=MAX_FUTURE_PROOF_MESSAGE_SECRET_WRAPPERS {
+        if let Some(secret) = current
+            .message_context_info
+            .as_ref()
+            .and_then(|context| context.message_secret.as_ref())
+        {
+            return Some(secret);
+        }
+        current = future_proof_inner_message(current)?;
+    }
+    None
 }
 
 fn reporting_key_jids(key: &MessageKey) -> Option<(&str, &str)> {
@@ -284,10 +330,13 @@ fn extract_reporting_token_content(data: &[u8], cfg: &'static [ReportingField]) 
                 };
 
                 if field_cfg.recursive {
-                    let sub = extract_reporting_token_content(
-                        &data[value_start..value_end],
-                        field_cfg.children,
-                    )?;
+                    let children = if field_cfg.recurse_as_message {
+                        REPORTING_FIELDS
+                    } else {
+                        field_cfg.children
+                    };
+                    let sub =
+                        extract_reporting_token_content(&data[value_start..value_end], children)?;
                     if !sub.is_empty() {
                         let mut bytes = Vec::with_capacity(
                             encoded_varint_len(tag.value)
@@ -474,6 +523,93 @@ mod tests {
     }
 
     #[test]
+    fn reporting_token_uses_participant_jid_for_message_key_direction() {
+        let message = Message {
+            conversation: Some("hello".to_owned()),
+            message_context_info: Some(MessageContextInfo {
+                message_secret: Some(Bytes::from(vec![7u8; 32])),
+                ..MessageContextInfo::default()
+            }),
+            ..Message::default()
+        };
+        let outgoing = MessageKey {
+            remote_jid: Some("123@s.whatsapp.net".to_owned()),
+            from_me: Some(true),
+            id: Some("msg-1".to_owned()),
+            participant: None,
+        };
+        let incoming = MessageKey {
+            from_me: Some(false),
+            ..outgoing.clone()
+        };
+        let outgoing_group = MessageKey {
+            remote_jid: Some("456@g.us".to_owned()),
+            from_me: Some(true),
+            id: Some("msg-1".to_owned()),
+            participant: Some("999@s.whatsapp.net".to_owned()),
+        };
+        let incoming_group = MessageKey {
+            from_me: Some(false),
+            participant: Some("123@s.whatsapp.net".to_owned()),
+            ..outgoing_group.clone()
+        };
+        let outgoing_token = reporting_token_bytes(&message, &outgoing);
+        let incoming_token = reporting_token_bytes(&message, &incoming);
+        let outgoing_group_token = reporting_token_bytes(&message, &outgoing_group);
+        let incoming_group_token = reporting_token_bytes(&message, &incoming_group);
+
+        assert_eq!(outgoing_token, incoming_token);
+        assert_ne!(outgoing_group_token, incoming_group_token);
+        assert_ne!(outgoing_token, outgoing_group_token);
+    }
+
+    #[test]
+    fn reporting_token_includes_future_proof_wrapped_message_content() {
+        let first = wrapped_reporting_token_bytes("wrapped one");
+        let second = wrapped_reporting_token_bytes("wrapped two");
+
+        assert_eq!(first.len(), REPORTING_TOKEN_BYTES);
+        assert_eq!(second.len(), REPORTING_TOKEN_BYTES);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn reporting_token_secret_lookup_covers_allowlisted_future_proof_wrappers() {
+        let lottie = reporting_token_bytes_for_message(Message {
+            lottie_sticker_message: Some(Box::new(future_proof_text_message("lottie", 7))),
+            ..Message::default()
+        });
+        let status_mention = reporting_token_bytes_for_message(Message {
+            status_mention_message: Some(Box::new(future_proof_text_message("status", 8))),
+            ..Message::default()
+        });
+        let group_status_mention = reporting_token_bytes_for_message(Message {
+            group_status_mention_message: Some(Box::new(future_proof_text_message("group", 9))),
+            ..Message::default()
+        });
+        let poll_v4 = reporting_token_bytes_for_message(Message {
+            poll_creation_message_v4: Some(Box::new(future_proof_text_message("poll-v4", 10))),
+            ..Message::default()
+        });
+
+        for token in [&lottie, &status_mention, &group_status_mention, &poll_v4] {
+            assert_eq!(token.len(), REPORTING_TOKEN_BYTES);
+        }
+        assert_ne!(lottie, status_mention);
+        assert_ne!(group_status_mention, poll_v4);
+    }
+
+    #[test]
+    fn reporting_token_includes_event_message_content() {
+        let first = reporting_token_bytes_for_message(event_message_with_secret("event one", 11));
+        let second = reporting_token_bytes_for_message(event_message_with_secret("event two", 11));
+
+        assert_eq!(first.len(), REPORTING_TOKEN_BYTES);
+        assert_eq!(second.len(), REPORTING_TOKEN_BYTES);
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn skips_reporting_token_for_ineligible_or_incomplete_messages() {
         let key = MessageKey {
             remote_jid: Some("123@s.whatsapp.net".to_owned()),
@@ -522,6 +658,42 @@ mod tests {
     }
 
     #[test]
+    fn rejects_reporting_token_with_malformed_message_secret() {
+        let message = Message {
+            conversation: Some("hello".to_owned()),
+            message_context_info: Some(MessageContextInfo {
+                message_secret: Some(Bytes::from_static(b"short")),
+                ..MessageContextInfo::default()
+            }),
+            ..Message::default()
+        };
+        let key = MessageKey {
+            remote_jid: Some("123@s.whatsapp.net".to_owned()),
+            from_me: Some(true),
+            id: Some("msg-1".to_owned()),
+            participant: None,
+        };
+
+        let err = build_reporting_token_node(&message, &key).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("reporting token message secret must be 32 bytes")
+        );
+
+        let wrapped = Message {
+            view_once_message: Some(Box::new(message::FutureProofMessage {
+                message: Some(Box::new(message)),
+            })),
+            ..Message::default()
+        };
+        let err = build_reporting_token_node(&wrapped, &key).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("reporting token message secret must be 32 bytes")
+        );
+    }
+
+    #[test]
     fn reporting_token_filter_sorts_allowed_fields_and_drops_unknown_fields() {
         let data = [
             0x12, 0x03, b'b', b'a', b'd', 0x32, 0x02, 0x08, 0x01, 0x0a, 0x02, b'o', b'k',
@@ -534,5 +706,71 @@ mod tests {
             vec![0x0a, 0x02, b'o', b'k', 0x32, 0x02, 0x08, 0x01]
         );
         assert!(extract_reporting_token_content(&[0x80], REPORTING_FIELDS).is_none());
+    }
+
+    fn reporting_token_bytes(message: &Message, key: &MessageKey) -> Bytes {
+        let node = build_reporting_token_node(message, key).unwrap().unwrap();
+        let Some(BinaryNodeContent::Nodes(children)) = node.content else {
+            panic!("reporting node should contain a token child");
+        };
+        let Some(BinaryNodeContent::Bytes(token)) = &children[0].content else {
+            panic!("reporting token child should contain bytes");
+        };
+        token.clone()
+    }
+
+    fn reporting_token_bytes_for_message(message: Message) -> Bytes {
+        let key = MessageKey {
+            remote_jid: Some("123@s.whatsapp.net".to_owned()),
+            from_me: Some(true),
+            id: Some("msg-1".to_owned()),
+            participant: None,
+        };
+
+        reporting_token_bytes(&message, &key)
+    }
+
+    fn wrapped_reporting_token_bytes(text: &str) -> Bytes {
+        let message = Message {
+            view_once_message: Some(Box::new(message::FutureProofMessage {
+                message: Some(Box::new(message_with_reporting_secret(text, 7))),
+            })),
+            ..Message::default()
+        };
+
+        reporting_token_bytes_for_message(message)
+    }
+
+    fn future_proof_text_message(text: &str, secret_byte: u8) -> message::FutureProofMessage {
+        message::FutureProofMessage {
+            message: Some(Box::new(message_with_reporting_secret(text, secret_byte))),
+        }
+    }
+
+    fn event_message_with_secret(name: &str, secret_byte: u8) -> Message {
+        Message {
+            event_message: Some(Box::new(message::EventMessage {
+                name: Some(name.to_owned()),
+                join_link: Some("https://call.example.invalid/reporting".to_owned()),
+                start_time: Some(1_700_000_300),
+                ..message::EventMessage::default()
+            })),
+            message_context_info: Some(MessageContextInfo {
+                message_secret: Some(Bytes::from(vec![secret_byte; MESSAGE_SECRET_BYTES])),
+                ..MessageContextInfo::default()
+            }),
+            ..Message::default()
+        }
+    }
+
+    fn message_with_reporting_secret(text: &str, secret_byte: u8) -> Message {
+        Message {
+            conversation: Some(text.to_owned()),
+            message_context_info: Some(MessageContextInfo {
+                message_secret: Some(Bytes::from(vec![secret_byte; MESSAGE_SECRET_BYTES])),
+                ..MessageContextInfo::default()
+            }),
+            ..Message::default()
+        }
     }
 }

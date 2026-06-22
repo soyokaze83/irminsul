@@ -1,0 +1,392 @@
+{
+  "schema": "wa-binary-node-fixture-v1",
+  "source": "expanded-seeded-rust-codec-fixtures; replace or extend with reference-generated fixtures via tools/compat/generate-binary-node-fixtures.mjs",
+  "fixtures": [
+    {
+      "name": "iq_ping",
+      "encoded_hex": "00f8061911030429f801f80156",
+      "node": {
+        "tag": "iq",
+        "attrs": {
+          "to": "s.whatsapp.net",
+          "type": "get"
+        },
+        "content": [
+          {
+            "tag": "ping"
+          }
+        ]
+      }
+    },
+    {
+      "name": "message_enc",
+      "encoded_hex": "00f8081306faff8312345ffc0e732e77686174736170702e6e657408fb85abcdef123f0438f801f8041d0453fc050102030405",
+      "node": {
+        "tag": "message",
+        "attrs": {
+          "from": "12345@s.whatsapp.net",
+          "id": "ABCDEF123",
+          "type": "text"
+        },
+        "content": [
+          {
+            "tag": "enc",
+            "attrs": {
+              "type": "pkmsg"
+            },
+            "content": {
+              "bytes_hex": "0102030405"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "retry_receipt",
+      "encoded_hex": "00f8080706f70001ff82123f08fc0772657472792d3104ec0bf802f805ec0b4145a8e3f802adfc0401020304",
+      "node": {
+        "tag": "receipt",
+        "attrs": {
+          "from": "123:1@s.whatsapp.net",
+          "id": "retry-1",
+          "type": "retry"
+        },
+        "content": [
+          {
+            "tag": "retry",
+            "attrs": {
+              "count": "2",
+              "error": "7"
+            }
+          },
+          {
+            "tag": "registration",
+            "content": {
+              "bytes_hex": "01020304"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "presence_device",
+      "encoded_hex": "00f8091f06f70007ff82123f89fc0a4465736b204167656e7411fa0bfc0962726f6164636173740488",
+      "node": {
+        "tag": "presence",
+        "attrs": {
+          "from": "123:7@s.whatsapp.net",
+          "name": "Desk Agent",
+          "to": "status@broadcast",
+          "type": "available"
+        }
+      }
+    },
+    {
+      "name": "app_state_sync_query",
+      "encoded_hex": "00f80a1908fc0b6170702d73746174652d311103042916ec9cf801f804ece35445f802f805ec5b89eced54ee52f805ec5b89ed2854e3",
+      "node": {
+        "tag": "iq",
+        "attrs": {
+          "id": "app-state-1",
+          "to": "s.whatsapp.net",
+          "type": "get",
+          "xmlns": "w:sync:app:state"
+        },
+        "content": [
+          {
+            "tag": "sync",
+            "attrs": {
+              "version": "2"
+            },
+            "content": [
+              {
+                "tag": "collection",
+                "attrs": {
+                  "name": "regular_high",
+                  "version": "42"
+                }
+              },
+              {
+                "tag": "collection",
+                "attrs": {
+                  "name": "regular_low",
+                  "version": "7"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "history_sync_notification",
+      "encoded_hex": "00f80809060308fc06686973742d3104eccbf801f806fc07686973746f7279fc0b6368756e6b2d6f7264657255fc0870726f6772657373ee96fc0f08011204deadbeef1a0548656c6c6f",
+      "node": {
+        "tag": "notification",
+        "attrs": {
+          "from": "s.whatsapp.net",
+          "id": "hist-1",
+          "type": "server_sync"
+        },
+        "content": [
+          {
+            "tag": "history",
+            "attrs": {
+              "chunk-order": "1",
+              "progress": "80"
+            },
+            "content": {
+              "bytes_hex": "08011204deadbeef1a0548656c6c6f"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "media_message_attrs",
+      "encoded_hex": "00f80a1306faff8312345ffc0e732e77686174736170702e6e657408fc084d4544494131323311faff8367890ffc0e732e77686174736170702e6e65740437f802f8061d044d5145fc1000112233445566778899aabbccddeefff80b37cefc162f762f7436322e373131382d32342f6578616d706c65fc0866696c6568617368fb08abcdef0123456789fc136d656469615f6b65795f74696d657374616d70ff0517000000000443d2fc2e68747470733a2f2f6d6d672e77686174736170702e6e65742f762f7436322e373131382d32342f6578616d706c65",
+      "node": {
+        "tag": "message",
+        "attrs": {
+          "from": "12345@s.whatsapp.net",
+          "id": "MEDIA123",
+          "to": "67890@s.whatsapp.net",
+          "type": "media"
+        },
+        "content": [
+          {
+            "tag": "enc",
+            "attrs": {
+              "type": "msg",
+              "v": "2"
+            },
+            "content": {
+              "bytes_hex": "00112233445566778899aabbccddeeff"
+            }
+          },
+          {
+            "tag": "media",
+            "attrs": {
+              "direct_path": "/v/t62.7118-24/example",
+              "filehash": "ABCDEF0123456789",
+              "media_key_timestamp": "1700000000",
+              "type": "image",
+              "url": "https://mmg.whatsapp.net/v/t62.7118-24/example"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "group_participant_notification",
+      "encoded_hex": "00f8080906faff8611111a22222ffc04672e757308fc0767726f75702d3104ec20f802f805050cf70001ff82123f0497f805050cfafc03616263fc036c696404af",
+      "node": {
+        "tag": "notification",
+        "attrs": {
+          "from": "11111-22222@g.us",
+          "id": "group-1",
+          "type": "w:gp2"
+        },
+        "content": [
+          {
+            "tag": "participant",
+            "attrs": {
+              "jid": "123:1@s.whatsapp.net",
+              "type": "add"
+            }
+          },
+          {
+            "tag": "participant",
+            "attrs": {
+              "jid": "abc@lid",
+              "type": "remove"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "usync_query",
+      "encoded_hex": "00f80a1908fc077573796e632d31110304291679f801f80c797de58f2d619b6a6dfc03736964fc06616263313233f802f8026df803f80125f8010bf8010ff80271f802f8030e0cfaff8312345ffc0e732e77686174736170702e6e6574f8030e0cfafc03616263fc036c6964",
+      "node": {
+        "tag": "iq",
+        "attrs": {
+          "id": "usync-1",
+          "to": "s.whatsapp.net",
+          "type": "get",
+          "xmlns": "usync"
+        },
+        "content": [
+          {
+            "tag": "usync",
+            "attrs": {
+              "context": "interactive",
+              "index": "0",
+              "last": "true",
+              "mode": "query",
+              "sid": "abc123"
+            },
+            "content": [
+              {
+                "tag": "query",
+                "content": [
+                  {
+                    "tag": "contact"
+                  },
+                  {
+                    "tag": "status"
+                  },
+                  {
+                    "tag": "devices"
+                  }
+                ]
+              },
+              {
+                "tag": "list",
+                "content": [
+                  {
+                    "tag": "user",
+                    "attrs": {
+                      "jid": "12345@s.whatsapp.net"
+                    }
+                  },
+                  {
+                    "tag": "user",
+                    "attrs": {
+                      "jid": "abc@lid"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "jid_device_domains",
+      "encoded_hex": "00f80a1908fc0d6a69642d646f6d61696e732d311103045a1679f801f80279f801f80271f803f8030e0cf70107fc03616263f8030e0cf78009ff82321ff8030e0cf7810afc03646566",
+      "node": {
+        "tag": "iq",
+        "attrs": {
+          "id": "jid-domains-1",
+          "to": "s.whatsapp.net",
+          "type": "set",
+          "xmlns": "usync"
+        },
+        "content": [
+          {
+            "tag": "usync",
+            "content": [
+              {
+                "tag": "list",
+                "content": [
+                  {
+                    "tag": "user",
+                    "attrs": {
+                      "jid": "abc:7@lid"
+                    }
+                  },
+                  {
+                    "tag": "user",
+                    "attrs": {
+                      "jid": "321:9@hosted"
+                    }
+                  },
+                  {
+                    "tag": "user",
+                    "attrs": {
+                      "jid": "def:10@hosted.lid"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "stream_error_text",
+      "encoded_hex": "00f8049d70ff82515ff801f802ec0eff82515f",
+      "node": {
+        "tag": "stream:error",
+        "attrs": {
+          "code": "515"
+        },
+        "content": [
+          {
+            "tag": "conflict",
+            "content": {
+              "text": "515"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "receipt_list_items",
+      "encoded_hex": "00f80a0706faff8611111a22222ffc04672e757308fc056d73672d3105faff82123ffc0e732e77686174736170702e6e6574042af801f80271f802f8033f08fc0161f8073f08fc016205f70001ff82123f1aff051700000001",
+      "node": {
+        "tag": "receipt",
+        "attrs": {
+          "from": "11111-22222@g.us",
+          "id": "msg-1",
+          "participant": "123@s.whatsapp.net",
+          "type": "read"
+        },
+        "content": [
+          {
+            "tag": "list",
+            "content": [
+              {
+                "tag": "item",
+                "attrs": {
+                  "id": "a"
+                }
+              },
+              {
+                "tag": "item",
+                "attrs": {
+                  "id": "b",
+                  "participant": "123:1@s.whatsapp.net",
+                  "t": "1700000001"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "call_offer",
+      "encoded_hex": "00f8066406faff8312345ffc0e732e77686174736170702e6e657408fc0663616c6c2d31f801f808ec1c47faff8312345ffc0e732e77686174736170702e6e657468fc0663616c6c2d3104a1f801f805a11dec1eec1dff8316000f",
+      "node": {
+        "tag": "call",
+        "attrs": {
+          "from": "12345@s.whatsapp.net",
+          "id": "call-1"
+        },
+        "content": [
+          {
+            "tag": "offer",
+            "attrs": {
+              "call-creator": "12345@s.whatsapp.net",
+              "call-id": "call-1",
+              "type": "audio"
+            },
+            "content": [
+              {
+                "tag": "audio",
+                "attrs": {
+                  "enc": "opus",
+                  "rate": "16000"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -7,4 +7,15 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+bytes.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
 wa-binary = { path = "../wa-binary" }
+
+[dev-dependencies]
+prost.workspace = true
+wa-core = { path = "../wa-core", default-features = false, features = ["noise"] }
+wa-crypto = { path = "../wa-crypto" }
+wa-proto = { path = "../wa-proto" }
+x25519-dalek.workspace = true

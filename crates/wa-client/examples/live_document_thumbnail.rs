@@ -1,0 +1,87 @@
+use std::{env, error::Error, fs, path::PathBuf};
+use wa_client::prelude::*;
+
+fn session_db_path() -> PathBuf {
+    env::var_os("WA_SESSION_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".wa/session.sqlite"))
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn thumbnail_options() -> Result<PdfThumbnailOptions, Box<dyn Error>> {
+    let mut options = PdfThumbnailOptions::default();
+    if let Some(pdftoppm_path) = optional_env("WA_DOCUMENT_THUMBNAIL_PDFTOPPM") {
+        options.pdftoppm_path = PathBuf::from(pdftoppm_path);
+    }
+    if let Some(page) = optional_env("WA_DOCUMENT_THUMBNAIL_PAGE") {
+        options.page = page.parse()?;
+    }
+    if let Some(dpi) = optional_env("WA_DOCUMENT_THUMBNAIL_DPI") {
+        options.dpi = dpi.parse()?;
+    }
+    Ok(options)
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let Some(target_jid) = optional_env("WA_TARGET_JID") else {
+        println!("set WA_TARGET_JID to send a document with a generated remote thumbnail");
+        return Ok(());
+    };
+    let Some(document_path) = optional_env("WA_DOCUMENT_PATH") else {
+        println!("set WA_DOCUMENT_PATH to a local PDF document");
+        return Ok(());
+    };
+    let document_path = PathBuf::from(document_path);
+    let mimetype =
+        optional_env("WA_DOCUMENT_MIMETYPE").unwrap_or_else(|| "application/pdf".to_owned());
+
+    let plaintext = fs::read(&document_path)?;
+    let store = SqliteAuthStore::open(session_db_path()).await?;
+    let client = Client::builder(store).connect().await?;
+    let validated = client.connect_websocket().await?;
+
+    let media_connection = client
+        .fetch_media_connection_info(validated.connection())
+        .await?;
+    let transfer = MediaTransfer::new(HttpMediaTransport::new(media_connection));
+    let uploaded = client
+        .upload_media_bytes(&transfer, &plaintext, MediaKind::Document)
+        .await?;
+    let thumbnail = client
+        .upload_generated_document_remote_thumbnail_file(
+            &transfer,
+            &uploaded,
+            &document_path,
+            thumbnail_options()?,
+        )
+        .await?;
+
+    let mut document =
+        DocumentContent::new(uploaded, mimetype).with_remote_thumbnail(thumbnail.remote_thumbnail);
+    document.caption = optional_env("WA_DOCUMENT_CAPTION");
+    document.title = optional_env("WA_DOCUMENT_TITLE");
+    document.file_name = optional_env("WA_DOCUMENT_FILE_NAME").or_else(|| {
+        document_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    });
+
+    let relay = client
+        .send_message_with_signal_provider(
+            validated.connection(),
+            &target_jid,
+            MessageContent::document(document),
+            MessageRelayOptions::new(),
+        )
+        .await?;
+    println!("sent document message {}", relay.message_id);
+
+    Ok(())
+}

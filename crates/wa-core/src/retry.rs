@@ -14,6 +14,7 @@ pub const DEFAULT_BASE_KEY_CAPACITY: usize = 1024;
 pub const DEFAULT_BASE_KEY_TTL_MS: u64 = 15 * 60 * 1000;
 pub const DEFAULT_PHONE_REQUEST_DELAY_MS: u64 = 3000;
 pub const DEFAULT_MAX_MESSAGE_RETRY_COUNT: u32 = 5;
+pub const MAX_RETRY_RECEIPT_MESSAGE_IDS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -205,6 +206,7 @@ pub struct RetryReceiptPlan {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetryResendJob {
     pub remote_jid: String,
+    pub requester_jid: String,
     pub message_id: String,
     pub message: Message,
     pub target: RetryResendTarget,
@@ -496,11 +498,11 @@ impl MessageRetryManager {
         session: RetrySessionSnapshot,
         now_ms: u64,
     ) -> CoreResult<RetryReceiptPlan> {
-        if receipt.message_ids.is_empty() {
-            return Err(CoreError::Protocol(
-                "retry receipt has no message ids".to_owned(),
-            ));
-        }
+        validate_retry_message_ids(
+            "retry receipt",
+            "retry receipt message id",
+            &receipt.message_ids,
+        )?;
         let participant_jid = receipt.requester_jid()?.to_owned();
         validate_jid("retry participant JID", &participant_jid)?;
         let remote_jid = receipt.chat_jid.as_deref().ok_or_else(|| {
@@ -596,11 +598,7 @@ impl MessageRetryManager {
         now_ms: u64,
     ) -> CoreResult<RetryResendPreparation> {
         validate_jid("retry resend remote JID", &plan.remote_jid)?;
-        if plan.message_ids.is_empty() {
-            return Err(CoreError::Protocol(
-                "retry resend plan has no message ids".to_owned(),
-            ));
-        }
+        validate_retry_message_id_count("retry resend plan", plan.message_ids.len())?;
 
         let mut jobs = Vec::new();
         let mut missing_message_ids = Vec::new();
@@ -609,6 +607,7 @@ impl MessageRetryManager {
             match self.get_recent_message(&plan.remote_jid, message_id, now_ms) {
                 Some(recent) => jobs.push(RetryResendJob {
                     remote_jid: plan.remote_jid.clone(),
+                    requester_jid: plan.participant_jid.clone(),
                     message_id: message_id.clone(),
                     message: recent.message,
                     target: plan.resend_target.clone(),
@@ -698,7 +697,10 @@ pub fn parse_retry_receipt(node: &BinaryNode) -> CoreResult<Option<RetryReceipt>
         && let Some(BinaryNodeContent::Nodes(items)) = &list.content
     {
         for item in items.iter().filter(|item| item.tag == "item") {
-            message_ids.push(required_attr(item, "id")?.to_owned());
+            validate_retry_message_id_capacity("retry receipt", message_ids.len())?;
+            let item_id = required_attr(item, "id")?;
+            validate_non_empty("retry receipt list item id", item_id)?;
+            message_ids.push(item_id.to_owned());
         }
     }
 
@@ -748,6 +750,39 @@ fn validate_jid(label: &str, jid: &str) -> CoreResult<()> {
 fn validate_non_empty(label: &str, value: &str) -> CoreResult<()> {
     if value.is_empty() {
         return Err(CoreError::Payload(format!("{label} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_retry_message_ids(
+    list_label: &str,
+    item_label: &str,
+    message_ids: &[String],
+) -> CoreResult<()> {
+    validate_retry_message_id_count(list_label, message_ids.len())?;
+    for message_id in message_ids {
+        validate_non_empty(item_label, message_id)?;
+    }
+    Ok(())
+}
+
+fn validate_retry_message_id_count(label: &str, count: usize) -> CoreResult<()> {
+    if count == 0 {
+        return Err(CoreError::Protocol(format!("{label} has no message ids")));
+    }
+    if count > MAX_RETRY_RECEIPT_MESSAGE_IDS {
+        return Err(CoreError::Protocol(format!(
+            "{label} must contain at most {MAX_RETRY_RECEIPT_MESSAGE_IDS} message ids"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_retry_message_id_capacity(label: &str, current_len: usize) -> CoreResult<()> {
+    if current_len >= MAX_RETRY_RECEIPT_MESSAGE_IDS {
+        return Err(CoreError::Protocol(format!(
+            "{label} must contain at most {MAX_RETRY_RECEIPT_MESSAGE_IDS} message ids"
+        )));
     }
     Ok(())
 }
@@ -1062,6 +1097,140 @@ mod tests {
     }
 
     #[test]
+    fn rejects_retry_receipt_empty_list_item_ids() {
+        let node = BinaryNode::new("receipt")
+            .with_attr("type", "retry")
+            .with_attr("id", "m1")
+            .with_content(vec![
+                BinaryNode::new("retry"),
+                BinaryNode::new("list")
+                    .with_content(vec![BinaryNode::new("item").with_attr("id", "")]),
+            ]);
+
+        let err = parse_retry_receipt(&node).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Payload(message)
+                if message == "retry receipt list item id must not be empty"
+        ));
+    }
+
+    #[test]
+    fn rejects_retry_receipt_message_id_lists_over_limit() {
+        let item_ids = (1..MAX_RETRY_RECEIPT_MESSAGE_IDS)
+            .map(|index| BinaryNode::new("item").with_attr("id", format!("m{index}")))
+            .collect::<Vec<_>>();
+        let at_limit_node = BinaryNode::new("receipt")
+            .with_attr("type", "retry")
+            .with_attr("id", "m0")
+            .with_content(vec![
+                BinaryNode::new("retry"),
+                BinaryNode::new("list").with_content(item_ids),
+            ]);
+
+        let receipt = parse_retry_receipt(&at_limit_node).unwrap().unwrap();
+        assert_eq!(receipt.message_ids.len(), MAX_RETRY_RECEIPT_MESSAGE_IDS);
+
+        let too_many_item_ids = (1..=MAX_RETRY_RECEIPT_MESSAGE_IDS)
+            .map(|index| BinaryNode::new("item").with_attr("id", format!("m{index}")))
+            .collect::<Vec<_>>();
+        let too_many_node = BinaryNode::new("receipt")
+            .with_attr("type", "retry")
+            .with_attr("id", "m0")
+            .with_content(vec![
+                BinaryNode::new("retry"),
+                BinaryNode::new("list").with_content(too_many_item_ids),
+            ]);
+
+        let err = parse_retry_receipt(&too_many_node).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Protocol(message)
+                if message == format!(
+                    "retry receipt must contain at most {MAX_RETRY_RECEIPT_MESSAGE_IDS} message ids"
+                )
+        ));
+    }
+
+    #[test]
+    fn rejects_public_retry_message_id_vectors_over_limit() {
+        let mut manager = MessageRetryManager::new(test_config());
+        let mut receipt = RetryReceipt {
+            message_ids: Vec::new(),
+            from_jid: Some("123:1@s.whatsapp.net".to_owned()),
+            to_jid: None,
+            participant: None,
+            recipient: Some("999@g.us".to_owned()),
+            chat_jid: Some("999@g.us".to_owned()),
+            retry: RetryReceiptRetry {
+                count: 1,
+                original_stanza_id: None,
+                timestamp: None,
+                version: None,
+                error: None,
+            },
+            registration_id: None,
+            has_key_bundle: false,
+        };
+
+        let err = manager
+            .plan_retry_resend(&receipt, RetrySessionSnapshot::missing(), 0)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Protocol(message) if message == "retry receipt has no message ids"
+        ));
+
+        receipt.message_ids = vec!["".to_owned()];
+        let err = manager
+            .plan_retry_resend(&receipt, RetrySessionSnapshot::missing(), 0)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Payload(message) if message == "retry receipt message id must not be empty"
+        ));
+
+        receipt.message_ids = (0..=MAX_RETRY_RECEIPT_MESSAGE_IDS)
+            .map(|index| format!("m{index}"))
+            .collect();
+        let err = manager
+            .plan_retry_resend(&receipt, RetrySessionSnapshot::missing(), 0)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Protocol(message)
+                if message == format!(
+                    "retry receipt must contain at most {MAX_RETRY_RECEIPT_MESSAGE_IDS} message ids"
+                )
+        ));
+
+        let plan = RetryReceiptPlan {
+            remote_jid: "999@g.us".to_owned(),
+            message_ids: (0..=MAX_RETRY_RECEIPT_MESSAGE_IDS)
+                .map(|index| format!("m{index}"))
+                .collect(),
+            participant_jid: "123:1@s.whatsapp.net".to_owned(),
+            retry_count: 1,
+            resend_target: RetryResendTarget::Participant {
+                jid: "123:1@s.whatsapp.net".to_owned(),
+                count: 1,
+            },
+            session_action: RetrySessionAction::Refresh {
+                reason: "retry receipt without key bundle".to_owned(),
+            },
+            should_clear_group_sender_key: true,
+        };
+        let err = manager.prepare_retry_resends(&plan, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Protocol(message)
+                if message == format!(
+                    "retry resend plan must contain at most {MAX_RETRY_RECEIPT_MESSAGE_IDS} message ids"
+                )
+        ));
+    }
+
+    #[test]
     fn plans_retry_resend_target_and_refresh_action() {
         let mut manager = MessageRetryManager::new(test_config());
         let receipt = RetryReceipt {
@@ -1156,6 +1325,7 @@ mod tests {
         assert!(!prepared.is_complete());
         assert_eq!(prepared.jobs.len(), 1);
         assert_eq!(prepared.jobs[0].remote_jid, "999@g.us");
+        assert_eq!(prepared.jobs[0].requester_jid, "123:1@s.whatsapp.net");
         assert_eq!(prepared.jobs[0].message_id, "m1");
         assert_eq!(prepared.jobs[0].message, message);
         assert_eq!(prepared.jobs[0].target, plan.resend_target);

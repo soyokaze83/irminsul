@@ -188,6 +188,7 @@ pub fn are_jids_same_user(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn decodes_phone_jid() {
@@ -220,5 +221,121 @@ mod tests {
             jid_normalized_user("12345@c.us").unwrap(),
             "12345@s.whatsapp.net"
         );
+    }
+
+    proptest! {
+        #[test]
+        fn valid_generated_jids_round_trip(
+            user in user_strategy(),
+            server in server_strategy(),
+            device in prop::option::of(any::<u8>()),
+            agent in prop::option::of(agent_strategy()),
+        ) {
+            let device = device.map(u16::from);
+            let jid = jid_encode(&user, server, device, agent);
+            let decoded = jid_decode(&jid).unwrap();
+
+            prop_assert_eq!(&decoded.user, &user);
+            prop_assert_eq!(decoded.server, server);
+            prop_assert_eq!(decoded.server_raw, server.as_str());
+            prop_assert_eq!(decoded.device, device);
+            prop_assert_eq!(decoded.agent, agent);
+            prop_assert_eq!(decoded.domain_type, server.domain_type(agent));
+
+            let encoded_again = jid_encode(
+                &decoded.user,
+                decoded.server,
+                decoded.device,
+                decoded.agent,
+            );
+            prop_assert_eq!(encoded_again, jid);
+        }
+
+        #[test]
+        fn normalized_user_strips_device_and_maps_c_us(
+            user in user_strategy(),
+            server in server_strategy(),
+            device in prop::option::of(any::<u8>()),
+            agent in prop::option::of(agent_strategy()),
+        ) {
+            let jid = jid_encode(&user, server, device.map(u16::from), agent);
+            let normalized = jid_normalized_user(&jid).unwrap();
+            let expected_server = if server == JidServer::CUs {
+                JidServer::SWhatsAppNet
+            } else {
+                server
+            };
+
+            prop_assert_eq!(&normalized, &jid_encode(&user, expected_server, None, None));
+            let decoded = jid_decode(&normalized).unwrap();
+            prop_assert_eq!(decoded.user, user);
+            prop_assert_eq!(decoded.server, expected_server);
+            prop_assert_eq!(decoded.device, None);
+            prop_assert_eq!(decoded.agent, None);
+        }
+
+        #[test]
+        fn same_user_ignores_server_device_and_agent(
+            user in user_strategy(),
+            left_server in server_strategy(),
+            right_server in server_strategy(),
+            left_device in prop::option::of(any::<u8>()),
+            right_device in prop::option::of(any::<u8>()),
+            left_agent in prop::option::of(agent_strategy()),
+            right_agent in prop::option::of(agent_strategy()),
+        ) {
+            let left = jid_encode(&user, left_server, left_device.map(u16::from), left_agent);
+            let right = jid_encode(&user, right_server, right_device.map(u16::from), right_agent);
+            prop_assert!(are_jids_same_user(&left, &right));
+        }
+
+        #[test]
+        fn different_users_are_not_same_user(
+            left_user in user_strategy(),
+            right_user in user_strategy(),
+            server in server_strategy(),
+        ) {
+            prop_assume!(left_user != right_user);
+            let left = jid_encode(&left_user, server, None, None);
+            let right = jid_encode(&right_user, server, None, None);
+            prop_assert!(!are_jids_same_user(&left, &right));
+        }
+    }
+
+    fn user_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(
+                "abcdefghijklmnopqrstuvwxyz0123456789"
+                    .chars()
+                    .collect::<Vec<_>>(),
+            ),
+            1..=16,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn server_strategy() -> impl Strategy<Value = JidServer> {
+        prop::sample::select(vec![
+            JidServer::CUs,
+            JidServer::GUs,
+            JidServer::Broadcast,
+            JidServer::SWhatsAppNet,
+            JidServer::Call,
+            JidServer::Lid,
+            JidServer::Newsletter,
+            JidServer::Bot,
+            JidServer::Hosted,
+            JidServer::HostedLid,
+        ])
+    }
+
+    fn agent_strategy() -> impl Strategy<Value = u16> {
+        prop::sample::select(vec![
+            WaJidDomain::Lid as u16,
+            WaJidDomain::Hosted as u16,
+            WaJidDomain::HostedLid as u16,
+            2,
+            7,
+        ])
     }
 }

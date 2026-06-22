@@ -27,7 +27,7 @@ pub enum CoreError {
     Crypto(wa_crypto::CryptoError),
     #[error("task failed: {0}")]
     Task(String),
-    #[cfg(feature = "http-media")]
+    #[cfg(any(feature = "http-media", feature = "link-preview"))]
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[cfg(feature = "noise")]

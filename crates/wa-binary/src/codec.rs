@@ -470,6 +470,8 @@ fn unpack_byte(tag: u8, value: u8) -> Result<char, BinaryDecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::io::Write;
 
     #[test]
     fn round_trips_simple_node() {
@@ -507,5 +509,155 @@ mod tests {
         assert!(encoded.contains(&token.index));
         let decoded = decode_binary_node(&encoded).unwrap();
         assert_eq!(decoded, node);
+    }
+
+    proptest! {
+        #[test]
+        fn round_trips_bounded_generated_nodes(node in binary_node_strategy()) {
+            let encoded = encode_binary_node(&node).unwrap();
+            let decoded = decode_binary_node(&encoded).unwrap();
+            prop_assert_eq!(&decoded, &node);
+
+            let encoded_again = encode_binary_node(&decoded).unwrap();
+            prop_assert_eq!(encoded_again, encoded);
+        }
+
+        #[test]
+        fn decodes_zlib_compressed_bounded_generated_nodes(node in binary_node_strategy()) {
+            let encoded = encode_binary_node(&node).unwrap();
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&encoded[1..]).unwrap();
+            let compressed = encoder.finish().unwrap();
+
+            let mut compressed_frame = Vec::with_capacity(compressed.len() + 1);
+            compressed_frame.push(2);
+            compressed_frame.extend_from_slice(&compressed);
+            let decoded = decode_binary_node(&compressed_frame).unwrap();
+            prop_assert_eq!(decoded, node);
+        }
+    }
+
+    fn binary_node_strategy() -> impl Strategy<Value = BinaryNode> {
+        let leaf = (
+            tag_strategy(),
+            attrs_strategy(),
+            prop::option::of(leaf_content_strategy()),
+        )
+            .prop_map(node_from_parts);
+
+        leaf.prop_recursive(3, 24, 3, |inner| {
+            let content = prop_oneof![
+                leaf_content_strategy(),
+                prop::collection::vec(inner, 0..=3).prop_map(BinaryNodeContent::Nodes),
+            ];
+            (tag_strategy(), attrs_strategy(), prop::option::of(content)).prop_map(node_from_parts)
+        })
+    }
+
+    fn node_from_parts(
+        (tag, attrs, content): (String, BTreeMap<String, String>, Option<BinaryNodeContent>),
+    ) -> BinaryNode {
+        BinaryNode {
+            tag,
+            attrs,
+            content,
+        }
+    }
+
+    fn attrs_strategy() -> impl Strategy<Value = BTreeMap<String, String>> {
+        prop::collection::vec((attr_key_strategy(), string_strategy()), 0..=5)
+            .prop_map(|attrs| attrs.into_iter().collect::<BTreeMap<_, _>>())
+    }
+
+    fn leaf_content_strategy() -> impl Strategy<Value = BinaryNodeContent> {
+        prop_oneof![
+            content_text_strategy().prop_map(BinaryNodeContent::Text),
+            prop::collection::vec(any::<u8>(), 0..=32)
+                .prop_map(|bytes| BinaryNodeContent::Bytes(Bytes::from(bytes))),
+        ]
+    }
+
+    fn tag_strategy() -> impl Strategy<Value = String> {
+        prop::sample::select(vec![
+            "iq",
+            "message",
+            "receipt",
+            "notification",
+            "presence",
+            "enc",
+            "retry",
+            "registration",
+            "child",
+            "payload",
+        ])
+        .prop_map(str::to_owned)
+    }
+
+    fn attr_key_strategy() -> impl Strategy<Value = String> {
+        prop::sample::select(vec![
+            "id",
+            "type",
+            "from",
+            "to",
+            "participant",
+            "recipient",
+            "count",
+            "error",
+            "xmlns",
+            "category",
+        ])
+        .prop_map(str::to_owned)
+    }
+
+    fn string_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![Just(String::new()), non_empty_string_strategy(),]
+    }
+
+    fn non_empty_string_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            ascii_string(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+                1..=16
+            ),
+            ascii_string("0123456789-.", 1..=16),
+            ascii_string("0123456789ABCDEF", 1..=16),
+            prop::sample::select(vec![
+                "12345@s.whatsapp.net",
+                "123:1@s.whatsapp.net",
+                "555@g.us",
+                "status@broadcast",
+                "abc@lid",
+                "server@c.us",
+            ])
+            .prop_map(str::to_owned),
+        ]
+    }
+
+    fn content_text_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            ascii_string("0123456789-.", 1..=16),
+            ascii_string("ABCDEF", 1..=16),
+            prop::sample::select(vec![
+                "12345@s.whatsapp.net",
+                "123:1@s.whatsapp.net",
+                "555@g.us",
+                "status@broadcast",
+                "abc@lid",
+                "get",
+                "set",
+                "text",
+            ])
+            .prop_map(str::to_owned),
+        ]
+    }
+
+    fn ascii_string(
+        alphabet: &'static str,
+        len: std::ops::RangeInclusive<usize>,
+    ) -> impl Strategy<Value = String> {
+        let chars = alphabet.chars().collect::<Vec<_>>();
+        prop::collection::vec(prop::sample::select(chars), len)
+            .prop_map(|chars| chars.into_iter().collect())
     }
 }

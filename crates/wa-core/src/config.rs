@@ -44,6 +44,7 @@ pub struct ClientConfig {
     pub sync_full_history: bool,
     pub outbound_queue_capacity: usize,
     pub rotate_signed_pre_key_on_connect: bool,
+    pub lid_trusted_token_issue_to_lid: bool,
 }
 
 impl Default for ClientConfig {
@@ -61,6 +62,7 @@ impl Default for ClientConfig {
             sync_full_history: true,
             outbound_queue_capacity: 128,
             rotate_signed_pre_key_on_connect: false,
+            lid_trusted_token_issue_to_lid: false,
         }
     }
 }
