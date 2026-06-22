@@ -21789,6 +21789,22 @@ Decided:
   provider with cross-implementation conformance vectors and fuzz hardening, not
   to adopt an external crate. Revisit only if the user later accepts AGPL-3.0
   network copyleft for the whole product.
+- CONFIRMED 2026-06-22 via an authoritative oracle (the `libsignal` npm package
+  Baileys/WhatsApp use; tooling under `tools/compat/signal_*` + vectors under
+  `tests/fixtures/signal_conformance.json`): the project-owned 1:1 WhisperMessage
+  wire format is currently INCOMPATIBLE with WhatsApp. libsignal emits
+  `versionByte(0x33) || protobuf{ratchetKey,counter,prevCounter,ciphertext=pureAES}
+  || MAC8` with MAC = HMAC-SHA256(macKey, senderIdPub(33) ‖ receiverIdPub(33) ‖
+  versionByte ‖ protobuf)[..8]; the repo emits pure protobuf with no version byte
+  and the 8-byte MAC embedded inside the ciphertext field, computed over the AES
+  ciphertext only. The KDF/ratchet labels (WhisperRatchet/WhisperMessageKeys/
+  WhisperText/WhisperGroup, HMAC 0x01/0x02 stepping) are already correct, so the
+  fix is concentrated in 1:1 message (de)serialization + MAC: add the version
+  byte, move the MAC outside the protobuf, make the ciphertext field pure AES, and
+  compute the MAC over identities‖version‖protobuf (threading sender/receiver
+  identity public keys through encrypt/decrypt). Every Signal primitive must be
+  re-validated against the oracle since none was checked before. This is the core
+  of proving the provider and the project's dominant remaining risk.
 - Use SQLite as the default native, versioned, transaction-safe runtime store.
 - Check in generated Rust protobuf code and provide an explicit regeneration
   script plus drift-check tooling.

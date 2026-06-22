@@ -1,0 +1,42 @@
+{
+  "note": "Authoritative libsignal (Baileys) conformance vectors. Rust provider must decrypt these.",
+  "bob": {
+    "registrationId": 144,
+    "identityKeyPub": "053be47ffc794674290a0737c8de10d4017f734fa8a0331f273db183458a13aa08",
+    "identityKeyPriv": "40938218193bc7659bab41fc702740cb8cb7e6be811f247653b51b498233ce53",
+    "preKeyId": 31337,
+    "preKeyPub": "05ee594b46d45725a8bca5f0c6db9991b2aa0ac57e292416f28619c9e6e6e4615f",
+    "preKeyPriv": "90e6f64c444a6633220b0cfda9a4089f90c56c1c6eaf8c4eab7f29c68c2c0071",
+    "signedPreKeyId": 22,
+    "signedPreKeyPub": "052d5f78f208b9e97cec613f5f54a712427b9f7c429f71b676169079cb11d59772",
+    "signedPreKeyPriv": "901b21084488c8862fbe2093baa9eafa7955d0850e89696e383bb70d65843444",
+    "signedPreKeySig": "050c451e3e30961880b716ac076899b7bc939374eca2faf084e901d0c600bf6285b803206c6405fb5aed7cc4c1577b6d0337eab258b246f2d2e1dd2518117588"
+  },
+  "alice": {
+    "registrationId": 0,
+    "identityKeyPub": "056973e5b8e411adca9481ce67a6436282a8a6a01fe61e287218992447f51f5c4f"
+  },
+  "vectors": [
+    {
+      "dir": "alice->bob",
+      "kind": "prekey",
+      "type": 3,
+      "body": "3308e9f4011221058f2c50de2b6ea940d90deb2ff1cb3764ae38bd2388f4f527e662468d5ddaaf101a21056973e5b8e411adca9481ce67a6436282a8a6a01fe61e287218992447f51f5c4f2242330a21059bcebf25be2bf4934fd8bcbba03fc92b7fa7fca0c8e96a3044353635d6b86d7c100018002210f567b03e8c66a9380d713dbbf7fcb6be3873869409b0fd3228003016",
+      "plaintext": "hello bob"
+    },
+    {
+      "dir": "alice->bob",
+      "kind": "whisper",
+      "type": 1,
+      "body": "330a2105c41db93cc8c908a96b80e570f64ef415f797bdabe110396bc05ffc61830883661000180022200ac0be6ea96bfb768768ea035da7a548a01e29ea4fdc7da19e752d7645781978a2fae2a355054a5a",
+      "plaintext": "second from alice"
+    }
+  ],
+  "bobToAlice": {
+    "dir": "bob->alice",
+    "kind": "whisper",
+    "type": 1,
+    "body": "330a210575f941403158dd16eb07073a5a7ec022b8d81c26100784f1bd54e3864d09007b100018002220a69a238e5e8b6ea2371235d41252437402d1883da5e8d19a55362e03eed489dd522b4a690b7c1420",
+    "plaintext": "hi alice from bob"
+  }
+}
