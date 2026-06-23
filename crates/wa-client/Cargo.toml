@@ -19,6 +19,20 @@ http-media = ["noise", "wa-core/http-media"]
 image = ["wa-core/image"]
 link-preview = ["noise", "wa-core/link-preview"]
 
+# Test-partition feature gates. The in-crate `mod tests` is split into
+# memory-bounded chunks (each `mod chunk_K` is gated behind `watK`) so that the
+# test build of wa-client compiles within the VM RAM budget (3.8GB, no swap).
+# Building the whole test module as one rustc unit OOM-SIGKILLs (~3.9GB peak).
+# Run one chunk at a time; see tools/run_wa_client_tests.sh.
+wat1 = []
+wat2 = []
+wat3 = []
+wat4 = []
+wat5 = []
+wat6 = []
+wat7 = []
+wat8 = []
+
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
