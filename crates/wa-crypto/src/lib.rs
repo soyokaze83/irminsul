@@ -15,7 +15,7 @@ pub use app_state::{
 };
 pub use keys::{
     KeyPair, SIGNAL_PUBLIC_KEY_VERSION, generate_key_pair, prefixed_signal_public_key,
-    public_key_from_private, shared_key, sign_x25519,
+    public_key_from_private, shared_key, sign_x25519, verify_curve25519_signature,
 };
 pub use media::{
     EncryptedMedia, MediaEncryptionMetadata, MediaKeyMaterial, MediaKind, MediaRetryPayload,

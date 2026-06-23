@@ -21581,6 +21581,60 @@ mod tests {
         );
     }
 
+    // WhatsApp interop conformance (GROUP / sender-key path): process a REAL libsignal
+    // SenderKeyDistributionMessage and decrypt a REAL libsignal SenderKeyMessage (group
+    // "skmsg") through the project-owned sender-key provider. Vectors are emitted by
+    // tools/compat/signal_group_conformance_emit.cjs (legacy WhatsApp/Baileys sender-key
+    // wire format, byte-identical to what WhatsApp emits) into
+    // tests/fixtures/signal_group_conformance.json. Proves the project-owned sender-key
+    // crypto is byte-compatible with libsignal: 0x33 version byte; protobuf{id,iteration,
+    // chainKey,signingKey} distribution; protobuf{id,iteration,ciphertext}||sig(64) message;
+    // WhisperGroup HKDF; HMAC chain ratchet; XEdDSA signature; iteration-0 first message.
+    #[tokio::test]
+    async fn signal_conformance_decrypts_libsignal_sender_key_message() {
+        let fx: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/signal_group_conformance.json"
+        )))
+        .unwrap();
+        let group_jid = fx["groupId"].as_str().unwrap().to_owned();
+        let sender_jid = fx["senderJid"].as_str().unwrap().to_owned();
+        let distribution_bytes = Bytes::from(conformance_hex(fx["distribution"].as_str().unwrap()));
+        let skmsg = Bytes::from(conformance_hex(
+            fx["senderKeyMessage"]["body"].as_str().unwrap(),
+        ));
+        let expected = Bytes::from(fx["plaintext"].as_str().unwrap().as_bytes().to_vec());
+
+        let store = temp_store().await;
+        let repository = StoreSignalRepository::new(store.clone());
+        let provider = StoreSignalSenderKeyProvider::new(store.clone());
+        let codec = SignalMessageCodec::new(repository, provider);
+
+        // Process Alice's libsignal-emitted distribution into the project-owned record.
+        codec
+            .process_sender_key_distribution(
+                &sender_jid,
+                &SenderKeyDistributionMessage {
+                    group_id: Some(group_jid.clone()),
+                    axolotl_sender_key_distribution_message: Some(distribution_bytes),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Decrypt the real libsignal SenderKeyMessage through the group path.
+        let plaintext = codec
+            .decrypt_inbound_message(InboundEncryptedPayload {
+                sender_jid,
+                chat_jid: group_jid,
+                ciphertext_type: InboundCiphertextType::SenderKey,
+                ciphertext: skmsg,
+            })
+            .await
+            .unwrap();
+        assert_eq!(plaintext, expected);
+    }
+
     async fn temp_store() -> SqliteAuthStore {
         let dir = std::env::temp_dir().join(format!("wa-core-signal-{}", rand::random::<u128>()));
         SqliteAuthStore::open(dir.join("session.db")).await.unwrap()

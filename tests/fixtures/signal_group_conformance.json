@@ -1,0 +1,15 @@
+{
+  "note": "Authoritative libsignal (Baileys/WhatsApp legacy sender-key) GROUP conformance vectors. Rust provider must process the distribution and decrypt the SenderKeyMessage.",
+  "groupId": "group-conformance@g.us",
+  "senderJid": "alice:1@s.whatsapp.net",
+  "keyId": 48,
+  "distribution": "33083010001a20c0f10a9454c887aa69cd019571664d28764cad13303062acfc2b0d75a2c1e805222105d607e6a250dac7355f0c1835863595f68a037c5b9ae48c2eee2315d19571c55b",
+  "senderKeyMessage": {
+    "type": "skmsg",
+    "firstByte": "0x33",
+    "iteration": 0,
+    "body": "33083010001a10270718f263663120e14ef896e2c7f037767c99ef9dfaa4294986945353e02a6cb0733d633ca7989391a74546f27ae2d881c28d55c64400dc6402290cfa90c4ca7cb653491987ca3fa1b9846e23ebf08b"
+  },
+  "signingKeyPub": "05d607e6a250dac7355f0c1835863595f68a037c5b9ae48c2eee2315d19571c55b",
+  "plaintext": "group hello"
+}

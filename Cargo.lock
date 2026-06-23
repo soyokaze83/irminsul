@@ -2470,6 +2470,8 @@ dependencies = [
  "bytes",
  "cbc",
  "ctr",
+ "curve25519-dalek",
+ "ed25519-dalek",
  "hkdf",
  "hmac",
  "md-5",

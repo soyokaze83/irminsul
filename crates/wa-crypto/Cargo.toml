@@ -12,6 +12,8 @@ aes-gcm.workspace = true
 bytes.workspace = true
 cbc = { workspace = true, features = ["alloc"] }
 ctr.workspace = true
+curve25519-dalek.workspace = true
+ed25519-dalek.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
 md-5.workspace = true
