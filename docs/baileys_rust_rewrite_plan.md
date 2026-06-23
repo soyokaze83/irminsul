@@ -21805,6 +21805,19 @@ Decided:
   identity public keys through encrypt/decrypt). Every Signal primitive must be
   re-validated against the oracle since none was checked before. This is the core
   of proving the provider and the project's dominant remaining risk.
+- RESOLVED 2026-06-23. The project-owned Signal stack is now PROVEN
+  byte-compatible with real libsignal/WhatsApp for BOTH the 1:1 path (commit
+  `a52fe2a`, gate `signal_conformance_decrypts_libsignal_pre_key_message`,
+  verified reproducibly against freshly-generated libsignal fixtures) and the
+  sender-key/group path (commit `54f9a98`, gate
+  `signal_conformance_decrypts_libsignal_sender_key_message`). Fixes applied:
+  version byte, MAC relocation + over-identities, base_key/ratchet-key
+  separation, 0-based counters, libsignal inbound/outbound DH-ratchet bootstrap,
+  and a project-wide curve25519 signature-verification fix
+  (`verify_curve25519_signature` in `wa-crypto`) that also hardens noise-cert and
+  signed-pre-key verification. wa-core: 538 tests pass. The group fixture is a
+  source-verified reconstruction (the JS `libsignal` pkg lacks a group API) using
+  real libsignal signing primitives; the 1:1 fixture is fully libsignal-generated.
 - Use SQLite as the default native, versioned, transaction-safe runtime store.
 - Check in generated Rust protobuf code and provide an explicit regeneration
   script plus drift-check tooling.
