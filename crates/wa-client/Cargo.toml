@@ -130,6 +130,11 @@ path = "examples/live_group_send.rs"
 required-features = ["sqlite-store", "noise", "websocket"]
 
 [[example]]
+name = "live_business_media"
+path = "examples/live_business_media.rs"
+required-features = ["sqlite-store", "noise", "websocket", "http-media"]
+
+[[example]]
 name = "custom_auth_store"
 path = "examples/custom_auth_store.rs"
 
