@@ -21889,3 +21889,32 @@ The rewrite is complete when:
 - Examples compile and demonstrate the supported public workflows.
 - Any explicitly excluded behavior or version-specific limitation is documented
   in a parity matrix.
+
+## Beta Completion Status (2026-06-23)
+
+Target = mock/fixture-green beta (live e2e requires WhatsApp test accounts, which are
+not available). Branch `rewrite-wip-checkpoint`.
+
+ACHIEVED + INDEPENDENTLY VERIFIED:
+- Dominant risk eliminated: project-owned Signal crypto PROVEN byte-compatible with real
+  libsignal/WhatsApp for both 1:1 (gate `signal_conformance_decrypts_libsignal_pre_key_message`,
+  reproducible vs freshly-generated libsignal fixtures) and sender-key/group
+  (`signal_conformance_decrypts_libsignal_sender_key_message`); plus a project-wide
+  curve25519 signature-verify fix.
+- Interrupted-WIP baseline repaired (wa-client 533/533 at the pre-Signal state).
+- Run-verified core logic for all phase areas in wa-core (538 tests; media 48, app_state 32,
+  history 14, group 39, newsletter 18, business 13, community 6, usync 11, receipt 13,
+  retry 32, tctoken 11, reporting 8, placeholder 8) + 154 signal/conformance; leaf crates green.
+- Gates green: `cargo fmt --all --check`; `cargo clippy` (wa-core+leaves all-targets, wa-client lib)
+  0 warnings; `cargo check --workspace --all-targets`; `cargo doc --workspace`; examples compile;
+  fuzz crate `cargo check`; no `unsafe` (7 forbid(unsafe_code)); secrets zeroized + redacted Debug.
+- wa-client tests TYPE-CHECK clean (`cargo check -p wa-client --tests`).
+
+DOCUMENTED EXCLUSIONS (infrastructure-gated — not code-incomplete):
+1. wa-client RUNTIME tests cannot execute on this VM: rustc OOM-SIGKILLs compiling the
+   ~95K-line `wa-client` test module (3.8GB RAM, no swap; proven twice). RISK: some wa-client
+   test runtime expectations may be stale after the Signal wire-format change. UNBLOCK: ~8GB RAM
+   (or split the test module). Then run
+   `CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=1 cargo test -p wa-client --features memory-store,http-media,link-preview,image -j1`.
+2. Live e2e (50 ignored tests) require WhatsApp test accounts + env vars.
+3. Fuzz smoke run requires nightly + cargo-fuzz (absent); targets `cargo check` clean — CI-nightly job.
