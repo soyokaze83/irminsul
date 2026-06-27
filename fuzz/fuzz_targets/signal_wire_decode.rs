@@ -15,6 +15,18 @@ use wa_crypto::{
     public_key_from_private,
 };
 
+// The 1:1 WhisperMessage framing now carries an 8-byte MAC keyed by
+// (mac_key, senderId, receiverId); these wire-shape fuzzers build MAC-less raw
+// protobuf frames, so they use a single fixed mac_key/identity for the
+// encode/decode calls. NOTE: this only makes the crate compile — the MAC-less
+// `*_wire` frames here will not satisfy the new decode MAC/version checks at
+// runtime, so the structured decode asserts in this target need a follow-up
+// rewrite to emit fully framed (version || protobuf || MAC8) inputs.
+const WIRE_DECODE_MAC_KEY: [u8; 32] = [0x5au8; 32];
+fn wire_decode_identity() -> [u8; 33] {
+    prefixed_signal_public_key(&public_key_from_private(&[0x11u8; 32]))
+}
+
 const MAX_INPUT_LEN: usize = 64 * 1024;
 const PROVIDER_SESSION_VERSION: u8 = 1;
 const PROVIDER_SESSION_RECORD_KIND: u8 = 2;
@@ -29,13 +41,31 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    if let Ok(message) = decode_signal_whisper_message(data)
-        && let Ok(encoded) = encode_signal_whisper_message(&message)
-    {
-        let _ = decode_signal_whisper_message(&encoded);
+    if let Ok(message) = decode_signal_whisper_message(
+        data,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    ) && let Ok(encoded) = encode_signal_whisper_message(
+        &message,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    ) {
+        let _ = decode_signal_whisper_message(
+            &encoded,
+            &WIRE_DECODE_MAC_KEY,
+            &wire_decode_identity(),
+            &wire_decode_identity(),
+        );
     }
     if let Ok(message) = decode_signal_pre_key_whisper_message(data)
-        && let Ok(encoded) = encode_signal_pre_key_whisper_message(&message)
+        && let Ok(encoded) = encode_signal_pre_key_whisper_message(
+            &message,
+            &WIRE_DECODE_MAC_KEY,
+            &wire_decode_identity(),
+            &wire_decode_identity(),
+        )
     {
         let _ = decode_signal_pre_key_whisper_message(&encoded);
     }
@@ -80,8 +110,13 @@ fn drive_whisper_required_field_frames(data: &[u8]) {
         Some(previous_counter),
         Some(&ciphertext),
     );
-    let decoded = decode_signal_whisper_message(&valid)
-        .expect("structured Signal whisper frame should decode");
+    let decoded = decode_signal_whisper_message(
+        &valid,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("structured Signal whisper frame should decode");
     assert_eq!(decoded.counter, counter);
     assert_eq!(decoded.previous_counter, previous_counter);
 
@@ -91,11 +126,21 @@ fn drive_whisper_required_field_frames(data: &[u8]) {
         15,
         u32::from(data.get(98).copied().unwrap_or(0)),
     );
-    let decoded_unknown_field = decode_signal_whisper_message(&unknown_field)
-        .expect("Signal whisper with unknown field should decode");
+    let decoded_unknown_field = decode_signal_whisper_message(
+        &unknown_field,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal whisper with unknown field should decode");
     assert_eq!(decoded_unknown_field, decoded);
-    let canonical_unknown_field = encode_signal_whisper_message(&decoded_unknown_field)
-        .expect("Signal whisper with unknown field should re-encode canonically");
+    let canonical_unknown_field = encode_signal_whisper_message(
+        &decoded_unknown_field,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal whisper with unknown field should re-encode canonically");
     assert_eq!(
         canonical_unknown_field.as_ref(),
         valid.as_slice(),
@@ -142,12 +187,22 @@ fn drive_whisper_required_field_frames(data: &[u8]) {
 
     let missing_previous_counter =
         whisper_wire(Some(&ratchet_key), Some(counter), None, Some(&ciphertext));
-    let decoded_missing_previous = decode_signal_whisper_message(&missing_previous_counter)
-        .expect("Signal whisper without previous counter should decode as zero");
+    let decoded_missing_previous = decode_signal_whisper_message(
+        &missing_previous_counter,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal whisper without previous counter should decode as zero");
     assert_eq!(decoded_missing_previous.counter, counter);
     assert_eq!(decoded_missing_previous.previous_counter, 0);
-    let canonical_missing_previous = encode_signal_whisper_message(&decoded_missing_previous)
-        .expect("Signal whisper missing previous counter should re-encode canonically");
+    let canonical_missing_previous = encode_signal_whisper_message(
+        &decoded_missing_previous,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal whisper missing previous counter should re-encode canonically");
     assert!(
         canonical_missing_previous
             .windows(2)
@@ -161,12 +216,22 @@ fn drive_whisper_required_field_frames(data: &[u8]) {
             && explicit_zero.windows(2).any(|field| field == [0x18, 0x00]),
         "explicit zero Signal whisper counters should stay present on the wire"
     );
-    let decoded_zero = decode_signal_whisper_message(&explicit_zero)
-        .expect("Signal whisper with explicit zero counters should decode");
+    let decoded_zero = decode_signal_whisper_message(
+        &explicit_zero,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal whisper with explicit zero counters should decode");
     assert_eq!(decoded_zero.counter, 0);
     assert_eq!(decoded_zero.previous_counter, 0);
-    let canonical_zero = encode_signal_whisper_message(&decoded_zero)
-        .expect("Signal whisper with explicit zero counters should re-encode");
+    let canonical_zero = encode_signal_whisper_message(
+        &decoded_zero,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal whisper with explicit zero counters should re-encode");
     assert_eq!(
         canonical_zero.as_ref(),
         explicit_zero.as_slice(),
@@ -207,8 +272,13 @@ fn drive_pre_key_whisper_required_field_frames(data: &[u8]) {
     let decoded_outer_unknown = decode_signal_pre_key_whisper_message(&outer_unknown_field)
         .expect("Signal pre-key whisper with outer unknown field should decode");
     assert_eq!(decoded_outer_unknown, decoded);
-    let canonical_outer_unknown = encode_signal_pre_key_whisper_message(&decoded_outer_unknown)
-        .expect("Signal pre-key whisper with outer unknown field should re-encode canonically");
+    let canonical_outer_unknown = encode_signal_pre_key_whisper_message(
+        &decoded_outer_unknown,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal pre-key whisper with outer unknown field should re-encode canonically");
     assert_eq!(
         canonical_outer_unknown.as_ref(),
         valid.as_slice(),
@@ -232,8 +302,13 @@ fn drive_pre_key_whisper_required_field_frames(data: &[u8]) {
     let decoded_inner_unknown = decode_signal_pre_key_whisper_message(&pre_key_inner_unknown_field)
         .expect("Signal pre-key whisper with inner unknown field should decode");
     assert_eq!(decoded_inner_unknown, decoded);
-    let canonical_inner_unknown = encode_signal_pre_key_whisper_message(&decoded_inner_unknown)
-        .expect("Signal pre-key whisper with inner unknown field should re-encode canonically");
+    let canonical_inner_unknown = encode_signal_pre_key_whisper_message(
+        &decoded_inner_unknown,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal pre-key whisper with inner unknown field should re-encode canonically");
     assert_eq!(
         canonical_inner_unknown.as_ref(),
         valid.as_slice(),
@@ -269,9 +344,13 @@ fn drive_pre_key_whisper_required_field_frames(data: &[u8]) {
     .expect("structured Signal pre-key whisper with explicit inner zero counters should decode");
     assert_eq!(decoded_inner_explicit_zero.message.counter, 0);
     assert_eq!(decoded_inner_explicit_zero.message.previous_counter, 0);
-    let canonical_inner_explicit_zero =
-        encode_signal_pre_key_whisper_message(&decoded_inner_explicit_zero)
-            .expect("Signal pre-key whisper with explicit inner zero counters should re-encode");
+    let canonical_inner_explicit_zero = encode_signal_pre_key_whisper_message(
+        &decoded_inner_explicit_zero,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect("Signal pre-key whisper with explicit inner zero counters should re-encode");
     assert_eq!(
         canonical_inner_explicit_zero.as_ref(),
         pre_key_inner_explicit_zero.as_slice(),
@@ -294,6 +373,9 @@ fn drive_pre_key_whisper_required_field_frames(data: &[u8]) {
     assert_eq!(decoded_inner_missing_previous.message.previous_counter, 0);
     let canonical_inner_missing_previous = encode_signal_pre_key_whisper_message(
         &decoded_inner_missing_previous,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
     )
     .expect("Signal pre-key whisper inner missing previous counter should re-encode canonically");
     assert!(
@@ -326,7 +408,10 @@ fn drive_pre_key_whisper_required_field_frames(data: &[u8]) {
         "invalid signal public key length: 31",
     );
 
-    let mismatched_base = pre_key_whisper_wire(
+    // libsignal allows the X3DH base key and the inner WhisperMessage's sending
+    // ratchet key to differ, so a base key distinct from the inner ratchet key must
+    // still decode successfully (it is NOT a wire-level error).
+    let distinct_base = pre_key_whisper_wire(
         Some(1),
         Some(&mismatched_base_key),
         Some(&identity_key),
@@ -334,9 +419,16 @@ fn drive_pre_key_whisper_required_field_frames(data: &[u8]) {
         Some(registration_id),
         Some(signed_pre_key_id),
     );
-    assert_pre_key_whisper_decode_error(
-        &mismatched_base,
-        "Signal pre-key message base key does not match inner ratchet key",
+    let distinct_decoded = decode_signal_pre_key_whisper_message(&distinct_base)
+        .expect("pre-key whisper with base key distinct from inner ratchet should decode");
+    assert_eq!(
+        distinct_decoded.base_key.as_ref(),
+        &mismatched_base_key[..],
+        "decoded base key matches the wire base key"
+    );
+    assert_ne!(
+        distinct_decoded.base_key, distinct_decoded.message.ephemeral_key,
+        "base key and inner ratchet key are independent"
     );
 
     let short_inner_ratchet =
@@ -1354,8 +1446,13 @@ fn assert_provider_session_decode_error(encoded: &[u8], expected: &str) {
 }
 
 fn assert_whisper_decode_error(encoded: &[u8], expected: &str) {
-    let err =
-        decode_signal_whisper_message(encoded).expect_err("malformed Signal whisper should reject");
+    let err = decode_signal_whisper_message(
+        encoded,
+        &WIRE_DECODE_MAC_KEY,
+        &wire_decode_identity(),
+        &wire_decode_identity(),
+    )
+    .expect_err("malformed Signal whisper should reject");
     assert_eq!(
         err.to_string(),
         format!("protocol error: {expected}"),

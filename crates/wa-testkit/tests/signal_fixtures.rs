@@ -21,13 +21,16 @@ use wa_core::{
     encode_signal_sender_key_message, encode_signal_sender_key_record,
     encode_signal_whisper_message, encrypt_signal_message_body,
     encrypt_signal_outbound_pre_key_session_message,
+    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet,
     encrypt_signal_provider_session_record_message, encrypt_signal_sender_key_record_message,
     encrypt_signal_sender_message_body, process_signal_sender_key_distribution_record,
     ratchet_signal_message_chain, ratchet_signal_root_key, ratchet_signal_sender_chain,
     should_replace_cached_signal_sender_key_distribution, sign_signal_sender_key_message,
     verify_signal_sender_key_message_bytes,
 };
-use wa_crypto::{KeyPair, SecretBytes, XEdDsaNoiseCertificateVerifier, prefixed_signal_public_key};
+use wa_crypto::{
+    KeyPair, SecretBytes, XEdDsaNoiseCertificateVerifier, hmac_sha256, prefixed_signal_public_key,
+};
 use wa_proto::proto::{
     PreKeySignalMessage, SenderKeyRecordStructure, SenderKeyStateStructure,
     sender_key_state_structure,
@@ -40,6 +43,125 @@ use wa_testkit::{
 
 const TEST_PROVIDER_SESSION_VERSION: u8 = 1;
 const TEST_PROVIDER_SESSION_RECORD_KIND: u8 = 2;
+
+// Fixed identities / mac key used to frame the standalone Whisper and
+// PreKeyWhisper round-trip fixtures (which do not carry identity material).
+// The libsignal 1:1 WhisperMessage MAC covers senderId(33) || receiverId(33) ||
+// version || protobuf; round-trips only need consistent values here.
+const WHISPER_TEST_MAC_KEY: [u8; 32] = [0x5au8; 32];
+
+fn whisper_test_sender() -> Bytes {
+    Bytes::copy_from_slice(&prefixed_signal_public_key(&[0x21u8; 32]))
+}
+
+fn whisper_test_receiver() -> Bytes {
+    Bytes::copy_from_slice(&prefixed_signal_public_key(&[0x31u8; 32]))
+}
+
+// Frame a standalone WhisperMessage with the fixed test identities/mac key.
+fn frame_test_whisper(message: &SignalWhisperMessage) -> Bytes {
+    encode_signal_whisper_message(
+        message,
+        &WHISPER_TEST_MAC_KEY,
+        &whisper_test_sender(),
+        &whisper_test_receiver(),
+    )
+    .unwrap()
+}
+
+// Decode a standalone framed WhisperMessage with the fixed test identities/mac key.
+fn unframe_test_whisper(bytes: &[u8]) -> wa_core::CoreResult<SignalWhisperMessage> {
+    decode_signal_whisper_message(
+        bytes,
+        &WHISPER_TEST_MAC_KEY,
+        &whisper_test_sender(),
+        &whisper_test_receiver(),
+    )
+}
+
+// Frame a standalone PreKeyWhisperMessage with the fixed test identities/mac key
+// (the outer carries no MAC; only the inner WhisperMessage does).
+fn frame_test_pre_key_whisper(message: &SignalPreKeyWhisperMessage) -> wa_core::CoreResult<Bytes> {
+    encode_signal_pre_key_whisper_message(
+        message,
+        &WHISPER_TEST_MAC_KEY,
+        &whisper_test_sender(),
+        &whisper_test_receiver(),
+    )
+}
+
+// Extract the already-framed inner WhisperMessage bytes (0x33 || protobuf || MAC8)
+// from a framed PreKeyWhisperMessage (0x33 || PreKeySignalMessage protobuf). Used to
+// replay the exact inner message against an established session.
+fn pre_key_inner_framed_bytes(framed_pre_key: &[u8]) -> Bytes {
+    let proto = PreKeySignalMessage::decode(&framed_pre_key[1..])
+        .expect("pre-key message protobuf decodes after version byte");
+    proto.message.expect("pre-key message has inner message")
+}
+
+// Recompute the first outbound message key (and thus the inner WhisperMessage MAC
+// key) of a pre-key session, so tests can re-frame / decode the inner
+// WhisperMessage with the SAME key libsignal framing used when it was produced.
+// The inner MAC covers senderId(alice/local) || receiverId(bob/remote) || version
+// || protobuf; for the outbound direction sender = alice (local) identity and
+// receiver = bob (remote) identity.
+fn pre_key_inner_mac_key(
+    alice_material: &SignalLocalKeyMaterial,
+    alice_base: &KeyPair,
+    sending_ratchet: &KeyPair,
+    bob_session: &SignalSession,
+) -> SecretBytes {
+    let bootstrap =
+        derive_signal_outbound_pre_key_root_chain_keys(alice_material, alice_base, bob_session)
+            .expect("pre-key fixture derives outbound root chain");
+    // The initiator's first sending chain is a DH ratchet against bob's signed
+    // pre-key with a fresh sending-ratchet key pair (libsignal
+    // `calculateSendingRatchet`), NOT the X3DH chain key directly.
+    let sending_step = ratchet_signal_root_key(
+        &bootstrap.root_key,
+        sending_ratchet.private.expose(),
+        &bob_session.signed_pre_key.public_key,
+    )
+    .expect("pre-key fixture derives outbound sending chain");
+    ratchet_signal_message_chain(&sending_step.chain_key)
+        .expect("pre-key fixture ratchets first message key")
+        .message_keys
+        .mac_key
+}
+
+// The libsignal WhisperMessage version byte (message version 3, ciphertext version
+// 3 => 0x33). The inner WhisperMessage MAC covers
+//   senderId(33) || receiverId(33) || version_byte || protobuf
+// and the trailing MAC is HMAC-SHA256(macKey, that)[..8].
+const WHISPER_MESSAGE_VERSION_BYTE: u8 = 0x33;
+const WHISPER_MESSAGE_MAC_LEN: usize = 8;
+
+// Take a framed inner WhisperMessage (0x33 || protobuf || MAC8) and produce a new
+// framed WhisperMessage with an unknown protobuf field appended INSIDE the protobuf
+// (before the MAC), re-MAC-ed with the same per-message key/identities. This is the
+// libsignal-correct way to exercise unknown-field tolerance: unknown fields live in
+// the protobuf the MAC covers, not after the trailer.
+fn inner_whisper_with_unknown_field(
+    framed_inner: &[u8],
+    mac_key: &[u8],
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
+) -> Bytes {
+    let protobuf = &framed_inner[1..framed_inner.len() - WHISPER_MESSAGE_MAC_LEN];
+    let mut serialized = Vec::with_capacity(1 + protobuf.len() + 2 + WHISPER_MESSAGE_MAC_LEN);
+    serialized.push(WHISPER_MESSAGE_VERSION_BYTE);
+    serialized.extend_from_slice(protobuf);
+    // Unknown protobuf field: field number 15, varint wire type, value 0x63.
+    serialized.extend_from_slice(&[0x78, 0x63]);
+    let mut mac_input =
+        Vec::with_capacity(sender_id_pub.len() + receiver_id_pub.len() + serialized.len());
+    mac_input.extend_from_slice(sender_id_pub);
+    mac_input.extend_from_slice(receiver_id_pub);
+    mac_input.extend_from_slice(&serialized);
+    let mac = hmac_sha256(&mac_input, mac_key).expect("inner whisper unknown-field MAC");
+    serialized.extend_from_slice(&mac[..WHISPER_MESSAGE_MAC_LEN]);
+    Bytes::from(serialized)
+}
 
 #[test]
 fn signal_fixtures_match_public_signal_primitives() {
@@ -177,27 +299,41 @@ fn signal_fixtures_match_public_signal_primitives() {
                 });
                 let plaintext = bytes_hex(&vector.plaintext_hex);
                 let accept_all_signatures = |_: &[u8], _: &[u8], _: &[u8]| true;
-                let encrypted = encrypt_signal_outbound_pre_key_session_message(
-                    &fixture.alice_material,
-                    &fixture.alice_base,
-                    &fixture.bob_session,
-                    &accept_all_signatures,
-                    &plaintext,
-                )
-                .unwrap();
+                let alice_sending_ratchet =
+                    key_pair_from_private_hex(&vector.alice_sending_ratchet_private_hex);
+                let encrypted =
+                    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet(
+                        &fixture.alice_material,
+                        &fixture.alice_base,
+                        &alice_sending_ratchet,
+                        &fixture.bob_session,
+                        &accept_all_signatures,
+                        &plaintext,
+                    )
+                    .unwrap();
                 match (
                     vector.tampered_message_hex.as_ref(),
                     vector.expected_tamper_error.as_ref(),
                 ) {
                     (Some(tampered_message_hex), Some(expected_tamper_error)) => {
-                        let mut tampered =
-                            decode_signal_pre_key_whisper_message(&encrypted.message_bytes)
-                                .unwrap();
-                        let mut tampered_ciphertext = tampered.message.ciphertext.to_vec();
-                        *tampered_ciphertext.last_mut().unwrap() ^= 1;
-                        tampered.message.ciphertext = Bytes::from(tampered_ciphertext);
-                        let tampered_message =
-                            encode_signal_pre_key_whisper_message(&tampered).unwrap();
+                        // Corrupt the inner WhisperMessage MAC trailer. Under the
+                        // libsignal framing the MAC lives inside the outer protobuf's
+                        // `message` field (not at the end of the outer message, which
+                        // is the signed_pre_key_id varint), so flip the last byte of
+                        // the framed inner WhisperMessage and rewrap the outer.
+                        let inner_framed = pre_key_inner_framed_bytes(&encrypted.message_bytes);
+                        let mut tampered_inner = inner_framed.to_vec();
+                        *tampered_inner.last_mut().unwrap() ^= 1;
+                        let tampered_outer = PreKeySignalMessage {
+                            registration_id: Some(encrypted.message.registration_id),
+                            pre_key_id: encrypted.message.pre_key_id,
+                            signed_pre_key_id: Some(encrypted.message.signed_pre_key_id),
+                            base_key: Some(encrypted.message.base_key.clone()),
+                            identity_key: Some(encrypted.message.identity_key.clone()),
+                            message: Some(Bytes::from(tampered_inner)),
+                        };
+                        let mut tampered_message = vec![encrypted.message_bytes[0]];
+                        tampered_message.extend_from_slice(&tampered_outer.encode_to_vec());
                         let tamper_err = decrypt_signal_inbound_pre_key_session_message(
                             &fixture.bob_material,
                             Some(&fixture.bob_one_time),
@@ -232,11 +368,23 @@ fn signal_fixtures_match_public_signal_primitives() {
                 assert_eq!(decrypted.plaintext, plaintext, "{}", vector.name);
                 assert!(encrypted.used_one_time_pre_key, "{}", vector.name);
                 assert!(decrypted.used_one_time_pre_key, "{}", vector.name);
-                let inner_replay = encode_signal_whisper_message(&encrypted.message.message)
-                    .expect("pre-key inner replay message");
+                // The exact framed inner WhisperMessage alice sent; replaying it
+                // against bob's now-established session is a duplicate-counter reject.
+                let inner_replay = pre_key_inner_framed_bytes(&encrypted.message_bytes);
+                let inner_mac_key = pre_key_inner_mac_key(
+                    &fixture.alice_material,
+                    &fixture.alice_base,
+                    &alice_sending_ratchet,
+                    &fixture.bob_session,
+                );
+                let alice_identity = fixture.alice_material.identity.public_key.clone();
+                let bob_identity = fixture.bob_material.identity.public_key.clone();
                 if let Some(expected_outer_unknown_message_hex) =
                     vector.message_outer_unknown_field_hex.as_ref()
                 {
+                    // The outer PreKeyWhisperMessage carries no MAC, so appending an
+                    // unknown protobuf field is ignored on decode and decryption still
+                    // succeeds (the inner MAC is intact).
                     let mut outer_unknown_message = encrypted.message_bytes.to_vec();
                     outer_unknown_message.extend_from_slice(&[0x78, 0x63]);
                     assert_hex(
@@ -244,15 +392,6 @@ fn signal_fixtures_match_public_signal_primitives() {
                         &format!("{}.message_outer_unknown_field_hex", vector.name),
                         &outer_unknown_message,
                         expected_outer_unknown_message_hex,
-                    );
-                    let decoded_outer_unknown =
-                        decode_signal_pre_key_whisper_message(&outer_unknown_message)
-                            .expect("pre-key session outer unknown field should decode");
-                    assert_eq!(
-                        encode_signal_pre_key_whisper_message(&decoded_outer_unknown).unwrap(),
-                        encrypted.message_bytes,
-                        "{} pre-key session outer unknown field should canonicalize",
-                        vector.name
                     );
                     let decrypted_outer_unknown = decrypt_signal_inbound_pre_key_session_message(
                         &fixture.bob_material,
@@ -275,15 +414,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                 if let Some(expected_inner_unknown_message_hex) =
                     vector.message_inner_unknown_field_hex.as_ref()
                 {
-                    let mut inner_unknown = inner_replay.to_vec();
-                    inner_unknown.extend_from_slice(&[0x78, 0x63]);
-                    let decoded_inner_unknown = decode_signal_whisper_message(&inner_unknown)
-                        .expect("pre-key session inner unknown field should decode");
-                    assert_eq!(
-                        encode_signal_whisper_message(&decoded_inner_unknown).unwrap(),
-                        inner_replay,
-                        "{} pre-key session inner unknown field should canonicalize",
-                        vector.name
+                    // Append an unknown protobuf field INSIDE the inner WhisperMessage
+                    // protobuf, re-MAC the inner with the same per-message key, and rewrap.
+                    let inner_unknown = inner_whisper_with_unknown_field(
+                        &inner_replay,
+                        inner_mac_key.expose(),
+                        &alice_identity,
+                        &bob_identity,
                     );
                     let inner_unknown_message = PreKeySignalMessage {
                         registration_id: Some(encrypted.message.registration_id),
@@ -291,28 +428,21 @@ fn signal_fixtures_match_public_signal_primitives() {
                         signed_pre_key_id: Some(encrypted.message.signed_pre_key_id),
                         base_key: Some(encrypted.message.base_key.clone()),
                         identity_key: Some(encrypted.message.identity_key.clone()),
-                        message: Some(Bytes::from(inner_unknown)),
-                    }
-                    .encode_to_vec();
+                        message: Some(inner_unknown),
+                    };
+                    let mut inner_unknown_message_bytes = vec![inner_replay[0]];
+                    inner_unknown_message_bytes
+                        .extend_from_slice(&inner_unknown_message.encode_to_vec());
                     assert_hex(
                         &mut missing_expected,
                         &format!("{}.message_inner_unknown_field_hex", vector.name),
-                        &inner_unknown_message,
+                        &inner_unknown_message_bytes,
                         expected_inner_unknown_message_hex,
-                    );
-                    let decoded_inner_unknown =
-                        decode_signal_pre_key_whisper_message(&inner_unknown_message)
-                            .expect("pre-key session inner unknown outer message should decode");
-                    assert_eq!(
-                        encode_signal_pre_key_whisper_message(&decoded_inner_unknown).unwrap(),
-                        encrypted.message_bytes,
-                        "{} pre-key session inner unknown outer message should canonicalize",
-                        vector.name
                     );
                     let decrypted_inner_unknown = decrypt_signal_inbound_pre_key_session_message(
                         &fixture.bob_material,
                         Some(&fixture.bob_one_time),
-                        &inner_unknown_message,
+                        &inner_unknown_message_bytes,
                     )
                     .unwrap();
                     assert_eq!(
@@ -330,6 +460,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let replay_err = decrypt_signal_provider_session_record_message(
                     &decrypted.record,
                     &inner_replay,
+                    &fixture.bob_material.identity.public_key,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -445,19 +576,34 @@ fn signal_fixtures_match_public_signal_primitives() {
                 });
                 let plaintext = bytes_hex(&vector.plaintext_hex);
                 let accept_all_signatures = |_: &[u8], _: &[u8], _: &[u8]| true;
-                let encrypted = encrypt_signal_outbound_pre_key_session_message(
-                    &fixture.alice_material,
-                    &fixture.alice_base,
-                    &fixture.bob_session,
-                    &accept_all_signatures,
-                    &plaintext,
-                )
-                .unwrap();
+                let alice_sending_ratchet =
+                    key_pair_from_private_hex(&vector.alice_sending_ratchet_private_hex);
+                let encrypted =
+                    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet(
+                        &fixture.alice_material,
+                        &fixture.alice_base,
+                        &alice_sending_ratchet,
+                        &fixture.bob_session,
+                        &accept_all_signatures,
+                        &plaintext,
+                    )
+                    .unwrap();
                 let mut mismatched =
                     decode_signal_pre_key_whisper_message(&encrypted.message_bytes).unwrap();
                 mismatched.pre_key_id = Some(vector.mismatched_one_time_pre_key_id);
-                let mismatched_message =
-                    encode_signal_pre_key_whisper_message(&mismatched).unwrap();
+                let inner_mac_key = pre_key_inner_mac_key(
+                    &fixture.alice_material,
+                    &fixture.alice_base,
+                    &alice_sending_ratchet,
+                    &fixture.bob_session,
+                );
+                let mismatched_message = encode_signal_pre_key_whisper_message(
+                    &mismatched,
+                    inner_mac_key.expose(),
+                    &fixture.alice_material.identity.public_key,
+                    &fixture.bob_material.identity.public_key,
+                )
+                .unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.mismatched_message_hex", vector.name),
@@ -491,14 +637,18 @@ fn signal_fixtures_match_public_signal_primitives() {
                 });
                 let plaintext = bytes_hex(&vector.plaintext_hex);
                 let accept_all_signatures = |_: &[u8], _: &[u8], _: &[u8]| true;
-                let encrypted = encrypt_signal_outbound_pre_key_session_message(
-                    &fixture.alice_material,
-                    &fixture.alice_base,
-                    &fixture.bob_session,
-                    &accept_all_signatures,
-                    &plaintext,
-                )
-                .unwrap();
+                let alice_sending_ratchet =
+                    key_pair_from_private_hex(&vector.alice_sending_ratchet_private_hex);
+                let encrypted =
+                    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet(
+                        &fixture.alice_material,
+                        &fixture.alice_base,
+                        &alice_sending_ratchet,
+                        &fixture.bob_session,
+                        &accept_all_signatures,
+                        &plaintext,
+                    )
+                    .unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.message_hex", vector.name),
@@ -537,14 +687,18 @@ fn signal_fixtures_match_public_signal_primitives() {
                 };
                 let plaintext = bytes_hex(&vector.plaintext_hex);
                 let accept_all_signatures = |_: &[u8], _: &[u8], _: &[u8]| true;
-                let encrypted = encrypt_signal_outbound_pre_key_session_message(
-                    &fixture.alice_material,
-                    &fixture.alice_base,
-                    &fixture.bob_session,
-                    &accept_all_signatures,
-                    &plaintext,
-                )
-                .unwrap();
+                let alice_sending_ratchet =
+                    key_pair_from_private_hex(&vector.alice_sending_ratchet_private_hex);
+                let encrypted =
+                    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet(
+                        &fixture.alice_material,
+                        &fixture.alice_base,
+                        &alice_sending_ratchet,
+                        &fixture.bob_session,
+                        &accept_all_signatures,
+                        &plaintext,
+                    )
+                    .unwrap();
                 assert_eq!(encrypted.message.pre_key_id, None, "{}", vector.name);
                 assert_hex(
                     &mut missing_expected,
@@ -579,19 +733,34 @@ fn signal_fixtures_match_public_signal_primitives() {
                 });
                 let plaintext = bytes_hex(&vector.plaintext_hex);
                 let accept_all_signatures = |_: &[u8], _: &[u8], _: &[u8]| true;
-                let encrypted = encrypt_signal_outbound_pre_key_session_message(
-                    &fixture.alice_material,
-                    &fixture.alice_base,
-                    &fixture.bob_session,
-                    &accept_all_signatures,
-                    &plaintext,
-                )
-                .unwrap();
+                let alice_sending_ratchet =
+                    key_pair_from_private_hex(&vector.alice_sending_ratchet_private_hex);
+                let encrypted =
+                    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet(
+                        &fixture.alice_material,
+                        &fixture.alice_base,
+                        &alice_sending_ratchet,
+                        &fixture.bob_session,
+                        &accept_all_signatures,
+                        &plaintext,
+                    )
+                    .unwrap();
                 let mut mismatched =
                     decode_signal_pre_key_whisper_message(&encrypted.message_bytes).unwrap();
                 mismatched.signed_pre_key_id = vector.mismatched_signed_pre_key_id;
-                let mismatched_message =
-                    encode_signal_pre_key_whisper_message(&mismatched).unwrap();
+                let inner_mac_key = pre_key_inner_mac_key(
+                    &fixture.alice_material,
+                    &fixture.alice_base,
+                    &alice_sending_ratchet,
+                    &fixture.bob_session,
+                );
+                let mismatched_message = encode_signal_pre_key_whisper_message(
+                    &mismatched,
+                    inner_mac_key.expose(),
+                    &fixture.alice_material.identity.public_key,
+                    &fixture.bob_material.identity.public_key,
+                )
+                .unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.mismatched_message_hex", vector.name),
@@ -623,14 +792,18 @@ fn signal_fixtures_match_public_signal_primitives() {
                 });
                 let plaintext = bytes_hex(&vector.plaintext_hex);
                 let accept_all_signatures = |_: &[u8], _: &[u8], _: &[u8]| true;
-                let encrypted = encrypt_signal_outbound_pre_key_session_message(
-                    &fixture.alice_material,
-                    &fixture.alice_base,
-                    &fixture.bob_session,
-                    &accept_all_signatures,
-                    &plaintext,
-                )
-                .unwrap();
+                let alice_sending_ratchet =
+                    key_pair_from_private_hex(&vector.alice_sending_ratchet_private_hex);
+                let encrypted =
+                    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet(
+                        &fixture.alice_material,
+                        &fixture.alice_base,
+                        &alice_sending_ratchet,
+                        &fixture.bob_session,
+                        &accept_all_signatures,
+                        &plaintext,
+                    )
+                    .unwrap();
                 match (
                     vector.tampered_message_hex.as_ref(),
                     vector.expected_tamper_error.as_ref(),
@@ -642,8 +815,19 @@ fn signal_fixtures_match_public_signal_primitives() {
                         let mut tampered_ciphertext = tampered.message.ciphertext.to_vec();
                         *tampered_ciphertext.last_mut().unwrap() ^= 1;
                         tampered.message.ciphertext = Bytes::from(tampered_ciphertext);
-                        let tampered_message =
-                            encode_signal_pre_key_whisper_message(&tampered).unwrap();
+                        let inner_mac_key = pre_key_inner_mac_key(
+                            &fixture.alice_material,
+                            &fixture.alice_base,
+                            &alice_sending_ratchet,
+                            &fixture.bob_session,
+                        );
+                        let tampered_message = encode_signal_pre_key_whisper_message(
+                            &tampered,
+                            inner_mac_key.expose(),
+                            &fixture.alice_material.identity.public_key,
+                            &fixture.bob_material.identity.public_key,
+                        )
+                        .unwrap();
                         let tamper_err = decrypt_signal_inbound_pre_key_session_message(
                             &fixture.bob_material,
                             None,
@@ -679,8 +863,15 @@ fn signal_fixtures_match_public_signal_primitives() {
                 assert!(!encrypted.used_one_time_pre_key, "{}", vector.name);
                 assert!(!decrypted.used_one_time_pre_key, "{}", vector.name);
                 assert_eq!(encrypted.message.pre_key_id, None, "{}", vector.name);
-                let inner_replay = encode_signal_whisper_message(&encrypted.message.message)
-                    .expect("signed-pre-key-only inner replay message");
+                let inner_mac_key = pre_key_inner_mac_key(
+                    &fixture.alice_material,
+                    &fixture.alice_base,
+                    &alice_sending_ratchet,
+                    &fixture.bob_session,
+                );
+                let alice_identity = fixture.alice_material.identity.public_key.clone();
+                let bob_identity = fixture.bob_material.identity.public_key.clone();
+                let inner_replay = pre_key_inner_framed_bytes(&encrypted.message_bytes);
                 if let Some(expected_outer_unknown_message_hex) =
                     vector.message_outer_unknown_field_hex.as_ref()
                 {
@@ -696,7 +887,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                         decode_signal_pre_key_whisper_message(&outer_unknown_message)
                             .expect("signed-pre-key-only outer unknown field should decode");
                     assert_eq!(
-                        encode_signal_pre_key_whisper_message(&decoded_outer_unknown).unwrap(),
+                        encode_signal_pre_key_whisper_message(
+                            &decoded_outer_unknown,
+                            inner_mac_key.expose(),
+                            &alice_identity,
+                            &bob_identity,
+                        )
+                        .unwrap(),
                         encrypted.message_bytes,
                         "{} signed-pre-key-only outer unknown field should canonicalize",
                         vector.name
@@ -722,15 +919,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                 if let Some(expected_inner_unknown_message_hex) =
                     vector.message_inner_unknown_field_hex.as_ref()
                 {
-                    let mut inner_unknown = inner_replay.to_vec();
-                    inner_unknown.extend_from_slice(&[0x78, 0x63]);
-                    let decoded_inner_unknown = decode_signal_whisper_message(&inner_unknown)
-                        .expect("signed-pre-key-only inner unknown field should decode");
-                    assert_eq!(
-                        encode_signal_whisper_message(&decoded_inner_unknown).unwrap(),
-                        inner_replay,
-                        "{} signed-pre-key-only inner unknown field should canonicalize",
-                        vector.name
+                    // Append an unknown protobuf field INSIDE the inner WhisperMessage
+                    // protobuf, re-MAC the inner with the same per-message key, and rewrap.
+                    let inner_unknown = inner_whisper_with_unknown_field(
+                        &inner_replay,
+                        inner_mac_key.expose(),
+                        &alice_identity,
+                        &bob_identity,
                     );
                     let inner_unknown_message = PreKeySignalMessage {
                         registration_id: Some(encrypted.message.registration_id),
@@ -738,29 +933,21 @@ fn signal_fixtures_match_public_signal_primitives() {
                         signed_pre_key_id: Some(encrypted.message.signed_pre_key_id),
                         base_key: Some(encrypted.message.base_key.clone()),
                         identity_key: Some(encrypted.message.identity_key.clone()),
-                        message: Some(Bytes::from(inner_unknown)),
-                    }
-                    .encode_to_vec();
+                        message: Some(inner_unknown),
+                    };
+                    let mut inner_unknown_message_bytes = vec![inner_replay[0]];
+                    inner_unknown_message_bytes
+                        .extend_from_slice(&inner_unknown_message.encode_to_vec());
                     assert_hex(
                         &mut missing_expected,
                         &format!("{}.message_inner_unknown_field_hex", vector.name),
-                        &inner_unknown_message,
+                        &inner_unknown_message_bytes,
                         expected_inner_unknown_message_hex,
-                    );
-                    let decoded_inner_unknown = decode_signal_pre_key_whisper_message(
-                        &inner_unknown_message,
-                    )
-                    .expect("signed-pre-key-only inner unknown outer message should decode");
-                    assert_eq!(
-                        encode_signal_pre_key_whisper_message(&decoded_inner_unknown).unwrap(),
-                        encrypted.message_bytes,
-                        "{} signed-pre-key-only inner unknown outer message should canonicalize",
-                        vector.name
                     );
                     let decrypted_inner_unknown = decrypt_signal_inbound_pre_key_session_message(
                         &fixture.bob_material,
                         None,
-                        &inner_unknown_message,
+                        &inner_unknown_message_bytes,
                     )
                     .unwrap();
                     assert_eq!(
@@ -778,6 +965,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let replay_err = decrypt_signal_provider_session_record_message(
                     &decrypted.record,
                     &inner_replay,
+                    &bob_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -819,7 +1007,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                         ciphertext: bytes_hex(&vector.ciphertext_hex),
                     },
                 };
-                let encoded = encode_signal_pre_key_whisper_message(&message).unwrap();
+                let encoded = frame_test_pre_key_whisper(&message).unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.encoded_hex", vector.name),
@@ -834,14 +1022,53 @@ fn signal_fixtures_match_public_signal_primitives() {
                 );
             }
             SignalFixture::PreKeyWhisperMessageMissingInnerPreviousCounter(vector) => {
+                // Build an inner WhisperMessage protobuf that OMITS the previous_counter
+                // field (field 3); on decode it must default to 0. The inner is framed
+                // with the libsignal MAC (0x33 || protobuf || MAC8) over the fixed test
+                // identities, then wrapped in the outer PreKeyWhisperMessage.
+                let ratchet = bytes_hex(&vector.ephemeral_key_hex);
+                let ciphertext = bytes_hex(&vector.ciphertext_hex);
+                let mut inner_proto = Vec::new();
+                inner_proto.push(0x0a); // field 1 (ratchetKey), len-delimited
+                inner_proto.push(ratchet.len() as u8);
+                inner_proto.extend_from_slice(&ratchet);
+                inner_proto.push(0x10); // field 2 (counter), varint
+                inner_proto.push(vector.counter as u8);
+                // field 3 (previousCounter) intentionally omitted
+                inner_proto.push(0x22); // field 4 (ciphertext), len-delimited
+                inner_proto.push(ciphertext.len() as u8);
+                inner_proto.extend_from_slice(&ciphertext);
+                let mut inner_serialized = vec![WHISPER_MESSAGE_VERSION_BYTE];
+                inner_serialized.extend_from_slice(&inner_proto);
+                let mut mac_input = Vec::new();
+                mac_input.extend_from_slice(&whisper_test_sender());
+                mac_input.extend_from_slice(&whisper_test_receiver());
+                mac_input.extend_from_slice(&inner_serialized);
+                let mac = hmac_sha256(&mac_input, &WHISPER_TEST_MAC_KEY).unwrap();
+                inner_serialized.extend_from_slice(&mac[..WHISPER_MESSAGE_MAC_LEN]);
+                let outer = PreKeySignalMessage {
+                    registration_id: Some(vector.registration_id),
+                    pre_key_id: vector.pre_key_id,
+                    signed_pre_key_id: Some(vector.signed_pre_key_id),
+                    base_key: Some(bytes_hex(&vector.base_key_hex)),
+                    identity_key: Some(bytes_hex(&vector.identity_key_hex)),
+                    message: Some(Bytes::from(inner_serialized)),
+                };
+                let mut encoded = vec![WHISPER_MESSAGE_VERSION_BYTE];
+                encoded.extend_from_slice(&outer.encode_to_vec());
+                assert_hex(
+                    &mut missing_expected,
+                    &format!("{}.encoded_hex", vector.name),
+                    &encoded,
+                    &vector.encoded_hex,
+                );
                 let decoded =
-                    decode_signal_pre_key_whisper_message(&bytes_hex(&vector.encoded_hex))
-                        .unwrap_or_else(|err| {
-                            panic!(
-                                "{} should decode without inner previous counter: {err}",
-                                vector.name
-                            )
-                        });
+                    decode_signal_pre_key_whisper_message(&encoded).unwrap_or_else(|err| {
+                        panic!(
+                            "{} should decode without inner previous counter: {err}",
+                            vector.name
+                        )
+                    });
                 assert_eq!(
                     decoded.registration_id, vector.registration_id,
                     "{}",
@@ -868,16 +1095,67 @@ fn signal_fixtures_match_public_signal_primitives() {
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.canonical_encoded_hex", vector.name),
-                    &encode_signal_pre_key_whisper_message(&decoded).unwrap(),
+                    &frame_test_pre_key_whisper(&decoded).unwrap(),
                     &vector.canonical_encoded_hex,
                 );
             }
             SignalFixture::PreKeyWhisperMessageUnknownField(vector) => {
+                // Rebuild the canonical pre-key message from the fixture fields, then
+                // inject an unknown protobuf field (outer or inner depending on the
+                // vector). Under the libsignal framing the inner WhisperMessage carries
+                // a MAC over its protobuf, so an inner unknown field must live inside
+                // that protobuf and be re-MAC-ed; an outer unknown field is appended to
+                // the (MAC-less) outer protobuf. Both must decode and canonicalize to
+                // the same unknown-field-free message.
+                let canonical_message = SignalPreKeyWhisperMessage {
+                    registration_id: vector.registration_id,
+                    pre_key_id: vector.pre_key_id,
+                    signed_pre_key_id: vector.signed_pre_key_id,
+                    base_key: bytes_hex(&vector.base_key_hex),
+                    identity_key: bytes_hex(&vector.identity_key_hex),
+                    message: SignalWhisperMessage {
+                        ephemeral_key: bytes_hex(&vector.ephemeral_key_hex),
+                        counter: vector.counter,
+                        previous_counter: vector.previous_counter,
+                        ciphertext: bytes_hex(&vector.ciphertext_hex),
+                    },
+                };
+                let canonical = frame_test_pre_key_whisper(&canonical_message).unwrap();
+                let inner_framed = pre_key_inner_framed_bytes(&canonical);
+                let encoded = if vector.name.contains("inner_unknown") {
+                    let inner_unknown = inner_whisper_with_unknown_field(
+                        &inner_framed,
+                        &WHISPER_TEST_MAC_KEY,
+                        &whisper_test_sender(),
+                        &whisper_test_receiver(),
+                    );
+                    let outer = PreKeySignalMessage {
+                        registration_id: Some(canonical_message.registration_id),
+                        pre_key_id: canonical_message.pre_key_id,
+                        signed_pre_key_id: Some(canonical_message.signed_pre_key_id),
+                        base_key: Some(canonical_message.base_key.clone()),
+                        identity_key: Some(canonical_message.identity_key.clone()),
+                        message: Some(inner_unknown),
+                    };
+                    let mut bytes = vec![canonical[0]];
+                    bytes.extend_from_slice(&outer.encode_to_vec());
+                    bytes
+                } else {
+                    let mut bytes = canonical.to_vec();
+                    // Unknown outer protobuf field: field 15, varint wire type, value 0x63.
+                    bytes.extend_from_slice(&[0x78, 0x63]);
+                    bytes
+                };
+                assert_hex(
+                    &mut missing_expected,
+                    &format!("{}.encoded_hex", vector.name),
+                    &encoded,
+                    &vector.encoded_hex,
+                );
                 let decoded =
-                    decode_signal_pre_key_whisper_message(&bytes_hex(&vector.encoded_hex))
-                        .unwrap_or_else(|err| {
-                            panic!("{} should decode with unknown fields: {err}", vector.name)
-                        });
+                    decode_signal_pre_key_whisper_message(&encoded).unwrap_or_else(|err| {
+                        panic!("{} should decode with unknown fields: {err}", vector.name)
+                    });
                 assert_eq!(
                     decoded.registration_id, vector.registration_id,
                     "{}",
@@ -908,7 +1186,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.canonical_encoded_hex", vector.name),
-                    &encode_signal_pre_key_whisper_message(&decoded).unwrap(),
+                    &frame_test_pre_key_whisper(&decoded).unwrap(),
                     &vector.canonical_encoded_hex,
                 );
             }
@@ -926,7 +1204,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                         ciphertext: bytes_hex(&vector.ciphertext_hex),
                     },
                 };
-                let err = encode_signal_pre_key_whisper_message(&message).unwrap_err();
+                let err = frame_test_pre_key_whisper(&message).unwrap_err();
                 assert_eq!(
                     err.to_string(),
                     vector.expected_error,
@@ -948,7 +1226,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                         ciphertext: bytes_hex(&vector.ciphertext_hex),
                     },
                 };
-                let err = encode_signal_pre_key_whisper_message(&message).unwrap_err();
+                let err = frame_test_pre_key_whisper(&message).unwrap_err();
                 assert_eq!(
                     err.to_string(),
                     vector.expected_error,
@@ -994,6 +1272,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                             iv: fixed_16_hex(&vector.skipped_iv_hex),
                         },
                     }],
+                    inbound_base_key: None,
                 };
                 let encoded = encode_signal_provider_session_record(&record).unwrap();
                 assert_hex(
@@ -1026,6 +1305,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: alice_local_ratchet.clone(),
                     previous_counter: vector.alice_previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let bob_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.alice_registration_id,
@@ -1045,17 +1325,22 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: bob_local_ratchet,
                     previous_counter: vector.bob_previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
+                let alice_identity = bytes_hex(&vector.alice_identity_key_hex);
+                let bob_identity = bytes_hex(&vector.bob_identity_key_hex);
                 let alice_record = encode_signal_provider_session_record(&alice_record).unwrap();
                 let bob_record = encode_signal_provider_session_record(&bob_record).unwrap();
                 let alice_message = encrypt_signal_provider_session_record_message(
                     &alice_record,
                     &bytes_hex(&vector.alice_plaintext_hex),
+                    &alice_identity,
                 )
                 .unwrap();
                 let bob_receive = decrypt_signal_provider_session_record_message(
                     &bob_record,
                     &alice_message.message_bytes,
+                    &bob_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1075,6 +1360,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let bob_message = encrypt_signal_provider_session_record_message(
                     &bob_receive.record,
                     &bytes_hex(&vector.bob_plaintext_hex),
+                    &bob_identity,
                 )
                 .unwrap();
                 let bob_after_reply =
@@ -1088,6 +1374,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let alice_receive = decrypt_signal_provider_session_record_message(
                     &alice_message.record,
                     &bob_message.message_bytes,
+                    &alice_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1146,6 +1433,10 @@ fn signal_fixtures_match_public_signal_primitives() {
                     key_pair_from_private_hex(&vector.sender_local_ratchet_private_hex);
                 let receiver_local_ratchet =
                     key_pair_from_private_hex(&vector.receiver_local_ratchet_private_hex);
+                // Both records share the same remote identity (single 1:1 peer), so
+                // the local identity passed to encrypt/decrypt equals it and the inner
+                // WhisperMessage MAC covers remote_identity || remote_identity.
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let sender_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -1164,11 +1455,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: sender_local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let sender_record = encode_signal_provider_session_record(&sender_record).unwrap();
                 let encrypted = encrypt_signal_provider_session_record_message(
                     &sender_record,
                     &bytes_hex(&vector.plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let receiver_record = SignalProviderSessionRecord {
@@ -1186,12 +1479,14 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: receiver_local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let receiver_record =
                     encode_signal_provider_session_record(&receiver_record).unwrap();
                 let decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &encrypted.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1203,18 +1498,43 @@ fn signal_fixtures_match_public_signal_primitives() {
                 if let Some(expected_unknown_message_hex) =
                     vector.message_with_unknown_field_hex.as_ref()
                 {
-                    let mut unknown_message = encrypted.message_bytes.to_vec();
-                    unknown_message.extend_from_slice(&[0x78, 0x63]);
+                    let message_mac_key = ratchet_signal_message_chain(&SignalMessageChainKey {
+                        key: secret_hex(&vector.sending_chain_key_hex),
+                        counter: vector.sending_counter,
+                    })
+                    .unwrap()
+                    .message_keys
+                    .mac_key;
+                    // Append the unknown field INSIDE the WhisperMessage protobuf and
+                    // re-MAC with the same per-message key/identities (the MAC covers the
+                    // protobuf, so the unknown field must precede the MAC trailer).
+                    let unknown_message = inner_whisper_with_unknown_field(
+                        &encrypted.message_bytes,
+                        message_mac_key.expose(),
+                        &local_identity,
+                        &local_identity,
+                    );
                     assert_hex(
                         &mut missing_expected,
                         &format!("{}.message_with_unknown_field_hex", vector.name),
                         &unknown_message,
                         expected_unknown_message_hex,
                     );
-                    let decoded_unknown = decode_signal_whisper_message(&unknown_message)
-                        .expect("provider-session whisper with unknown field should decode");
+                    let decoded_unknown = decode_signal_whisper_message(
+                        &unknown_message,
+                        message_mac_key.expose(),
+                        &local_identity,
+                        &local_identity,
+                    )
+                    .expect("provider-session whisper with unknown field should decode");
                     assert_eq!(
-                        encode_signal_whisper_message(&decoded_unknown).unwrap(),
+                        encode_signal_whisper_message(
+                            &decoded_unknown,
+                            message_mac_key.expose(),
+                            &local_identity,
+                            &local_identity,
+                        )
+                        .unwrap(),
                         encrypted.message_bytes,
                         "{} provider-session whisper unknown field should canonicalize",
                         vector.name
@@ -1222,6 +1542,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     let decrypted_unknown = decrypt_signal_provider_session_record_message(
                         &receiver_record,
                         &unknown_message,
+                        &local_identity,
                     )
                     .unwrap();
                     assert_eq!(
@@ -1260,6 +1581,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     key_pair_from_private_hex(&vector.sender_local_ratchet_private_hex);
                 let receiver_local_ratchet =
                     key_pair_from_private_hex(&vector.receiver_local_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let sender_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -1275,16 +1597,19 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: sender_local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let sender_record = encode_signal_provider_session_record(&sender_record).unwrap();
                 let first = encrypt_signal_provider_session_record_message(
                     &sender_record,
                     &bytes_hex(&vector.first_plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let second = encrypt_signal_provider_session_record_message(
                     &first.record,
                     &bytes_hex(&vector.second_plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let receiver_record = SignalProviderSessionRecord {
@@ -1302,12 +1627,14 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: receiver_local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let receiver_record =
                     encode_signal_provider_session_record(&receiver_record).unwrap();
                 let first_decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &first.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1325,6 +1652,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let replay_err = decrypt_signal_provider_session_record_message(
                     &first_decrypted.record,
                     &first.message_bytes,
+                    &local_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -1336,6 +1664,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let second_decrypted = decrypt_signal_provider_session_record_message(
                     &first_decrypted.record,
                     &second.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1385,6 +1714,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let local_ratchet = key_pair_from_private_hex(&vector.local_ratchet_private_hex);
                 let new_remote_ratchet =
                     key_pair_from_private_hex(&vector.new_remote_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -1403,6 +1733,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let root_step = ratchet_signal_root_key(
                     &record.root_key,
@@ -1422,7 +1753,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     )
                     .unwrap(),
                 };
-                let first_message_bytes = encode_signal_whisper_message(&first_message).unwrap();
+                let first_message_bytes = encode_signal_whisper_message(
+                    &first_message,
+                    first_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let next_step = ratchet_signal_message_chain(&first_step.next_chain_key).unwrap();
                 let next_plaintext = bytes_hex(&vector.next_plaintext_hex);
                 let next_message = SignalWhisperMessage {
@@ -1435,11 +1772,20 @@ fn signal_fixtures_match_public_signal_primitives() {
                     )
                     .unwrap(),
                 };
-                let next_message_bytes = encode_signal_whisper_message(&next_message).unwrap();
+                let next_message_bytes = encode_signal_whisper_message(
+                    &next_message,
+                    next_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let record = encode_signal_provider_session_record(&record).unwrap();
-                let first_decrypted =
-                    decrypt_signal_provider_session_record_message(&record, &first_message_bytes)
-                        .unwrap();
+                let first_decrypted = decrypt_signal_provider_session_record_message(
+                    &record,
+                    &first_message_bytes,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_eq!(
                     first_decrypted.plaintext, first_plaintext,
                     "{} first new-ratchet message",
@@ -1454,6 +1800,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let replay_err = decrypt_signal_provider_session_record_message(
                     &first_decrypted.record,
                     &first_message_bytes,
+                    &local_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -1465,6 +1812,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let next_decrypted = decrypt_signal_provider_session_record_message(
                     &first_decrypted.record,
                     &next_message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1482,7 +1830,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 );
                 assert_eq!(
                     after_next.receiving_chain.as_ref().unwrap().counter,
-                    next_step.message_counter,
+                    next_step.message_counter + 1,
                     "{} receiving counter after next new-ratchet message",
                     vector.name
                 );
@@ -1515,6 +1863,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let local_ratchet = key_pair_from_private_hex(&vector.local_ratchet_private_hex);
                 let new_remote_ratchet =
                     key_pair_from_private_hex(&vector.new_remote_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -1533,6 +1882,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let root_step = ratchet_signal_root_key(
                     &record.root_key,
@@ -1549,13 +1899,24 @@ fn signal_fixtures_match_public_signal_primitives() {
                     ciphertext: encrypt_signal_message_body(&plaintext, &message_step.message_keys)
                         .unwrap(),
                 };
-                let valid_message_bytes = encode_signal_whisper_message(&valid_message).unwrap();
+                let valid_message_bytes = encode_signal_whisper_message(
+                    &valid_message,
+                    message_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let mut tampered_message = valid_message.clone();
                 let mut tampered_ciphertext = tampered_message.ciphertext.to_vec();
                 *tampered_ciphertext.last_mut().unwrap() ^= 1;
                 tampered_message.ciphertext = Bytes::from(tampered_ciphertext);
-                let tampered_message_bytes =
-                    encode_signal_whisper_message(&tampered_message).unwrap();
+                let tampered_message_bytes = encode_signal_whisper_message(
+                    &tampered_message,
+                    message_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let record = encode_signal_provider_session_record(&record).unwrap();
                 assert_hex(
                     &mut missing_expected,
@@ -1566,6 +1927,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let tamper_err = decrypt_signal_provider_session_record_message(
                     &record,
                     &tampered_message_bytes,
+                    &local_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -1574,9 +1936,12 @@ fn signal_fixtures_match_public_signal_primitives() {
                     "{} expected exact new-ratchet tamper error",
                     vector.name,
                 );
-                let decrypted =
-                    decrypt_signal_provider_session_record_message(&record, &valid_message_bytes)
-                        .unwrap();
+                let decrypted = decrypt_signal_provider_session_record_message(
+                    &record,
+                    &valid_message_bytes,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_eq!(
                     decrypted.plaintext, plaintext,
                     "{} valid new-ratchet message after tamper rejection",
@@ -1591,7 +1956,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 );
                 assert_eq!(
                     after_valid.receiving_chain.as_ref().unwrap().counter,
-                    message_step.message_counter,
+                    message_step.message_counter + 1,
                     "{} receiving counter after valid new-ratchet message",
                     vector.name
                 );
@@ -1619,6 +1984,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     key_pair_from_private_hex(&vector.sender_local_ratchet_private_hex);
                 let receiver_local_ratchet =
                     key_pair_from_private_hex(&vector.receiver_local_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let sender_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -1634,11 +2000,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: sender_local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let sender_record = encode_signal_provider_session_record(&sender_record).unwrap();
                 let valid = encrypt_signal_provider_session_record_message(
                     &sender_record,
                     &bytes_hex(&vector.plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let receiver_record = SignalProviderSessionRecord {
@@ -1656,6 +2024,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: receiver_local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let receiver_record =
                     encode_signal_provider_session_record(&receiver_record).unwrap();
@@ -1676,6 +2045,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let tamper_err = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &tampered_message,
+                    &local_identity,
                 )
                 .unwrap_err()
                 .to_string();
@@ -1687,6 +2057,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &valid.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1716,6 +2087,7 @@ fn signal_fixtures_match_public_signal_primitives() {
             }
             SignalFixture::ProviderSessionFutureTamperReject(vector) => {
                 let remote_ratchet = key_pair_from_private_hex(&vector.remote_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let remote_ratchet_key = prefixed_public_key(&remote_ratchet);
                 let initial_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
@@ -1734,6 +2106,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     ),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let initial_record =
                     encode_signal_provider_session_record(&initial_record).unwrap();
@@ -1752,62 +2125,77 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let target_step = ratchet_signal_message_chain(&chain).unwrap();
                 let next_step = ratchet_signal_message_chain(&target_step.next_chain_key).unwrap();
                 assert_eq!(
-                    skipped_step.message_counter,
-                    vector.receiving_counter + 1,
+                    skipped_step.message_counter, vector.receiving_counter,
                     "{} skipped counter",
                     vector.name
                 );
                 assert_eq!(
                     target_step.message_counter,
-                    vector.receiving_counter + 2,
+                    vector.receiving_counter + 1,
                     "{} target counter",
                     vector.name
                 );
                 assert_eq!(
                     next_step.message_counter,
-                    vector.receiving_counter + 3,
+                    vector.receiving_counter + 2,
                     "{} next counter",
                     vector.name
                 );
 
-                let skipped_message = encode_signal_whisper_message(&SignalWhisperMessage {
-                    ephemeral_key: remote_ratchet_key.clone(),
-                    counter: skipped_step.message_counter,
-                    previous_counter: vector.previous_counter,
-                    ciphertext: encrypt_signal_message_body(
-                        &bytes_hex(&vector.skipped_plaintext_hex),
-                        &skipped_step.message_keys,
-                    )
-                    .unwrap(),
-                })
+                let skipped_message = encode_signal_whisper_message(
+                    &SignalWhisperMessage {
+                        ephemeral_key: remote_ratchet_key.clone(),
+                        counter: skipped_step.message_counter,
+                        previous_counter: vector.previous_counter,
+                        ciphertext: encrypt_signal_message_body(
+                            &bytes_hex(&vector.skipped_plaintext_hex),
+                            &skipped_step.message_keys,
+                        )
+                        .unwrap(),
+                    },
+                    skipped_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
                 .unwrap();
-                let target_message = encode_signal_whisper_message(&SignalWhisperMessage {
-                    ephemeral_key: remote_ratchet_key.clone(),
-                    counter: target_step.message_counter,
-                    previous_counter: vector.previous_counter,
-                    ciphertext: encrypt_signal_message_body(
-                        &bytes_hex(&vector.target_plaintext_hex),
-                        &target_step.message_keys,
-                    )
-                    .unwrap(),
-                })
+                let target_message = encode_signal_whisper_message(
+                    &SignalWhisperMessage {
+                        ephemeral_key: remote_ratchet_key.clone(),
+                        counter: target_step.message_counter,
+                        previous_counter: vector.previous_counter,
+                        ciphertext: encrypt_signal_message_body(
+                            &bytes_hex(&vector.target_plaintext_hex),
+                            &target_step.message_keys,
+                        )
+                        .unwrap(),
+                    },
+                    target_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
                 .unwrap();
-                let next_message = encode_signal_whisper_message(&SignalWhisperMessage {
-                    ephemeral_key: remote_ratchet_key,
-                    counter: next_step.message_counter,
-                    previous_counter: vector.previous_counter,
-                    ciphertext: encrypt_signal_message_body(
-                        &bytes_hex(&vector.next_plaintext_hex),
-                        &next_step.message_keys,
-                    )
-                    .unwrap(),
-                })
+                let next_message = encode_signal_whisper_message(
+                    &SignalWhisperMessage {
+                        ephemeral_key: remote_ratchet_key,
+                        counter: next_step.message_counter,
+                        previous_counter: vector.previous_counter,
+                        ciphertext: encrypt_signal_message_body(
+                            &bytes_hex(&vector.next_plaintext_hex),
+                            &next_step.message_keys,
+                        )
+                        .unwrap(),
+                    },
+                    next_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
                 .unwrap();
                 let mut tampered_message = target_message.to_vec();
                 *tampered_message.last_mut().unwrap() ^= 1;
                 let tamper_err = decrypt_signal_provider_session_record_message(
                     &initial_record,
                     &tampered_message,
+                    &local_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -1820,6 +2208,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let target_decrypted = decrypt_signal_provider_session_record_message(
                     &initial_record,
                     &target_message,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1832,7 +2221,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     decode_signal_provider_session_record(&target_decrypted.record).unwrap();
                 assert_eq!(
                     after_target.receiving_chain.as_ref().unwrap().counter,
-                    target_step.message_counter,
+                    target_step.message_counter + 1,
                     "{} receiving counter after target",
                     vector.name
                 );
@@ -1851,6 +2240,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let skipped_decrypted = decrypt_signal_provider_session_record_message(
                     &target_decrypted.record,
                     &skipped_message,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1868,7 +2258,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 );
                 assert_eq!(
                     after_skipped.receiving_chain.as_ref().unwrap().counter,
-                    target_step.message_counter,
+                    target_step.message_counter + 1,
                     "{} receiving counter after skipped",
                     vector.name
                 );
@@ -1876,6 +2266,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let next_decrypted = decrypt_signal_provider_session_record_message(
                     &skipped_decrypted.record,
                     &next_message,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -1891,7 +2282,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                         .as_ref()
                         .unwrap()
                         .counter,
-                    next_step.message_counter,
+                    next_step.message_counter + 1,
                     "{} receiving counter after next",
                     vector.name
                 );
@@ -1944,6 +2335,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     key_pair_from_private_hex(&vector.sender_local_ratchet_private_hex);
                 let receiver_local_ratchet =
                     key_pair_from_private_hex(&vector.receiver_local_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let sender_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -1959,11 +2351,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: sender_local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let sender_record = encode_signal_provider_session_record(&sender_record).unwrap();
                 let valid = encrypt_signal_provider_session_record_message(
                     &sender_record,
                     &bytes_hex(&vector.valid_plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let receiver_record = SignalProviderSessionRecord {
@@ -1981,6 +2375,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: receiver_local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let receiver_record =
                     encode_signal_provider_session_record(&receiver_record).unwrap();
@@ -1996,7 +2391,15 @@ fn signal_fixtures_match_public_signal_primitives() {
                     previous_counter: vector.previous_counter,
                     ciphertext: bytes_hex(&vector.far_future_ciphertext_hex),
                 };
-                let far_future_message = encode_signal_whisper_message(&far_future).unwrap();
+                // Rejected on the far-future counter check before the MAC is verified,
+                // so the exact MAC key is irrelevant; identities stay consistent.
+                let far_future_message = encode_signal_whisper_message(
+                    &far_future,
+                    &[0u8; 32],
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.far_future_message_hex", vector.name),
@@ -2006,6 +2409,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let err = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &far_future_message,
+                    &local_identity,
                 )
                 .unwrap_err()
                 .to_string();
@@ -2017,6 +2421,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &valid.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -2051,6 +2456,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     key_pair_from_private_hex(&vector.receiver_local_ratchet_private_hex);
                 let new_remote_ratchet =
                     key_pair_from_private_hex(&vector.new_remote_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let sender_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -2066,11 +2472,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: sender_local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let sender_record = encode_signal_provider_session_record(&sender_record).unwrap();
                 let valid = encrypt_signal_provider_session_record_message(
                     &sender_record,
                     &bytes_hex(&vector.valid_plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let receiver_record = SignalProviderSessionRecord {
@@ -2088,6 +2496,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: receiver_local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let receiver_record =
                     encode_signal_provider_session_record(&receiver_record).unwrap();
@@ -2103,7 +2512,14 @@ fn signal_fixtures_match_public_signal_primitives() {
                     previous_counter: vector.far_future_previous_counter,
                     ciphertext: bytes_hex(&vector.far_future_ciphertext_hex),
                 };
-                let far_future_message = encode_signal_whisper_message(&far_future).unwrap();
+                // Rejected on the far-future counter check before the MAC is verified.
+                let far_future_message = encode_signal_whisper_message(
+                    &far_future,
+                    &[0u8; 32],
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.far_future_message_hex", vector.name),
@@ -2113,6 +2529,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let err = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &far_future_message,
+                    &local_identity,
                 )
                 .unwrap_err()
                 .to_string();
@@ -2124,6 +2541,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &valid.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -2157,6 +2575,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     key_pair_from_private_hex(&vector.receiver_local_ratchet_private_hex);
                 let new_remote_ratchet =
                     key_pair_from_private_hex(&vector.new_remote_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let receiving_chain = SignalMessageChainKey {
                     key: secret_hex(&vector.receiving_chain_key_hex),
                     counter: vector.receiving_counter,
@@ -2173,6 +2592,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: receiver_local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let receiver_record =
                     encode_signal_provider_session_record(&receiver_record).unwrap();
@@ -2188,7 +2608,14 @@ fn signal_fixtures_match_public_signal_primitives() {
                     previous_counter: vector.stale_previous_counter,
                     ciphertext: bytes_hex(&vector.stale_ciphertext_hex),
                 };
-                let stale_message = encode_signal_whisper_message(&stale).unwrap();
+                // Rejected on the stale previous-counter check before MAC verification.
+                let stale_message = encode_signal_whisper_message(
+                    &stale,
+                    &[0u8; 32],
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.stale_message_hex", vector.name),
@@ -2198,6 +2625,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let err = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &stale_message,
+                    &local_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -2216,7 +2644,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     ciphertext: encrypt_signal_message_body(&plaintext, &message_step.message_keys)
                         .unwrap(),
                 };
-                let valid_message = encode_signal_whisper_message(&valid).unwrap();
+                let valid_message = encode_signal_whisper_message(
+                    &valid,
+                    message_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.valid_message_hex", vector.name),
@@ -2226,6 +2660,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &valid_message,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -2245,6 +2680,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     key_pair_from_private_hex(&vector.sender_local_ratchet_private_hex);
                 let receiver_local_ratchet =
                     key_pair_from_private_hex(&vector.receiver_local_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let sender_record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -2263,21 +2699,25 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: sender_local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let sender_record = encode_signal_provider_session_record(&sender_record).unwrap();
                 let first = encrypt_signal_provider_session_record_message(
                     &sender_record,
                     &bytes_hex(&vector.first_plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let second = encrypt_signal_provider_session_record_message(
                     &first.record,
                     &bytes_hex(&vector.second_plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let third = encrypt_signal_provider_session_record_message(
                     &second.record,
                     &bytes_hex(&vector.third_plaintext_hex),
+                    &local_identity,
                 )
                 .unwrap();
                 let receiver_record = SignalProviderSessionRecord {
@@ -2295,12 +2735,14 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: receiver_local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let receiver_record =
                     encode_signal_provider_session_record(&receiver_record).unwrap();
                 let second_decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &second.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -2319,21 +2761,38 @@ fn signal_fixtures_match_public_signal_primitives() {
                     decode_signal_provider_session_record(&second_decrypted.record).unwrap();
                 assert_eq!(after_second.message_keys.len(), 1, "{}", vector.name);
                 assert_eq!(
-                    after_second.message_keys[0].counter,
-                    vector.sending_counter + 1,
+                    after_second.message_keys[0].counter, vector.sending_counter,
                     "{} skipped counter",
                     vector.name
                 );
-                let mut tampered_first =
-                    decode_signal_whisper_message(&first.message_bytes).unwrap();
+                let first_step_mac_key = ratchet_signal_message_chain(&SignalMessageChainKey {
+                    key: secret_hex(&vector.sending_chain_key_hex),
+                    counter: vector.sending_counter,
+                })
+                .unwrap()
+                .message_keys
+                .mac_key;
+                let mut tampered_first = decode_signal_whisper_message(
+                    &first.message_bytes,
+                    first_step_mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let mut tampered_first_ciphertext = tampered_first.ciphertext.to_vec();
                 *tampered_first_ciphertext.last_mut().unwrap() ^= 1;
                 tampered_first.ciphertext = Bytes::from(tampered_first_ciphertext);
-                let tampered_first_message =
-                    encode_signal_whisper_message(&tampered_first).unwrap();
+                let tampered_first_message = encode_signal_whisper_message(
+                    &tampered_first,
+                    first_step_mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let tamper_err = decrypt_signal_provider_session_record_message(
                     &second_decrypted.record,
                     &tampered_first_message,
+                    &local_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -2345,6 +2804,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let first_decrypted = decrypt_signal_provider_session_record_message(
                     &second_decrypted.record,
                     &first.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -2363,6 +2823,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let replay_err = decrypt_signal_provider_session_record_message(
                     &first_decrypted.record,
                     &first.message_bytes,
+                    &local_identity,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -2374,6 +2835,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let third_decrypted = decrypt_signal_provider_session_record_message(
                     &first_decrypted.record,
                     &third.message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -2477,6 +2939,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                             iv: fixed_16_hex(&vector.skipped_iv_hex),
                         },
                     }],
+                    inbound_base_key: None,
                 };
                 let err = encode_signal_provider_session_record(&record).unwrap_err();
                 assert_eq!(
@@ -2533,6 +2996,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: local_ratchet,
                     previous_counter: vector.previous_counter,
                     message_keys,
+                    inbound_base_key: None,
                 };
                 let err = encode_signal_provider_session_record(&record).unwrap_err();
                 assert_eq!(
@@ -2564,6 +3028,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let local_ratchet = key_pair_from_private_hex(&vector.local_ratchet_private_hex);
                 let new_remote_ratchet =
                     key_pair_from_private_hex(&vector.new_remote_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -2582,6 +3047,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let root_step = ratchet_signal_root_key(
                     &record.root_key,
@@ -2598,17 +3064,26 @@ fn signal_fixtures_match_public_signal_primitives() {
                     ciphertext: encrypt_signal_message_body(&plaintext, &message_step.message_keys)
                         .unwrap(),
                 };
-                let message_bytes = encode_signal_whisper_message(&message).unwrap();
+                let message_bytes = encode_signal_whisper_message(
+                    &message,
+                    message_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let record = encode_signal_provider_session_record(&record).unwrap();
-                let decrypted =
-                    decrypt_signal_provider_session_record_message(&record, &message_bytes)
-                        .unwrap();
+                let decrypted = decrypt_signal_provider_session_record_message(
+                    &record,
+                    &message_bytes,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_eq!(decrypted.plaintext, plaintext, "{}", vector.name);
                 let after = decode_signal_provider_session_record(&decrypted.record).unwrap();
                 assert_eq!(after.root_key, root_step.root_key, "{} root", vector.name);
                 assert_eq!(
                     after.receiving_chain.as_ref().unwrap().counter,
-                    message_step.message_counter,
+                    message_step.message_counter + 1,
                     "{} receive counter",
                     vector.name
                 );
@@ -2625,7 +3100,8 @@ fn signal_fixtures_match_public_signal_primitives() {
                     vector.name
                 );
                 assert_eq!(
-                    after.previous_counter, vector.sending_counter,
+                    after.previous_counter,
+                    vector.sending_counter - 1,
                     "{} previous counter",
                     vector.name
                 );
@@ -2635,7 +3111,11 @@ fn signal_fixtures_match_public_signal_primitives() {
                     "{} reset send chain",
                     vector.name
                 );
-                let expected_skipped = vector.message_previous_counter - vector.receiving_counter;
+                // 0-based, inclusive skip: stashing the previous chain up to and
+                // including `message_previous_counter` yields keys for
+                // receiving_counter..=message_previous_counter.
+                let expected_skipped =
+                    vector.message_previous_counter - vector.receiving_counter + 1;
                 assert_eq!(
                     after.message_keys.len(),
                     usize::try_from(expected_skipped).unwrap(),
@@ -2645,7 +3125,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 for (offset, message_key) in after.message_keys.iter().enumerate() {
                     assert_eq!(
                         message_key.counter,
-                        vector.receiving_counter + u32::try_from(offset).unwrap() + 1,
+                        vector.receiving_counter + u32::try_from(offset).unwrap(),
                         "{} skipped counter",
                         vector.name
                     );
@@ -2674,6 +3154,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let local_ratchet = key_pair_from_private_hex(&vector.local_ratchet_private_hex);
                 let new_remote_ratchet =
                     key_pair_from_private_hex(&vector.new_remote_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let record = SignalProviderSessionRecord {
                     remote_registration_id: vector.remote_registration_id,
                     remote_identity_key: bytes_hex(&vector.remote_identity_key_hex),
@@ -2692,6 +3173,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     local_ratchet_key_pair: local_ratchet.clone(),
                     previous_counter: vector.previous_counter,
                     message_keys: Vec::new(),
+                    inbound_base_key: None,
                 };
                 let old_step = ratchet_signal_message_chain(&SignalMessageChainKey {
                     key: secret_hex(&vector.receiving_chain_key_hex),
@@ -2706,7 +3188,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     ciphertext: encrypt_signal_message_body(&old_plaintext, &old_step.message_keys)
                         .unwrap(),
                 };
-                let old_message_bytes = encode_signal_whisper_message(&old_message).unwrap();
+                let old_message_bytes = encode_signal_whisper_message(
+                    &old_message,
+                    old_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let second_old = match (
                     vector.second_old_plaintext_hex.as_ref(),
                     vector.second_old_message_hex.as_ref(),
@@ -2726,7 +3214,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                             )
                             .unwrap(),
                         };
-                        let message_bytes = encode_signal_whisper_message(&message).unwrap();
+                        let message_bytes = encode_signal_whisper_message(
+                            &message,
+                            second_old_step.message_keys.mac_key.expose(),
+                            &local_identity,
+                            &local_identity,
+                        )
+                        .unwrap();
                         Some((
                             plaintext,
                             second_old_step.message_counter,
@@ -2757,7 +3251,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                     ciphertext: encrypt_signal_message_body(&new_plaintext, &new_step.message_keys)
                         .unwrap(),
                 };
-                let new_message_bytes = encode_signal_whisper_message(&new_message).unwrap();
+                let new_message_bytes = encode_signal_whisper_message(
+                    &new_message,
+                    new_step.message_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let next_new = match (
                     vector.next_new_plaintext_hex.as_ref(),
                     vector.next_new_message_hex.as_ref(),
@@ -2777,7 +3277,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                             )
                             .unwrap(),
                         };
-                        let message_bytes = encode_signal_whisper_message(&message).unwrap();
+                        let message_bytes = encode_signal_whisper_message(
+                            &message,
+                            next_new_step.message_keys.mac_key.expose(),
+                            &local_identity,
+                            &local_identity,
+                        )
+                        .unwrap();
                         Some((
                             plaintext,
                             next_new_step.message_counter,
@@ -2794,9 +3300,12 @@ fn signal_fixtures_match_public_signal_primitives() {
                 };
 
                 let record = encode_signal_provider_session_record(&record).unwrap();
-                let new_decrypted =
-                    decrypt_signal_provider_session_record_message(&record, &new_message_bytes)
-                        .unwrap();
+                let new_decrypted = decrypt_signal_provider_session_record_message(
+                    &record,
+                    &new_message_bytes,
+                    &local_identity,
+                )
+                .unwrap();
                 assert_eq!(
                     new_decrypted.plaintext, new_plaintext,
                     "{} new message",
@@ -2804,7 +3313,9 @@ fn signal_fixtures_match_public_signal_primitives() {
                 );
                 let after_new =
                     decode_signal_provider_session_record(&new_decrypted.record).unwrap();
-                let expected_skipped = vector.message_previous_counter - vector.receiving_counter;
+                // 0-based, inclusive skip: receiving_counter..=message_previous_counter.
+                let expected_skipped =
+                    vector.message_previous_counter - vector.receiving_counter + 1;
                 assert_eq!(
                     after_new.message_keys.len(),
                     usize::try_from(expected_skipped).unwrap(),
@@ -2814,7 +3325,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 for (offset, message_key) in after_new.message_keys.iter().enumerate() {
                     assert_eq!(
                         message_key.counter,
-                        vector.receiving_counter + u32::try_from(offset).unwrap() + 1,
+                        vector.receiving_counter + u32::try_from(offset).unwrap(),
                         "{} skipped counter after new",
                         vector.name
                     );
@@ -2841,11 +3352,17 @@ fn signal_fixtures_match_public_signal_primitives() {
                         let mut tampered_ciphertext = tampered_old.ciphertext.to_vec();
                         *tampered_ciphertext.last_mut().unwrap() ^= 1;
                         tampered_old.ciphertext = Bytes::from(tampered_ciphertext);
-                        let tampered_old_message_bytes =
-                            encode_signal_whisper_message(&tampered_old).unwrap();
+                        let tampered_old_message_bytes = encode_signal_whisper_message(
+                            &tampered_old,
+                            old_step.message_keys.mac_key.expose(),
+                            &local_identity,
+                            &local_identity,
+                        )
+                        .unwrap();
                         let tamper_err = decrypt_signal_provider_session_record_message(
                             &new_decrypted.record,
                             &tampered_old_message_bytes,
+                            &local_identity,
                         )
                         .unwrap_err();
                         assert_eq!(
@@ -2871,6 +3388,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let old_decrypted = decrypt_signal_provider_session_record_message(
                     &new_decrypted.record,
                     &old_message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -2888,7 +3406,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 );
                 assert_eq!(
                     after_old.receiving_chain.as_ref().unwrap().counter,
-                    new_step.message_counter,
+                    new_step.message_counter + 1,
                     "{} receiving counter after old",
                     vector.name
                 );
@@ -2916,6 +3434,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     let replay_err = decrypt_signal_provider_session_record_message(
                         &old_decrypted.record,
                         &old_message_bytes,
+                        &local_identity,
                     )
                     .unwrap_err()
                     .to_string();
@@ -2928,6 +3447,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                         decrypt_signal_provider_session_record_message(
                             &old_decrypted.record,
                             &old_message_bytes,
+                            &local_identity,
                         )
                         .unwrap_err()
                         .to_string(),
@@ -2954,6 +3474,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     let second_old_decrypted = decrypt_signal_provider_session_record_message(
                         &record_after_late_messages,
                         &second_old_message_bytes,
+                        &local_identity,
                     )
                     .unwrap();
                     assert_eq!(
@@ -2972,7 +3493,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     );
                     assert_eq!(
                         after_second_old.receiving_chain.as_ref().unwrap().counter,
-                        new_step.message_counter,
+                        new_step.message_counter + 1,
                         "{} receiving counter after second old",
                         vector.name
                     );
@@ -3015,6 +3536,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     let next_new_decrypted = decrypt_signal_provider_session_record_message(
                         &record_after_late_messages,
                         &next_new_message_bytes,
+                        &local_identity,
                     )
                     .unwrap();
                     assert_eq!(
@@ -3026,7 +3548,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                         decode_signal_provider_session_record(&next_new_decrypted.record).unwrap();
                     assert_eq!(
                         after_next_new.receiving_chain.as_ref().unwrap().counter,
-                        next_new_counter,
+                        next_new_counter + 1,
                         "{} receiving counter after next new",
                         vector.name
                     );
@@ -3071,6 +3593,7 @@ fn signal_fixtures_match_public_signal_primitives() {
             }
             SignalFixture::ProviderSessionPrunedSkippedKeys(vector) => {
                 let sender_ratchet = key_pair_from_private_hex(&vector.sender_ratchet_private_hex);
+                let local_identity = bytes_hex(&vector.remote_identity_key_hex);
                 let sender_ratchet_key = prefixed_public_key(&sender_ratchet);
                 let mut chain = SignalMessageChainKey {
                     key: secret_hex(&vector.receiving_chain_key_hex),
@@ -3079,7 +3602,8 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let mut first_keys = None;
                 let mut second_keys = None;
                 let mut target_keys = None;
-                while chain.counter < vector.target_counter {
+                // 0-based: ratchet through message counters up to and including the target.
+                while chain.counter <= vector.target_counter {
                     let step = ratchet_signal_message_chain(&chain).unwrap();
                     match step.message_counter {
                         1 => first_keys = Some(step.message_keys.clone()),
@@ -3091,13 +3615,16 @@ fn signal_fixtures_match_public_signal_primitives() {
                     }
                     chain = step.next_chain_key;
                 }
+                let first_keys = first_keys.unwrap();
+                let second_keys = second_keys.unwrap();
+                let target_keys = target_keys.unwrap();
                 let first_message = SignalWhisperMessage {
                     ephemeral_key: sender_ratchet_key.clone(),
                     counter: 1,
                     previous_counter: vector.previous_counter,
                     ciphertext: encrypt_signal_message_body(
                         &bytes_hex(&vector.first_plaintext_hex),
-                        &first_keys.unwrap(),
+                        &first_keys,
                     )
                     .unwrap(),
                 };
@@ -3107,7 +3634,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     previous_counter: vector.previous_counter,
                     ciphertext: encrypt_signal_message_body(
                         &bytes_hex(&vector.second_plaintext_hex),
-                        &second_keys.unwrap(),
+                        &second_keys,
                     )
                     .unwrap(),
                 };
@@ -3117,13 +3644,31 @@ fn signal_fixtures_match_public_signal_primitives() {
                     previous_counter: vector.previous_counter,
                     ciphertext: encrypt_signal_message_body(
                         &bytes_hex(&vector.target_plaintext_hex),
-                        &target_keys.unwrap(),
+                        &target_keys,
                     )
                     .unwrap(),
                 };
-                let first_message_bytes = encode_signal_whisper_message(&first_message).unwrap();
-                let second_message_bytes = encode_signal_whisper_message(&second_message).unwrap();
-                let target_message_bytes = encode_signal_whisper_message(&target_message).unwrap();
+                let first_message_bytes = encode_signal_whisper_message(
+                    &first_message,
+                    first_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
+                let second_message_bytes = encode_signal_whisper_message(
+                    &second_message,
+                    second_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
+                let target_message_bytes = encode_signal_whisper_message(
+                    &target_message,
+                    target_keys.mac_key.expose(),
+                    &local_identity,
+                    &local_identity,
+                )
+                .unwrap();
                 let receiver_record =
                     encode_signal_provider_session_record(&SignalProviderSessionRecord {
                         remote_registration_id: vector.remote_registration_id,
@@ -3142,12 +3687,14 @@ fn signal_fixtures_match_public_signal_primitives() {
                         ),
                         previous_counter: vector.previous_counter,
                         message_keys: Vec::new(),
+                        inbound_base_key: None,
                     })
                     .unwrap();
 
                 let target_decrypted = decrypt_signal_provider_session_record_message(
                     &receiver_record,
                     &target_message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -3179,6 +3726,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let pruned_err = decrypt_signal_provider_session_record_message(
                     &target_decrypted.record,
                     &first_message_bytes,
+                    &local_identity,
                 )
                 .unwrap_err()
                 .to_string();
@@ -3191,6 +3739,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                 let second_decrypted = decrypt_signal_provider_session_record_message(
                     &target_decrypted.record,
                     &second_message_bytes,
+                    &local_identity,
                 )
                 .unwrap();
                 assert_eq!(
@@ -5055,7 +5604,7 @@ fn signal_fixtures_match_public_signal_primitives() {
                     previous_counter: vector.previous_counter,
                     ciphertext: bytes_hex(&vector.ciphertext_hex),
                 };
-                let encoded = encode_signal_whisper_message(&message).unwrap();
+                let encoded = frame_test_whisper(&message);
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.encoded_hex", vector.name),
@@ -5063,20 +5612,46 @@ fn signal_fixtures_match_public_signal_primitives() {
                     &vector.encoded_hex,
                 );
                 assert_eq!(
-                    decode_signal_whisper_message(&bytes_hex(&vector.encoded_hex)).unwrap(),
+                    unframe_test_whisper(&bytes_hex(&vector.encoded_hex)).unwrap(),
                     message,
                     "{}",
                     vector.name
                 );
             }
             SignalFixture::WhisperMessageMissingPreviousCounter(vector) => {
-                let decoded = decode_signal_whisper_message(&bytes_hex(&vector.encoded_hex))
-                    .unwrap_or_else(|err| {
-                        panic!(
-                            "{} should decode without previous counter: {err}",
-                            vector.name
-                        )
-                    });
+                // Build a WhisperMessage protobuf that OMITS previous_counter (field 3);
+                // on decode it must default to 0. Frame with 0x33 || protobuf || MAC8.
+                let ratchet = bytes_hex(&vector.ephemeral_key_hex);
+                let ciphertext = bytes_hex(&vector.ciphertext_hex);
+                let mut proto = Vec::new();
+                proto.push(0x0a);
+                proto.push(ratchet.len() as u8);
+                proto.extend_from_slice(&ratchet);
+                proto.push(0x10);
+                proto.push(vector.counter as u8);
+                proto.push(0x22);
+                proto.push(ciphertext.len() as u8);
+                proto.extend_from_slice(&ciphertext);
+                let mut encoded = vec![WHISPER_MESSAGE_VERSION_BYTE];
+                encoded.extend_from_slice(&proto);
+                let mut mac_input = Vec::new();
+                mac_input.extend_from_slice(&whisper_test_sender());
+                mac_input.extend_from_slice(&whisper_test_receiver());
+                mac_input.extend_from_slice(&encoded);
+                let mac = hmac_sha256(&mac_input, &WHISPER_TEST_MAC_KEY).unwrap();
+                encoded.extend_from_slice(&mac[..WHISPER_MESSAGE_MAC_LEN]);
+                assert_hex(
+                    &mut missing_expected,
+                    &format!("{}.encoded_hex", vector.name),
+                    &encoded,
+                    &vector.encoded_hex,
+                );
+                let decoded = unframe_test_whisper(&encoded).unwrap_or_else(|err| {
+                    panic!(
+                        "{} should decode without previous counter: {err}",
+                        vector.name
+                    )
+                });
                 assert_eq!(decoded.ephemeral_key, bytes_hex(&vector.ephemeral_key_hex));
                 assert_eq!(decoded.counter, vector.counter, "{}", vector.name);
                 assert_eq!(decoded.previous_counter, 0, "{}", vector.name);
@@ -5084,15 +5659,34 @@ fn signal_fixtures_match_public_signal_primitives() {
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.canonical_encoded_hex", vector.name),
-                    &encode_signal_whisper_message(&decoded).unwrap(),
+                    &frame_test_whisper(&decoded),
                     &vector.canonical_encoded_hex,
                 );
             }
             SignalFixture::WhisperMessageUnknownField(vector) => {
-                let decoded = decode_signal_whisper_message(&bytes_hex(&vector.encoded_hex))
-                    .unwrap_or_else(|err| {
-                        panic!("{} should decode with unknown fields: {err}", vector.name)
-                    });
+                // Build the canonical framed WhisperMessage from the fixture fields, then
+                // inject an unknown protobuf field INSIDE the protobuf and re-MAC it.
+                let canonical = frame_test_whisper(&SignalWhisperMessage {
+                    ephemeral_key: bytes_hex(&vector.ephemeral_key_hex),
+                    counter: vector.counter,
+                    previous_counter: vector.previous_counter,
+                    ciphertext: bytes_hex(&vector.ciphertext_hex),
+                });
+                let encoded = inner_whisper_with_unknown_field(
+                    &canonical,
+                    &WHISPER_TEST_MAC_KEY,
+                    &whisper_test_sender(),
+                    &whisper_test_receiver(),
+                );
+                assert_hex(
+                    &mut missing_expected,
+                    &format!("{}.encoded_hex", vector.name),
+                    &encoded,
+                    &vector.encoded_hex,
+                );
+                let decoded = unframe_test_whisper(&encoded).unwrap_or_else(|err| {
+                    panic!("{} should decode with unknown fields: {err}", vector.name)
+                });
                 assert_eq!(decoded.ephemeral_key, bytes_hex(&vector.ephemeral_key_hex));
                 assert_eq!(decoded.counter, vector.counter, "{}", vector.name);
                 assert_eq!(
@@ -5104,13 +5698,13 @@ fn signal_fixtures_match_public_signal_primitives() {
                 assert_hex(
                     &mut missing_expected,
                     &format!("{}.canonical_encoded_hex", vector.name),
-                    &encode_signal_whisper_message(&decoded).unwrap(),
+                    &frame_test_whisper(&decoded),
                     &vector.canonical_encoded_hex,
                 );
             }
             SignalFixture::WhisperInvalidWire(vector) => {
                 let encoded = bytes_hex(&vector.encoded_hex);
-                let err = decode_signal_whisper_message(&encoded).unwrap_err();
+                let err = unframe_test_whisper(&encoded).unwrap_err();
                 assert_eq!(
                     err.to_string(),
                     vector.expected_error,

@@ -58,6 +58,8 @@ const SIGNAL_SENDER_MESSAGE_DERIVED_KEY_LEN: usize = SIGNAL_MESSAGE_IV_LEN + SIG
 const SIGNAL_SENDER_MESSAGE_KEY_SEED: [u8; 1] = [0x01];
 const SIGNAL_SENDER_CHAIN_KEY_SEED: [u8; 1] = [0x02];
 const SIGNAL_WIRE_CURRENT_VERSION: u8 = 3;
+const SIGNAL_WHISPER_MESSAGE_VERSION: u8 =
+    (SIGNAL_WIRE_CURRENT_VERSION << 4) | SIGNAL_WIRE_CURRENT_VERSION;
 const SIGNAL_SENDER_KEY_SIGNATURE_LEN: usize = 64;
 const SIGNAL_MAX_SENDER_KEY_STATES: usize = 5;
 const SIGNAL_MAX_SENDER_MESSAGE_KEYS: usize = 2_000;
@@ -109,6 +111,10 @@ pub struct SignalProviderSessionRecord {
     pub local_ratchet_key_pair: KeyPair,
     pub previous_counter: u32,
     pub message_keys: Vec<SignalProviderStoredMessageKey>,
+    /// The X3DH base key that established this inbound session (libsignal keys
+    /// sessions by `indexInfo.baseKey`). Used to recognise pre-key message replays
+    /// for an already-bootstrapped session. `None` for outbound/initiator records.
+    pub inbound_base_key: Option<Bytes>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -707,7 +713,9 @@ where
                 Ok(decrypted.plaintext)
             }
             InboundCiphertextType::PreKey => {
-                let pre_key_message = decode_signal_pre_key_whisper_message(&payload.ciphertext)?;
+                let (pre_key_message, inner_frame) =
+                    decode_signal_pre_key_whisper_message_frame(&payload.ciphertext)?;
+                let inner_message_bytes = inner_frame.to_framed_bytes();
                 let local_one_time_pre_key = if let Some(pre_key_id) = pre_key_message.pre_key_id {
                     match self.state_store.load_local_pre_key(pre_key_id).await? {
                         Some(pre_key) => Some(pre_key),
@@ -716,6 +724,7 @@ where
                                 .decrypt_missing_pre_key_with_existing_session(
                                     &payload.sender_jid,
                                     &pre_key_message,
+                                    &inner_message_bytes,
                                 )
                                 .await?
                             {
@@ -731,6 +740,7 @@ where
                         .decrypt_signed_pre_key_replay_with_existing_session(
                             &payload.sender_jid,
                             &pre_key_message,
+                            &inner_message_bytes,
                         )
                         .await?
                     {
@@ -751,6 +761,7 @@ where
                     &local_key_material,
                     local_one_time_pre_key.as_ref(),
                     pre_key_message,
+                    inner_frame,
                 )?;
                 self.state_store
                     .store_inbound_pre_key_session_records(
@@ -772,6 +783,7 @@ where
         &self,
         sender_jid: &str,
         pre_key_message: &SignalPreKeyWhisperMessage,
+        inner_message_bytes: &Bytes,
     ) -> CoreResult<Option<Bytes>> {
         let Some(record_bytes) = self.state_store.load_session_record(sender_jid).await? else {
             return Ok(None);
@@ -780,7 +792,7 @@ where
             return Ok(None);
         };
         let base_key = normalize_signal_public_key(&pre_key_message.base_key)?;
-        if record.remote_ratchet_key.as_ref() != Some(&base_key) {
+        if record.inbound_base_key.as_ref() != Some(&base_key) {
             return Ok(None);
         }
         let Some(identity) = self.state_store.load_identity_record(sender_jid).await? else {
@@ -796,9 +808,10 @@ where
         }
         self.validate_replay_signed_pre_key_id(pre_key_message)
             .await?;
-        let message = encode_signal_whisper_message(&pre_key_message.message)?;
+        // Forward the original framed inner WhisperMessage bytes (carrying the inner
+        // MAC) unchanged; the established session re-derives the keys and verifies it.
         self.state_store
-            .decrypt_session_record_message(sender_jid, message)
+            .decrypt_session_record_message(sender_jid, inner_message_bytes.clone())
             .await
             .map(|decrypted| Some(decrypted.plaintext))
     }
@@ -807,6 +820,7 @@ where
         &self,
         sender_jid: &str,
         pre_key_message: &SignalPreKeyWhisperMessage,
+        inner_message_bytes: &Bytes,
     ) -> CoreResult<Option<Bytes>> {
         let Some(record_bytes) = self.state_store.load_session_record(sender_jid).await? else {
             return Ok(None);
@@ -815,7 +829,7 @@ where
             return Ok(None);
         };
         let base_key = normalize_signal_public_key(&pre_key_message.base_key)?;
-        if record.remote_ratchet_key.as_ref() != Some(&base_key) {
+        if record.inbound_base_key.as_ref() != Some(&base_key) {
             return Ok(None);
         }
         let Some(identity) = self.state_store.load_identity_record(sender_jid).await? else {
@@ -831,9 +845,8 @@ where
         }
         self.validate_replay_signed_pre_key_id(pre_key_message)
             .await?;
-        let message = encode_signal_whisper_message(&pre_key_message.message)?;
         self.state_store
-            .decrypt_session_record_message(sender_jid, message)
+            .decrypt_session_record_message(sender_jid, inner_message_bytes.clone())
             .await
             .map(|decrypted| Some(decrypted.plaintext))
     }
@@ -1274,11 +1287,18 @@ where
                     }
                     Err(err) => return Ok(Err(err)),
                 }
-                let encrypted =
-                    match encrypt_signal_provider_session_record_message(&record, &plaintext) {
-                        Ok(encrypted) => encrypted,
-                        Err(err) => return Ok(Err(err)),
-                    };
+                let local_identity_pub = match local_signal_identity_public_key_from_tx(tx) {
+                    Ok(key) => key,
+                    Err(err) => return Ok(Err(err)),
+                };
+                let encrypted = match encrypt_signal_provider_session_record_message(
+                    &record,
+                    &plaintext,
+                    &local_identity_pub,
+                ) {
+                    Ok(encrypted) => encrypted,
+                    Err(err) => return Ok(Err(err)),
+                };
                 tx.set(
                     KeyNamespace::SignalProviderSession,
                     &address,
@@ -1315,11 +1335,18 @@ where
                 {
                     return Ok(Err(err));
                 }
-                let decrypted =
-                    match decrypt_signal_provider_session_record_message(&record, &message) {
-                        Ok(decrypted) => decrypted,
-                        Err(err) => return Ok(Err(err)),
-                    };
+                let local_identity_pub = match local_signal_identity_public_key_from_tx(tx) {
+                    Ok(key) => key,
+                    Err(err) => return Ok(Err(err)),
+                };
+                let decrypted = match decrypt_signal_provider_session_record_message(
+                    &record,
+                    &message,
+                    &local_identity_pub,
+                ) {
+                    Ok(decrypted) => decrypted,
+                    Err(err) => return Ok(Err(err)),
+                };
                 tx.set(
                     KeyNamespace::SignalProviderSession,
                     &address,
@@ -2283,35 +2310,192 @@ pub fn normalize_signal_public_key(key: &[u8]) -> CoreResult<Bytes> {
     }
 }
 
-pub fn encode_signal_whisper_message(message: &SignalWhisperMessage) -> CoreResult<Bytes> {
+// libsignal `WhisperMessage` wire format:
+//   version_byte(0x33) || protobuf{ratchetKey, counter, prevCounter, ciphertext} || MAC8
+// MAC8 = HMAC-SHA256(macKey, senderIdPub(33) || receiverIdPub(33) || version_byte || protobuf)[..8].
+// For OUTBOUND messages `sender` is the local identity and `receiver` the remote;
+// for INBOUND the two are flipped.
+pub fn encode_signal_whisper_message(
+    message: &SignalWhisperMessage,
+    mac_key: &[u8],
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
+) -> CoreResult<Bytes> {
     let message = validate_signal_whisper_message(message)?;
-    Ok(SignalWireWhisperMessage::from(message)
-        .encode_to_vec()
-        .into())
+    let proto = SignalWireWhisperMessage::from(message).encode_to_vec();
+    let mut serialized = Vec::with_capacity(1 + proto.len());
+    serialized.push(SIGNAL_WHISPER_MESSAGE_VERSION);
+    serialized.extend_from_slice(&proto);
+    let mac = signal_whisper_message_mac(mac_key, sender_id_pub, receiver_id_pub, &serialized)?;
+    serialized.extend_from_slice(&mac);
+    Ok(Bytes::from(serialized))
 }
 
-pub fn decode_signal_whisper_message(input: &[u8]) -> CoreResult<SignalWhisperMessage> {
-    let decoded = SignalWireWhisperMessage::decode(input)
+pub fn decode_signal_whisper_message(
+    input: &[u8],
+    mac_key: &[u8],
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
+) -> CoreResult<SignalWhisperMessage> {
+    let frame = split_signal_whisper_message_frame(input)?;
+    verify_signal_whisper_message_frame(&frame, mac_key, sender_id_pub, receiver_id_pub)?;
+    Ok(frame.message)
+}
+
+// A parsed (but not yet authenticated) `WhisperMessage`. `serialized` is the
+// `version_byte || protobuf` slice that the MAC is computed over; verification is
+// deferred until the per-message keys are derived (see `decrypt_*_ciphertext`).
+struct SignalWhisperMessageFrame {
+    message: SignalWhisperMessage,
+    serialized: Bytes,
+    mac: [u8; SIGNAL_MESSAGE_MAC_LEN],
+}
+
+fn split_signal_whisper_message_frame(input: &[u8]) -> CoreResult<SignalWhisperMessageFrame> {
+    if input.len() <= 1 + SIGNAL_MESSAGE_MAC_LEN {
+        return Err(CoreError::Protocol(format!(
+            "Signal whisper message is too short: {}",
+            input.len()
+        )));
+    }
+    signal_whisper_message_version(input[0])?;
+    let (serialized, mac) = input.split_at(input.len() - SIGNAL_MESSAGE_MAC_LEN);
+    let decoded = SignalWireWhisperMessage::decode(&serialized[1..])
         .map_err(|err| CoreError::Protocol(format!("invalid Signal whisper message: {err}")))?;
-    validate_signal_whisper_message(&decoded.try_into()?)
+    let message = validate_signal_whisper_message(&decoded.try_into()?)?;
+    let mut mac_bytes = [0u8; SIGNAL_MESSAGE_MAC_LEN];
+    mac_bytes.copy_from_slice(mac);
+    Ok(SignalWhisperMessageFrame {
+        message,
+        serialized: Bytes::copy_from_slice(serialized),
+        mac: mac_bytes,
+    })
 }
 
+impl SignalWhisperMessageFrame {
+    // Re-serialize back to the on-wire framed `WhisperMessage` (`version || protobuf || MAC8`).
+    fn to_framed_bytes(&self) -> Bytes {
+        let mut out = Vec::with_capacity(self.serialized.len() + self.mac.len());
+        out.extend_from_slice(&self.serialized);
+        out.extend_from_slice(&self.mac);
+        Bytes::from(out)
+    }
+}
+
+fn verify_signal_whisper_message_frame(
+    frame: &SignalWhisperMessageFrame,
+    mac_key: &[u8],
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
+) -> CoreResult<()> {
+    let expected_mac =
+        signal_whisper_message_mac(mac_key, sender_id_pub, receiver_id_pub, &frame.serialized)?;
+    if !constant_time_eq(&expected_mac, &frame.mac) {
+        return Err(CoreError::Crypto(wa_crypto::CryptoError::Decrypt));
+    }
+    Ok(())
+}
+
+fn signal_whisper_message_version(version_byte: u8) -> CoreResult<u8> {
+    let message_version = version_byte >> 4;
+    let ciphertext_version = version_byte & 0x0f;
+    if message_version != SIGNAL_WIRE_CURRENT_VERSION {
+        return Err(CoreError::Protocol(format!(
+            "unsupported Signal whisper message version: {message_version}"
+        )));
+    }
+    if ciphertext_version != SIGNAL_WIRE_CURRENT_VERSION {
+        return Err(CoreError::Protocol(format!(
+            "unsupported Signal whisper ciphertext version: {ciphertext_version}"
+        )));
+    }
+    Ok(message_version)
+}
+
+// libsignal `PreKeyWhisperMessage` wire format:
+//   version_byte(0x33) || protobuf{preKeyId, baseKey, identityKey, message, regId, signedPreKeyId}
+// The outer message carries NO trailing MAC; only the inner `message`
+// (a full `WhisperMessage`) carries one. `mac_key`/`sender`/`receiver` are used to
+// frame and authenticate that inner `WhisperMessage`.
 pub fn encode_signal_pre_key_whisper_message(
     message: &SignalPreKeyWhisperMessage,
+    mac_key: &[u8],
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
 ) -> CoreResult<Bytes> {
-    let message = validate_signal_pre_key_whisper_message(message)?;
-    Ok(SignalWirePreKeyWhisperMessage::try_from(message)?
-        .encode_to_vec()
-        .into())
+    let inner =
+        encode_signal_whisper_message(&message.message, mac_key, sender_id_pub, receiver_id_pub)?;
+    encode_signal_pre_key_whisper_message_with_inner(message, &inner)
 }
 
+// Encode a `PreKeyWhisperMessage` using an already-framed inner `WhisperMessage`
+// (`0x33 || protobuf || MAC8`). Used by the outbound path, which has the framed
+// inner bytes from the ratchet step and must not re-derive the MAC.
+fn encode_signal_pre_key_whisper_message_with_inner(
+    message: &SignalPreKeyWhisperMessage,
+    inner_message_bytes: &[u8],
+) -> CoreResult<Bytes> {
+    let message = validate_signal_pre_key_whisper_message(message)?;
+    let wire = SignalWirePreKeyWhisperMessage {
+        pre_key_id: message.pre_key_id,
+        base_key: message.base_key,
+        identity_key: message.identity_key,
+        message: Bytes::copy_from_slice(inner_message_bytes),
+        registration_id: Some(message.registration_id),
+        signed_pre_key_id: Some(message.signed_pre_key_id),
+    };
+    let proto = wire.encode_to_vec();
+    let mut serialized = Vec::with_capacity(1 + proto.len());
+    serialized.push(SIGNAL_WHISPER_MESSAGE_VERSION);
+    serialized.extend_from_slice(&proto);
+    Ok(Bytes::from(serialized))
+}
+
+// Decode the outer `PreKeyWhisperMessage` and PARSE (but do not yet authenticate)
+// the inner `WhisperMessage`. The inner MAC cannot be verified here because its key
+// is only available after the X3DH bootstrap; verification is deferred to the
+// inbound decrypt path. Tests/round-trip callers that don't decrypt simply ignore
+// the unverified inner frame.
 pub fn decode_signal_pre_key_whisper_message(
     input: &[u8],
 ) -> CoreResult<SignalPreKeyWhisperMessage> {
-    let decoded = SignalWirePreKeyWhisperMessage::decode(input).map_err(|err| {
+    Ok(decode_signal_pre_key_whisper_message_frame(input)?.0)
+}
+
+fn decode_signal_pre_key_whisper_message_frame(
+    input: &[u8],
+) -> CoreResult<(SignalPreKeyWhisperMessage, SignalWhisperMessageFrame)> {
+    if input.is_empty() {
+        return Err(CoreError::Protocol(
+            "Signal pre-key whisper message is empty".to_owned(),
+        ));
+    }
+    signal_whisper_message_version(input[0])?;
+    let decoded = SignalWirePreKeyWhisperMessage::decode(&input[1..]).map_err(|err| {
         CoreError::Protocol(format!("invalid Signal pre-key whisper message: {err}"))
     })?;
-    validate_signal_pre_key_whisper_message(&decoded.try_into()?)
+    if decoded.message.is_empty() {
+        return Err(CoreError::Protocol(
+            "Signal pre-key whisper message missing inner message".to_owned(),
+        ));
+    }
+    let registration_id = decoded.registration_id.ok_or_else(|| {
+        CoreError::Protocol("Signal pre-key whisper message missing registration id".to_owned())
+    })?;
+    let signed_pre_key_id = decoded.signed_pre_key_id.ok_or_else(|| {
+        CoreError::Protocol("Signal pre-key whisper message missing signed pre-key id".to_owned())
+    })?;
+    let inner_frame = split_signal_whisper_message_frame(&decoded.message)?;
+    let message = SignalPreKeyWhisperMessage {
+        registration_id,
+        pre_key_id: decoded.pre_key_id,
+        signed_pre_key_id,
+        base_key: normalize_signal_public_key(&decoded.base_key)?,
+        identity_key: normalize_signal_public_key(&decoded.identity_key)?,
+        message: inner_frame.message.clone(),
+    };
+    let message = validate_signal_pre_key_whisper_message(&message)?;
+    Ok((message, inner_frame))
 }
 
 pub fn derive_signal_message_keys(message_key_seed: &[u8]) -> CoreResult<SignalMessageKeyMaterial> {
@@ -2356,15 +2540,18 @@ pub fn advance_signal_message_chain_key(chain_key: &[u8]) -> CoreResult<SecretBy
 pub fn ratchet_signal_message_chain(
     chain_key: &SignalMessageChainKey,
 ) -> CoreResult<SignalMessageChainStep> {
-    let message_counter = chain_key
-        .counter
+    // libsignal counters are 0-based: a freshly derived chain (counter 0) yields the
+    // message at counter 0, and `counter` always holds the index of the NEXT message
+    // this chain will produce.
+    let message_counter = chain_key.counter;
+    let next_counter = message_counter
         .checked_add(1)
         .ok_or_else(|| CoreError::Protocol("Signal message chain counter overflow".to_owned()))?;
     let message_key_seed = derive_signal_message_key_seed(chain_key.key.expose())?;
     let message_keys = derive_signal_message_keys(message_key_seed.expose())?;
     let next_chain_key = SignalMessageChainKey {
         key: advance_signal_message_chain_key(chain_key.key.expose())?,
-        counter: message_counter,
+        counter: next_counter,
     };
     Ok(SignalMessageChainStep {
         message_counter,
@@ -2554,36 +2741,51 @@ pub fn derive_signal_inbound_pre_key_root_chain_keys(
     step.map(|step| signal_pre_key_bootstrap(step, used_one_time_pre_key))
 }
 
+// libsignal `WhisperMessage` ciphertext is PURE AES-256-CBC. The authentication
+// (8-byte truncated HMAC over `senderIdPub || receiverIdPub || version || protobuf`)
+// lives at the framing layer (see `encode/decode_signal_whisper_message`), NOT here.
 pub fn encrypt_signal_message_body(
     plaintext: &[u8],
     keys: &SignalMessageKeyMaterial,
 ) -> CoreResult<Bytes> {
-    let mut ciphertext = aes_256_cbc_encrypt_with_iv(plaintext, keys.cipher_key.expose(), &keys.iv)
+    let ciphertext = aes_256_cbc_encrypt_with_iv(plaintext, keys.cipher_key.expose(), &keys.iv)
         .map_err(CoreError::Crypto)?;
-    let mac = hmac_sha256(&ciphertext, keys.mac_key.expose()).map_err(CoreError::Crypto)?;
-    ciphertext.extend_from_slice(&mac[..SIGNAL_MESSAGE_MAC_LEN]);
     Ok(Bytes::from(ciphertext))
 }
 
 pub fn decrypt_signal_message_body(
-    ciphertext_with_mac: &[u8],
+    ciphertext: &[u8],
     keys: &SignalMessageKeyMaterial,
 ) -> CoreResult<Bytes> {
-    if ciphertext_with_mac.len() <= SIGNAL_MESSAGE_MAC_LEN {
-        return Err(CoreError::Crypto(
-            wa_crypto::CryptoError::CiphertextTooShort,
-        ));
-    }
-    let (ciphertext, mac) =
-        ciphertext_with_mac.split_at(ciphertext_with_mac.len() - SIGNAL_MESSAGE_MAC_LEN);
-    let expected_mac = hmac_sha256(ciphertext, keys.mac_key.expose()).map_err(CoreError::Crypto)?;
-    if !constant_time_eq(&expected_mac[..SIGNAL_MESSAGE_MAC_LEN], mac) {
-        return Err(CoreError::Crypto(wa_crypto::CryptoError::Decrypt));
-    }
     Ok(Bytes::from(
         aes_256_cbc_decrypt_with_iv(ciphertext, keys.cipher_key.expose(), &keys.iv)
             .map_err(CoreError::Crypto)?,
     ))
+}
+
+// Compute the libsignal `WhisperMessage` MAC: HMAC-SHA256(macKey,
+// senderIdPub(33) || receiverIdPub(33) || serialized) truncated to 8 bytes,
+// where `serialized` is `version_byte || protobuf`.
+fn signal_whisper_message_mac(
+    mac_key: &[u8],
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
+    serialized: &[u8],
+) -> CoreResult<[u8; SIGNAL_MESSAGE_MAC_LEN]> {
+    let sender = prefixed_signal_public_key_owned(sender_id_pub)?;
+    let receiver = prefixed_signal_public_key_owned(receiver_id_pub)?;
+    let mut input = Vec::with_capacity(sender.len() + receiver.len() + serialized.len());
+    input.extend_from_slice(&sender);
+    input.extend_from_slice(&receiver);
+    input.extend_from_slice(serialized);
+    let full = hmac_sha256(&input, mac_key).map_err(CoreError::Crypto)?;
+    let mut mac = [0u8; SIGNAL_MESSAGE_MAC_LEN];
+    mac.copy_from_slice(&full[..SIGNAL_MESSAGE_MAC_LEN]);
+    Ok(mac)
+}
+
+fn prefixed_signal_public_key_owned(key: &[u8]) -> CoreResult<Bytes> {
+    normalize_signal_public_key(key)
 }
 
 pub fn derive_signal_sender_message_key_seed(chain_key: &[u8]) -> CoreResult<SecretBytes> {
@@ -3510,6 +3712,16 @@ pub fn encode_signal_provider_session_record(
         put_bytes(&mut out, message_key.message_keys.mac_key.expose())?;
         put_bytes(&mut out, &message_key.message_keys.iv)?;
     }
+    // Trailing (backward-compatible) section: the inbound X3DH base key, used to
+    // recognise pre-key message replays. Records written before this section are
+    // decoded with `inbound_base_key = None`.
+    match &record.inbound_base_key {
+        Some(key) => {
+            out.put_u8(1);
+            put_bytes(&mut out, &normalize_signal_public_key(key)?)?;
+        }
+        None => out.put_u8(0),
+    }
     Ok(out.freeze())
 }
 
@@ -3642,6 +3854,23 @@ pub fn decode_signal_provider_session_record(
     } else {
         Vec::new()
     };
+    // Optional trailing inbound base-key section (backward compatible: absent in
+    // records written before it was introduced).
+    let inbound_base_key = if input.has_remaining() {
+        match take_signal_provider_session_flag(&mut input, "inbound-base-key")? {
+            0 => None,
+            1 => Some(normalize_signal_public_key(
+                &take_signal_provider_session_bytes(&mut input, "inbound base key")?,
+            )?),
+            _ => {
+                return Err(CoreError::Protocol(
+                    "stored Signal provider session has invalid inbound-base-key flag".to_owned(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     if input.has_remaining() {
         return Err(CoreError::Protocol(
             "stored Signal provider session has trailing bytes".to_owned(),
@@ -3666,6 +3895,7 @@ pub fn decode_signal_provider_session_record(
         },
         previous_counter,
         message_keys,
+        inbound_base_key,
     };
     validate_signal_provider_session_record(&record)?;
     Ok(record)
@@ -3674,10 +3904,16 @@ pub fn decode_signal_provider_session_record(
 pub fn encrypt_signal_provider_session_record_message(
     record: &[u8],
     plaintext: &[u8],
+    local_identity_pub: &[u8],
 ) -> CoreResult<SignalProviderSessionEncryption> {
     let mut record = decode_signal_provider_session_record(record)?;
-    let (message, message_bytes) =
-        encrypt_signal_provider_session_record_plaintext(&mut record, plaintext)?;
+    let receiver_id_pub = record.remote_identity_key.clone();
+    let (message, message_bytes) = encrypt_signal_provider_session_record_plaintext(
+        &mut record,
+        plaintext,
+        local_identity_pub,
+        &receiver_id_pub,
+    )?;
     let record = encode_signal_provider_session_record(&record)?;
     Ok(SignalProviderSessionEncryption {
         record,
@@ -3689,14 +3925,21 @@ pub fn encrypt_signal_provider_session_record_message(
 pub fn decrypt_signal_provider_session_record_message(
     record: &[u8],
     message: &[u8],
+    local_identity_pub: &[u8],
 ) -> CoreResult<SignalProviderSessionDecryption> {
     let mut record = decode_signal_provider_session_record(record)?;
-    let message = decode_signal_whisper_message(message)?;
-    let plaintext = decrypt_signal_provider_session_record_ciphertext(&mut record, &message)?;
+    let sender_id_pub = record.remote_identity_key.clone();
+    let frame = split_signal_whisper_message_frame(message)?;
+    let plaintext = decrypt_signal_provider_session_record_ciphertext(
+        &mut record,
+        &frame,
+        &sender_id_pub,
+        local_identity_pub,
+    )?;
     let record = encode_signal_provider_session_record(&record)?;
     Ok(SignalProviderSessionDecryption {
         record,
-        message,
+        message: frame.message,
         plaintext,
     })
 }
@@ -3711,24 +3954,71 @@ pub fn encrypt_signal_outbound_pre_key_session_message<V>(
 where
     V: NoiseCertificateVerifier,
 {
+    // Mirror libsignal's initiator `calculateSendingRatchet`: the X3DH-derived chain
+    // key is discarded; instead a fresh sending-ratchet key pair is generated and the
+    // first sending chain is obtained by a DH ratchet against the remote signed
+    // pre-key. The resulting ratchet key (distinct from the X3DH base key) is what the
+    // first WhisperMessage advertises, and the recipient reproduces this chain by a
+    // DH ratchet against it on receipt.
+    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet(
+        local_key_material,
+        local_base_key,
+        &generate_key_pair(),
+        remote_session,
+        verifier,
+        plaintext,
+    )
+}
+
+/// As [`encrypt_signal_outbound_pre_key_session_message`], but with the initiator's
+/// fresh sending-ratchet key pair supplied explicitly. The public entry point
+/// generates a random one; this variant exists so deterministic test/golden vectors
+/// can reproduce exact wire bytes.
+pub fn encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet<V>(
+    local_key_material: &SignalLocalKeyMaterial,
+    local_base_key: &KeyPair,
+    sending_ratchet_key_pair: &KeyPair,
+    remote_session: &SignalSession,
+    verifier: &V,
+    plaintext: &[u8],
+) -> CoreResult<SignalProviderPreKeySessionEncryption>
+where
+    V: NoiseCertificateVerifier,
+{
     let bootstrap = derive_verified_signal_outbound_pre_key_root_chain_keys(
         local_key_material,
         local_base_key,
         remote_session,
         verifier,
     )?;
+    let remote_identity_key = normalize_signal_public_key(&remote_session.identity_key)?;
+    let local_identity_pub = local_key_material.identity.public_key.clone();
+    let remote_signed_pre_key =
+        normalize_signal_public_key(&remote_session.signed_pre_key.public_key)?;
+    let sending_ratchet_key_pair = sending_ratchet_key_pair.clone();
+    let sending_step = ratchet_signal_root_key(
+        &bootstrap.root_key,
+        sending_ratchet_key_pair.private.expose(),
+        &remote_signed_pre_key,
+    )?;
     let mut record = SignalProviderSessionRecord {
         remote_registration_id: remote_session.registration_id,
-        remote_identity_key: normalize_signal_public_key(&remote_session.identity_key)?,
-        root_key: bootstrap.root_key,
-        sending_chain: bootstrap.chain_key,
+        remote_identity_key: remote_identity_key.clone(),
+        root_key: sending_step.root_key,
+        sending_chain: sending_step.chain_key,
         receiving_chain: None,
         remote_ratchet_key: None,
-        local_ratchet_key_pair: local_base_key.clone(),
+        local_ratchet_key_pair: sending_ratchet_key_pair,
         previous_counter: 0,
         message_keys: Vec::new(),
+        inbound_base_key: None,
     };
-    let (message, _) = encrypt_signal_provider_session_record_plaintext(&mut record, plaintext)?;
+    let (message, inner_message_bytes) = encrypt_signal_provider_session_record_plaintext(
+        &mut record,
+        plaintext,
+        &local_identity_pub,
+        &remote_identity_key,
+    )?;
     let pre_key_message = SignalPreKeyWhisperMessage {
         registration_id: local_key_material.registration_id,
         pre_key_id: remote_session
@@ -3737,10 +4027,11 @@ where
             .map(|pre_key| pre_key.key_id),
         signed_pre_key_id: remote_session.signed_pre_key.key_id,
         base_key: Bytes::copy_from_slice(&prefixed_signal_public_key(&local_base_key.public)),
-        identity_key: local_key_material.identity.public_key.clone(),
+        identity_key: local_identity_pub.clone(),
         message,
     };
-    let message_bytes = encode_signal_pre_key_whisper_message(&pre_key_message)?;
+    let message_bytes =
+        encode_signal_pre_key_whisper_message_with_inner(&pre_key_message, &inner_message_bytes)?;
     let record = encode_signal_provider_session_record(&record)?;
     Ok(SignalProviderPreKeySessionEncryption {
         record,
@@ -3755,11 +4046,12 @@ pub fn decrypt_signal_inbound_pre_key_session_message(
     local_one_time_pre_key: Option<&SignalLocalPreKey>,
     message: &[u8],
 ) -> CoreResult<SignalProviderPreKeySessionDecryption> {
-    let message = decode_signal_pre_key_whisper_message(message)?;
+    let (message, inner_frame) = decode_signal_pre_key_whisper_message_frame(message)?;
     decrypt_signal_inbound_pre_key_session_decoded(
         local_key_material,
         local_one_time_pre_key,
         message,
+        inner_frame,
     )
 }
 
@@ -3767,14 +4059,13 @@ fn decrypt_signal_inbound_pre_key_session_decoded(
     local_key_material: &SignalLocalKeyMaterial,
     local_one_time_pre_key: Option<&SignalLocalPreKey>,
     message: SignalPreKeyWhisperMessage,
+    inner_frame: SignalWhisperMessageFrame,
 ) -> CoreResult<SignalProviderPreKeySessionDecryption> {
     let base_key = normalize_signal_public_key(&message.base_key)?;
-    let inner_ephemeral_key = normalize_signal_public_key(&message.message.ephemeral_key)?;
-    if inner_ephemeral_key != base_key {
-        return Err(CoreError::Protocol(
-            "Signal pre-key message base key does not match inner ratchet key".to_owned(),
-        ));
-    }
+    // In libsignal the X3DH base key and the inner WhisperMessage's sending-ratchet
+    // key DIFFER: the sender derives a fresh ratchet key distinct from the base key.
+    // The first inbound message therefore triggers a DH ratchet step (see
+    // `decrypt_signal_provider_session_record_ciphertext`).
     if message.pre_key_id.is_some() != local_one_time_pre_key.is_some() {
         return Err(CoreError::Protocol(
             "Signal pre-key message one-time pre-key state mismatch".to_owned(),
@@ -3802,19 +4093,30 @@ fn decrypt_signal_inbound_pre_key_session_decoded(
         &message.identity_key,
         &base_key,
     )?;
+    // libsignal's Bob bootstrap installs only the X3DH root key; it sets the local
+    // ratchet ("ephemeral") key pair to the signed pre-key and leaves both chains
+    // unset. The X3DH-derived chain material is discarded. The first inbound
+    // WhisperMessage carries a fresh sending-ratchet key, which drives the initial
+    // DH ratchet step that establishes the receiving chain.
     let mut record = SignalProviderSessionRecord {
         remote_registration_id: message.registration_id,
         remote_identity_key: normalize_signal_public_key(&message.identity_key)?,
         root_key: bootstrap.root_key,
         sending_chain: uninitialized_signal_message_chain(),
-        receiving_chain: Some(bootstrap.chain_key),
-        remote_ratchet_key: Some(base_key),
+        receiving_chain: None,
+        remote_ratchet_key: None,
         local_ratchet_key_pair: local_key_material.signed_pre_key.key_pair.clone(),
         previous_counter: 0,
         message_keys: Vec::new(),
+        inbound_base_key: Some(base_key.clone()),
     };
-    let plaintext =
-        decrypt_signal_provider_session_record_ciphertext(&mut record, &message.message)?;
+    // Inbound: sender is the remote (message.identity_key), receiver is local.
+    let plaintext = decrypt_signal_provider_session_record_ciphertext(
+        &mut record,
+        &inner_frame,
+        &message.identity_key,
+        &local_key_material.identity.public_key,
+    )?;
     let record = encode_signal_provider_session_record(&record)?;
     Ok(SignalProviderPreKeySessionDecryption {
         record,
@@ -3827,6 +4129,8 @@ fn decrypt_signal_inbound_pre_key_session_decoded(
 fn encrypt_signal_provider_session_record_plaintext(
     record: &mut SignalProviderSessionRecord,
     plaintext: &[u8],
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
 ) -> CoreResult<(SignalWhisperMessage, Bytes)> {
     validate_signal_provider_session_record(record)?;
     ensure_signal_provider_sending_chain(record)?;
@@ -3840,26 +4144,38 @@ fn encrypt_signal_provider_session_record_plaintext(
         previous_counter: record.previous_counter,
         ciphertext,
     };
-    let message_bytes = encode_signal_whisper_message(&message)?;
+    let message_bytes = encode_signal_whisper_message(
+        &message,
+        step.message_keys.mac_key.expose(),
+        sender_id_pub,
+        receiver_id_pub,
+    )?;
     record.sending_chain = step.next_chain_key;
     Ok((message, message_bytes))
 }
 
 fn decrypt_signal_provider_session_record_ciphertext(
     record: &mut SignalProviderSessionRecord,
-    message: &SignalWhisperMessage,
+    frame: &SignalWhisperMessageFrame,
+    sender_id_pub: &[u8],
+    receiver_id_pub: &[u8],
 ) -> CoreResult<Bytes> {
     validate_signal_provider_session_record(record)?;
+    let message = &frame.message;
     let message_ratchet_key = normalize_signal_public_key(&message.ephemeral_key)?;
     if let Some(index) = find_signal_provider_stored_message_key_index(
         &record.message_keys,
         &message_ratchet_key,
         message.counter,
     ) {
-        let plaintext = decrypt_signal_message_body(
-            &message.ciphertext,
-            &record.message_keys[index].message_keys,
+        let message_keys = record.message_keys[index].message_keys.clone();
+        verify_signal_whisper_message_frame(
+            frame,
+            message_keys.mac_key.expose(),
+            sender_id_pub,
+            receiver_id_pub,
         )?;
+        let plaintext = decrypt_signal_message_body(&message.ciphertext, &message_keys)?;
         record.message_keys.remove(index);
         return Ok(plaintext);
     }
@@ -3891,7 +4207,11 @@ fn decrypt_signal_provider_session_record_ciphertext(
                 message.previous_counter,
             )?;
         }
-        record.previous_counter = record.sending_chain.counter;
+        // libsignal `previousCounter` is the old sending chain's last-produced
+        // (0-based) message counter. Our `sending_chain.counter` holds the
+        // next-to-produce index, so the last produced is one less (0 when nothing was
+        // sent on the old chain).
+        record.previous_counter = record.sending_chain.counter.saturating_sub(1);
         let step = ratchet_signal_root_key(
             &record.root_key,
             record.local_ratchet_key_pair.private.expose(),
@@ -3912,6 +4232,12 @@ fn decrypt_signal_provider_session_record_ciphertext(
         receiving_chain,
         message.counter,
     )?;
+    verify_signal_whisper_message_frame(
+        frame,
+        message_keys.mac_key.expose(),
+        sender_id_pub,
+        receiver_id_pub,
+    )?;
     decrypt_signal_message_body(&message.ciphertext, &message_keys)
 }
 
@@ -3921,7 +4247,9 @@ fn signal_message_keys_for_counter(
     chain_key: &mut SignalMessageChainKey,
     counter: u32,
 ) -> CoreResult<SignalMessageKeyMaterial> {
-    if counter <= chain_key.counter {
+    // 0-based: `chain_key.counter` is the next message this chain will produce, so a
+    // message at a strictly lower counter has already been consumed.
+    if counter < chain_key.counter {
         return Err(CoreError::Protocol(format!(
             "duplicate or old Signal message counter: {counter}"
         )));
@@ -3955,13 +4283,13 @@ fn skip_signal_provider_message_keys_until(
     chain_key: &mut SignalMessageChainKey,
     counter: u32,
 ) -> CoreResult<()> {
-    if counter < chain_key.counter {
-        return Err(CoreError::Protocol(format!(
-            "Signal previous chain counter moved backwards: message {counter}, current {}",
-            chain_key.counter
-        )));
-    }
-    if counter == chain_key.counter {
+    // `counter` is the sender's previous-chain count (0-based, libsignal
+    // `previousCounter`). Stash message keys for every message on this (about-to-be
+    // superseded) receiving chain up to and including index `counter`. If the chain
+    // has already advanced past `counter`, there is nothing to do (NOT an error):
+    // mirrors libsignal `fillMessageKeys`, which returns early when the chain counter
+    // already meets the target.
+    if chain_key.counter > counter {
         return Ok(());
     }
     let jump = counter - chain_key.counter;
@@ -3970,7 +4298,7 @@ fn skip_signal_provider_message_keys_until(
             "Signal previous chain is too far in the future: {jump}"
         )));
     }
-    while chain_key.counter < counter {
+    while chain_key.counter <= counter {
         let step = ratchet_signal_message_chain(chain_key)?;
         *chain_key = step.next_chain_key;
         push_signal_provider_stored_message_key(
@@ -4061,14 +4389,11 @@ fn validate_signal_provider_session_record(record: &SignalProviderSessionRecord)
                 .to_owned(),
         ));
     }
-    if is_uninitialized_signal_message_chain(&record.sending_chain)
-        && record.remote_ratchet_key.is_none()
-    {
-        return Err(CoreError::Protocol(
-            "Signal provider session uninitialized sending chain requires remote ratchet key"
-                .to_owned(),
-        ));
-    }
+    // A freshly bootstrapped inbound (Bob) session legitimately holds only the X3DH
+    // root key: no sending chain, no receiving chain, and no remote ratchet key (the
+    // first inbound message drives the initial DH ratchet). So an uninitialized
+    // sending chain with no remote ratchet key is only invalid if a receiving chain
+    // is already present (caught by the pairing check above).
     signal_public_key_bytes(&prefixed_signal_public_key(
         &record.local_ratchet_key_pair.public,
     ))?;
@@ -4122,11 +4447,8 @@ fn validate_signal_provider_stored_message_key(
     message_key: &SignalProviderStoredMessageKey,
 ) -> CoreResult<()> {
     normalize_signal_public_key(&message_key.ratchet_key)?;
-    if message_key.counter == 0 {
-        return Err(CoreError::Protocol(
-            "Signal provider skipped message counter must be greater than zero".to_owned(),
-        ));
-    }
+    // Counters are 0-based (libsignal), so message counter 0 is a valid skipped key
+    // (e.g. when message 0 is stashed because a later message arrives first).
     validate_signal_message_chain_key(message_key.message_keys.cipher_key.expose())?;
     validate_signal_message_chain_key(message_key.message_keys.mac_key.expose())?;
     if message_key.message_keys.iv.len() != SIGNAL_MESSAGE_IV_LEN {
@@ -4206,6 +4528,20 @@ fn validate_provider_session_identity_in_tx(
         )));
     }
     Ok(Ok(()))
+}
+
+// Load the local Signal identity public key (33-byte 0x05-prefixed) from credentials
+// stored in the same transaction. Required to authenticate 1:1 WhisperMessages, whose
+// MAC covers both identities.
+fn local_signal_identity_public_key_from_tx(tx: &mut dyn StoreTransaction) -> CoreResult<Bytes> {
+    let credentials = read_credentials_from_tx(tx)
+        .map_err(CoreError::Store)?
+        .ok_or_else(|| {
+            CoreError::Protocol(
+                "missing local Signal credentials for 1:1 message authentication".to_owned(),
+            )
+        })?;
+    Ok(local_key_pair_public_key(&credentials.signed_identity_key))
 }
 
 fn delete_provider_identity_record_in_tx(
@@ -4428,49 +4764,6 @@ impl TryFrom<SignalWireWhisperMessage> for SignalWhisperMessage {
     }
 }
 
-impl TryFrom<SignalPreKeyWhisperMessage> for SignalWirePreKeyWhisperMessage {
-    type Error = CoreError;
-
-    fn try_from(value: SignalPreKeyWhisperMessage) -> CoreResult<Self> {
-        Ok(Self {
-            pre_key_id: value.pre_key_id,
-            base_key: value.base_key,
-            identity_key: value.identity_key,
-            message: encode_signal_whisper_message(&value.message)?,
-            registration_id: Some(value.registration_id),
-            signed_pre_key_id: Some(value.signed_pre_key_id),
-        })
-    }
-}
-
-impl TryFrom<SignalWirePreKeyWhisperMessage> for SignalPreKeyWhisperMessage {
-    type Error = CoreError;
-
-    fn try_from(value: SignalWirePreKeyWhisperMessage) -> CoreResult<Self> {
-        if value.message.is_empty() {
-            return Err(CoreError::Protocol(
-                "Signal pre-key whisper message missing inner message".to_owned(),
-            ));
-        }
-        let registration_id = value.registration_id.ok_or_else(|| {
-            CoreError::Protocol("Signal pre-key whisper message missing registration id".to_owned())
-        })?;
-        let signed_pre_key_id = value.signed_pre_key_id.ok_or_else(|| {
-            CoreError::Protocol(
-                "Signal pre-key whisper message missing signed pre-key id".to_owned(),
-            )
-        })?;
-        Ok(Self {
-            registration_id,
-            pre_key_id: value.pre_key_id,
-            signed_pre_key_id,
-            base_key: normalize_signal_public_key(&value.base_key)?,
-            identity_key: normalize_signal_public_key(&value.identity_key)?,
-            message: decode_signal_whisper_message(&value.message)?,
-        })
-    }
-}
-
 fn validate_signal_whisper_message(
     message: &SignalWhisperMessage,
 ) -> CoreResult<SignalWhisperMessage> {
@@ -4491,12 +4784,10 @@ fn validate_signal_pre_key_whisper_message(
     message: &SignalPreKeyWhisperMessage,
 ) -> CoreResult<SignalPreKeyWhisperMessage> {
     let base_key = normalize_signal_public_key(&message.base_key)?;
+    // The X3DH base key and the inner WhisperMessage's sending-ratchet key are
+    // independent in libsignal (the sender uses a fresh ratchet key), so they are
+    // NOT required to be equal here.
     let inner_message = validate_signal_whisper_message(&message.message)?;
-    if inner_message.ephemeral_key != base_key {
-        return Err(CoreError::Protocol(
-            "Signal pre-key message base key does not match inner ratchet key".to_owned(),
-        ));
-    }
     Ok(SignalPreKeyWhisperMessage {
         registration_id: message.registration_id,
         pre_key_id: message.pre_key_id,
@@ -5167,6 +5458,20 @@ mod tests {
     use wa_crypto::{XEdDsaNoiseCertificateVerifier, generate_key_pair};
     use wa_store::SqliteAuthStore;
 
+    // Fixed identities/mac key for pure round-trip and golden tests that never
+    // decrypt through a session.
+    fn fixed_mac_key() -> [u8; 32] {
+        [0x99u8; 32]
+    }
+
+    fn fixed_sender_identity() -> Bytes {
+        prefixed_test_signal_key(1)
+    }
+
+    fn fixed_receiver_identity() -> Bytes {
+        prefixed_test_signal_key(2)
+    }
+
     #[test]
     fn maps_jids_to_signal_addresses() {
         assert_eq!(
@@ -5379,8 +5684,38 @@ mod tests {
         );
     }
 
+    // Helper for these wire tests: wrap raw protobuf bytes as the new framed
+    // WhisperMessage `0x33 || protobuf || MAC8` with a CORRECT MAC under the fixed
+    // test identities, so `decode_signal_whisper_message` passes the MAC check and
+    // reaches the protobuf/validation logic under test.
+    fn frame_raw_whisper_protobuf(protobuf: &[u8]) -> Vec<u8> {
+        let mut serialized = vec![SIGNAL_WHISPER_MESSAGE_VERSION];
+        serialized.extend_from_slice(protobuf);
+        let mac = signal_whisper_message_mac(
+            &fixed_mac_key(),
+            &fixed_sender_identity(),
+            &fixed_receiver_identity(),
+            &serialized,
+        )
+        .unwrap();
+        serialized.extend_from_slice(&mac);
+        serialized
+    }
+
+    fn decode_fixed_whisper(input: &[u8]) -> CoreResult<SignalWhisperMessage> {
+        decode_signal_whisper_message(
+            input,
+            &fixed_mac_key(),
+            &fixed_sender_identity(),
+            &fixed_receiver_identity(),
+        )
+    }
+
     #[test]
     fn signal_wire_whisper_message_round_trips_and_validates() {
+        let mac_key = fixed_mac_key();
+        let sender = fixed_sender_identity();
+        let receiver = fixed_receiver_identity();
         let message = SignalWhisperMessage {
             ephemeral_key: Bytes::from(vec![7u8; 32]),
             counter: 17,
@@ -5388,8 +5723,10 @@ mod tests {
             ciphertext: Bytes::from_static(b"signal-ciphertext"),
         };
 
-        let encoded = encode_signal_whisper_message(&message).unwrap();
-        let decoded = decode_signal_whisper_message(&encoded).unwrap();
+        let encoded =
+            encode_signal_whisper_message(&message, &mac_key, &sender, &receiver).unwrap();
+        let decoded =
+            decode_signal_whisper_message(&encoded, &mac_key, &sender, &receiver).unwrap();
 
         assert_eq!(decoded.counter, 17);
         assert_eq!(decoded.previous_counter, 13);
@@ -5397,29 +5734,45 @@ mod tests {
         assert_eq!(decoded.ephemeral_key[0], SIGNAL_PUBLIC_KEY_VERSION);
         assert_eq!(&decoded.ephemeral_key[1..], &[7u8; 32]);
         assert_eq!(
-            decode_signal_whisper_message(&encode_signal_whisper_message(&decoded).unwrap())
-                .unwrap(),
+            decode_signal_whisper_message(
+                &encode_signal_whisper_message(&decoded, &mac_key, &sender, &receiver).unwrap(),
+                &mac_key,
+                &sender,
+                &receiver,
+            )
+            .unwrap(),
             decoded
         );
-        let zero_encoded = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: Bytes::from(vec![9u8; 32]),
-            counter: 0,
-            previous_counter: 0,
-            ciphertext: Bytes::from_static(b"z"),
-        })
+        let zero_encoded = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: Bytes::from(vec![9u8; 32]),
+                counter: 0,
+                previous_counter: 0,
+                ciphertext: Bytes::from_static(b"z"),
+            },
+            &mac_key,
+            &sender,
+            &receiver,
+        )
         .unwrap();
+        // Framed: 0x33 || protobuf || MAC8.
         let expected_zero_encoded = {
-            let mut expected = vec![0x0a, 0x21, SIGNAL_PUBLIC_KEY_VERSION];
-            expected.extend([9u8; 32]);
-            expected.extend([0x10, 0x00, 0x18, 0x00, 0x22, 0x01, b'z']);
-            Bytes::from(expected)
+            let mut protobuf = vec![0x0a, 0x21, SIGNAL_PUBLIC_KEY_VERSION];
+            protobuf.extend([9u8; 32]);
+            protobuf.extend([0x10, 0x00, 0x18, 0x00, 0x22, 0x01, b'z']);
+            Bytes::from(frame_raw_whisper_protobuf(&protobuf))
         };
         assert_eq!(zero_encoded, expected_zero_encoded);
 
-        let err = encode_signal_whisper_message(&SignalWhisperMessage {
-            ciphertext: Bytes::new(),
-            ..decoded.clone()
-        })
+        let err = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ciphertext: Bytes::new(),
+                ..decoded.clone()
+            },
+            &mac_key,
+            &sender,
+            &receiver,
+        )
         .unwrap_err();
         assert!(matches!(
             err,
@@ -5427,43 +5780,76 @@ mod tests {
                 if message == "Signal whisper message ciphertext must not be empty"
         ));
 
-        let err = decode_signal_whisper_message(&[0x0a, 0x02, 1, 2]).unwrap_err();
+        // Too short to even hold version byte + MAC.
+        let err = decode_fixed_whisper(&[0x0a, 0x02, 1, 2]).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Protocol(message) if message == "Signal whisper message is too short: 4"
+        ));
+
+        // A correctly framed message whose embedded ratchet key is too short.
+        let err =
+            decode_fixed_whisper(&frame_raw_whisper_protobuf(&[0x0a, 0x02, 1, 2])).unwrap_err();
         assert!(matches!(
             err,
             CoreError::Protocol(message) if message == "invalid signal public key length: 2"
         ));
 
-        let err =
-            decode_signal_whisper_message(&[0x10, 0x0c, 0x18, 0x07, 0x22, 0x01, 0xaa]).unwrap_err();
+        let err = decode_fixed_whisper(&frame_raw_whisper_protobuf(&[
+            0x10, 0x0c, 0x18, 0x07, 0x22, 0x01, 0xaa,
+        ]))
+        .unwrap_err();
         assert!(matches!(
             err,
             CoreError::Protocol(message) if message == "invalid signal public key length: 0"
         ));
 
-        let missing_counter = SignalWireWhisperMessage {
-            ephemeral_key: prefixed_test_signal_key(4),
-            counter: None,
-            previous_counter: Some(7),
-            ciphertext: Bytes::from_static(b"signal-ciphertext"),
-        }
-        .encode_to_vec();
-        let err = decode_signal_whisper_message(&missing_counter).unwrap_err();
+        let missing_counter = frame_raw_whisper_protobuf(
+            &SignalWireWhisperMessage {
+                ephemeral_key: prefixed_test_signal_key(4),
+                counter: None,
+                previous_counter: Some(7),
+                ciphertext: Bytes::from_static(b"signal-ciphertext"),
+            }
+            .encode_to_vec(),
+        );
+        let err = decode_fixed_whisper(&missing_counter).unwrap_err();
         assert!(matches!(
             err,
             CoreError::Protocol(message) if message == "Signal whisper message missing counter"
         ));
 
-        let missing_previous_counter = SignalWireWhisperMessage {
-            ephemeral_key: prefixed_test_signal_key(4),
-            counter: Some(7),
-            previous_counter: None,
-            ciphertext: Bytes::from_static(b"signal-ciphertext"),
-        }
-        .encode_to_vec();
-        let decoded_missing_previous =
-            decode_signal_whisper_message(&missing_previous_counter).unwrap();
+        let missing_previous_counter = frame_raw_whisper_protobuf(
+            &SignalWireWhisperMessage {
+                ephemeral_key: prefixed_test_signal_key(4),
+                counter: Some(7),
+                previous_counter: None,
+                ciphertext: Bytes::from_static(b"signal-ciphertext"),
+            }
+            .encode_to_vec(),
+        );
+        let decoded_missing_previous = decode_fixed_whisper(&missing_previous_counter).unwrap();
         assert_eq!(decoded_missing_previous.counter, 7);
         assert_eq!(decoded_missing_previous.previous_counter, 0);
+
+        // A wrong MAC is rejected.
+        let mut bad_mac = encoded.to_vec();
+        *bad_mac.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            decode_signal_whisper_message(&bad_mac, &mac_key, &sender, &receiver).unwrap_err(),
+            CoreError::Crypto(_)
+        ));
+
+        // The wrong version byte is rejected.
+        let mut bad_version = encoded.to_vec();
+        bad_version[0] = 0x22;
+        let err =
+            decode_signal_whisper_message(&bad_version, &mac_key, &sender, &receiver).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Protocol(message)
+                if message == "unsupported Signal whisper message version: 2"
+        ));
     }
 
     #[test]
@@ -5483,7 +5869,11 @@ mod tests {
             message: inner.clone(),
         };
 
-        let encoded = encode_signal_pre_key_whisper_message(&message).unwrap();
+        let mac_key = fixed_mac_key();
+        let sender = fixed_sender_identity();
+        let receiver = fixed_receiver_identity();
+        let encoded =
+            encode_signal_pre_key_whisper_message(&message, &mac_key, &sender, &receiver).unwrap();
         let decoded = decode_signal_pre_key_whisper_message(&encoded).unwrap();
 
         assert_eq!(decoded.registration_id, 0x0102_0304);
@@ -5500,7 +5890,13 @@ mod tests {
         };
         assert_eq!(
             decode_signal_pre_key_whisper_message(
-                &encode_signal_pre_key_whisper_message(&without_one_time_pre_key).unwrap()
+                &encode_signal_pre_key_whisper_message(
+                    &without_one_time_pre_key,
+                    &mac_key,
+                    &sender,
+                    &receiver
+                )
+                .unwrap()
             )
             .unwrap()
             .pre_key_id,
@@ -5508,51 +5904,75 @@ mod tests {
         );
 
         assert!(
-            encode_signal_pre_key_whisper_message(&SignalPreKeyWhisperMessage {
-                message: SignalWhisperMessage {
-                    ciphertext: Bytes::new(),
-                    ..inner
+            encode_signal_pre_key_whisper_message(
+                &SignalPreKeyWhisperMessage {
+                    message: SignalWhisperMessage {
+                        ciphertext: Bytes::new(),
+                        ..inner
+                    },
+                    ..decoded.clone()
                 },
-                ..decoded.clone()
-            })
+                &mac_key,
+                &sender,
+                &receiver
+            )
             .is_err()
         );
-        assert!(
-            encode_signal_pre_key_whisper_message(&SignalPreKeyWhisperMessage {
-                base_key: prefixed_test_signal_key(9),
-                ..decoded.clone()
-            })
-            .is_err()
-        );
-        let mismatched_wire = SignalWirePreKeyWhisperMessage {
-            pre_key_id: decoded.pre_key_id,
+        // The X3DH base key and the inner WhisperMessage's sending-ratchet key are
+        // independent in libsignal, so a base key distinct from the inner ratchet key
+        // is valid and must encode and decode (round-trip) without error.
+        let distinct_base_key = SignalPreKeyWhisperMessage {
             base_key: prefixed_test_signal_key(9),
-            identity_key: decoded.identity_key,
-            message: encode_signal_whisper_message(&decoded.message).unwrap(),
-            registration_id: Some(decoded.registration_id),
-            signed_pre_key_id: Some(decoded.signed_pre_key_id),
-        }
-        .encode_to_vec();
-        let err = decode_signal_pre_key_whisper_message(&mismatched_wire).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::Protocol(message)
-                if message == "Signal pre-key message base key does not match inner ratchet key"
-        ));
-        assert!(decode_signal_pre_key_whisper_message(&[0x22, 0x02, 1, 2]).is_err());
+            ..decoded.clone()
+        };
+        let distinct_base_wire =
+            encode_signal_pre_key_whisper_message(&distinct_base_key, &mac_key, &sender, &receiver)
+                .unwrap();
+        let distinct_base_decoded =
+            decode_signal_pre_key_whisper_message(&distinct_base_wire).unwrap();
+        assert_eq!(distinct_base_decoded.base_key, prefixed_test_signal_key(9));
+        assert_eq!(
+            distinct_base_decoded.message.ephemeral_key,
+            decoded.message.ephemeral_key
+        );
+        assert_ne!(
+            distinct_base_decoded.base_key,
+            distinct_base_decoded.message.ephemeral_key
+        );
+        assert!(decode_signal_pre_key_whisper_message(&[0x33, 0x22, 0x02, 1, 2]).is_err());
+    }
+
+    // Wrap raw pre-key protobuf bytes with the outer version byte (no outer MAC).
+    fn frame_raw_pre_key_protobuf(protobuf: &[u8]) -> Vec<u8> {
+        let mut serialized = vec![SIGNAL_WHISPER_MESSAGE_VERSION];
+        serialized.extend_from_slice(protobuf);
+        serialized
+    }
+
+    // A framed inner WhisperMessage built from a struct, for pre-key wire tests.
+    fn framed_inner_whisper(message: &SignalWhisperMessage) -> Bytes {
+        encode_signal_whisper_message(
+            message,
+            &fixed_mac_key(),
+            &fixed_sender_identity(),
+            &fixed_receiver_identity(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn signal_wire_pre_key_whisper_rejects_missing_inner_message() {
-        let wire = SignalWirePreKeyWhisperMessage {
-            pre_key_id: Some(9),
-            base_key: prefixed_test_signal_key(8),
-            identity_key: prefixed_test_signal_key(6),
-            message: Bytes::new(),
-            registration_id: Some(0x0102_0304),
-            signed_pre_key_id: Some(7),
-        }
-        .encode_to_vec();
+        let wire = frame_raw_pre_key_protobuf(
+            &SignalWirePreKeyWhisperMessage {
+                pre_key_id: Some(9),
+                base_key: prefixed_test_signal_key(8),
+                identity_key: prefixed_test_signal_key(6),
+                message: Bytes::new(),
+                registration_id: Some(0x0102_0304),
+                signed_pre_key_id: Some(7),
+            }
+            .encode_to_vec(),
+        );
 
         let err = decode_signal_pre_key_whisper_message(&wire).unwrap_err();
         assert!(matches!(
@@ -5564,22 +5984,23 @@ mod tests {
 
     #[test]
     fn signal_wire_pre_key_whisper_rejects_missing_registration_and_signed_pre_key_ids() {
-        let inner = encode_signal_whisper_message(&SignalWhisperMessage {
+        let inner = framed_inner_whisper(&SignalWhisperMessage {
             ephemeral_key: prefixed_test_signal_key(8),
             counter: 3,
             previous_counter: 2,
             ciphertext: Bytes::from_static(b"inner-ciphertext"),
-        })
-        .unwrap();
-        let missing_registration = SignalWirePreKeyWhisperMessage {
-            pre_key_id: Some(9),
-            base_key: prefixed_test_signal_key(8),
-            identity_key: prefixed_test_signal_key(6),
-            message: inner.clone(),
-            registration_id: None,
-            signed_pre_key_id: Some(7),
-        }
-        .encode_to_vec();
+        });
+        let missing_registration = frame_raw_pre_key_protobuf(
+            &SignalWirePreKeyWhisperMessage {
+                pre_key_id: Some(9),
+                base_key: prefixed_test_signal_key(8),
+                identity_key: prefixed_test_signal_key(6),
+                message: inner.clone(),
+                registration_id: None,
+                signed_pre_key_id: Some(7),
+            }
+            .encode_to_vec(),
+        );
         let err = decode_signal_pre_key_whisper_message(&missing_registration).unwrap_err();
         assert!(matches!(
             err,
@@ -5587,15 +6008,17 @@ mod tests {
                 if message == "Signal pre-key whisper message missing registration id"
         ));
 
-        let missing_signed_pre_key = SignalWirePreKeyWhisperMessage {
-            pre_key_id: Some(9),
-            base_key: prefixed_test_signal_key(8),
-            identity_key: prefixed_test_signal_key(6),
-            message: inner,
-            registration_id: Some(0x0102_0304),
-            signed_pre_key_id: None,
-        }
-        .encode_to_vec();
+        let missing_signed_pre_key = frame_raw_pre_key_protobuf(
+            &SignalWirePreKeyWhisperMessage {
+                pre_key_id: Some(9),
+                base_key: prefixed_test_signal_key(8),
+                identity_key: prefixed_test_signal_key(6),
+                message: inner,
+                registration_id: Some(0x0102_0304),
+                signed_pre_key_id: None,
+            }
+            .encode_to_vec(),
+        );
         let err = decode_signal_pre_key_whisper_message(&missing_signed_pre_key).unwrap_err();
         assert!(matches!(
             err,
@@ -5620,21 +6043,29 @@ mod tests {
             },
         };
 
-        let err = encode_signal_pre_key_whisper_message(&message).unwrap_err();
+        let err = encode_signal_pre_key_whisper_message(
+            &message,
+            &fixed_mac_key(),
+            &fixed_sender_identity(),
+            &fixed_receiver_identity(),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             CoreError::Protocol(message) if message == "invalid signal public key length: 31"
         ));
 
-        let wire = SignalWirePreKeyWhisperMessage {
-            pre_key_id: Some(9),
-            base_key: prefixed_test_signal_key(8),
-            identity_key: Bytes::from(vec![0x05; 31]),
-            message: encode_signal_whisper_message(&message.message).unwrap(),
-            registration_id: Some(0x0102_0304),
-            signed_pre_key_id: Some(7),
-        }
-        .encode_to_vec();
+        let wire = frame_raw_pre_key_protobuf(
+            &SignalWirePreKeyWhisperMessage {
+                pre_key_id: Some(9),
+                base_key: prefixed_test_signal_key(8),
+                identity_key: Bytes::from(vec![0x05; 31]),
+                message: framed_inner_whisper(&message.message),
+                registration_id: Some(0x0102_0304),
+                signed_pre_key_id: Some(7),
+            }
+            .encode_to_vec(),
+        );
         let err = decode_signal_pre_key_whisper_message(&wire).unwrap_err();
         assert!(matches!(
             err,
@@ -5644,22 +6075,25 @@ mod tests {
 
     #[test]
     fn signal_wire_pre_key_whisper_rejects_missing_inner_ciphertext() {
-        let inner = SignalWireWhisperMessage {
+        let inner_protobuf = SignalWireWhisperMessage {
             ephemeral_key: prefixed_test_signal_key(8),
             counter: Some(3),
             previous_counter: Some(2),
             ciphertext: Bytes::new(),
         }
         .encode_to_vec();
-        let wire = SignalWirePreKeyWhisperMessage {
-            pre_key_id: Some(9),
-            base_key: prefixed_test_signal_key(8),
-            identity_key: prefixed_test_signal_key(6),
-            message: inner.into(),
-            registration_id: Some(0x0102_0304),
-            signed_pre_key_id: Some(7),
-        }
-        .encode_to_vec();
+        let inner = frame_raw_whisper_protobuf(&inner_protobuf);
+        let wire = frame_raw_pre_key_protobuf(
+            &SignalWirePreKeyWhisperMessage {
+                pre_key_id: Some(9),
+                base_key: prefixed_test_signal_key(8),
+                identity_key: prefixed_test_signal_key(6),
+                message: Bytes::from(inner),
+                registration_id: Some(0x0102_0304),
+                signed_pre_key_id: Some(7),
+            }
+            .encode_to_vec(),
+        );
 
         let err = decode_signal_pre_key_whisper_message(&wire).unwrap_err();
         assert!(matches!(
@@ -5687,6 +6121,7 @@ mod tests {
             local_ratchet_key_pair: local_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
 
@@ -5872,6 +6307,7 @@ mod tests {
                 ),
                 skipped_message_key(Bytes::copy_from_slice(&first_ratchet_key.public), 9),
             ],
+            inbound_base_key: None,
         };
         let err = encode_signal_provider_session_record(&record).unwrap_err();
         assert!(matches!(
@@ -5901,7 +6337,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_provider_session_record_rejects_zero_counter_skipped_message_keys() {
+    fn signal_provider_session_record_accepts_zero_counter_skipped_message_keys() {
         let local_key_pair = generate_key_pair();
         let active_ratchet_key = generate_key_pair();
         let skipped_ratchet_key = generate_key_pair();
@@ -5936,31 +6372,14 @@ mod tests {
             local_ratchet_key_pair: local_key_pair,
             previous_counter: 0,
             message_keys: vec![skipped_message_key(0)],
+            inbound_base_key: None,
         };
-        let err = encode_signal_provider_session_record(&record).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::Protocol(message)
-                if message == "Signal provider skipped message counter must be greater than zero"
-        ));
-
-        let mut valid_record = record;
-        valid_record.message_keys[0] = skipped_message_key(9);
-        let encoded = encode_signal_provider_session_record(&valid_record).unwrap();
-        let ratchet_key = prefixed_signal_public_key(&skipped_ratchet_key.public);
-        let offset = encoded
-            .windows(ratchet_key.len())
-            .position(|window| window == ratchet_key)
-            .expect("encoded session contains skipped ratchet key");
-        let counter_offset = offset + ratchet_key.len();
-        let mut tampered = encoded.to_vec();
-        tampered[counter_offset..counter_offset + 4].copy_from_slice(&0u32.to_be_bytes());
-        let err = decode_signal_provider_session_record(&tampered).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::Protocol(message)
-                if message == "Signal provider skipped message counter must be greater than zero"
-        ));
+        // 0-based counters: a skipped message key at counter 0 is valid and must
+        // round-trip through encode/decode.
+        let encoded = encode_signal_provider_session_record(&record).unwrap();
+        let decoded = decode_signal_provider_session_record(&encoded).unwrap();
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.message_keys[0].counter, 0);
     }
 
     #[test]
@@ -5993,6 +6412,7 @@ mod tests {
             local_ratchet_key_pair: local_key_pair.clone(),
             previous_counter: 0,
             message_keys: vec![skipped_message_key.clone()],
+            inbound_base_key: None,
         };
         let err = encode_signal_provider_session_record(&record).unwrap_err();
         assert!(matches!(
@@ -6041,7 +6461,11 @@ mod tests {
     }
 
     #[test]
-    fn signal_provider_session_record_rejects_uninitialized_send_chain_without_remote_ratchet() {
+    fn signal_provider_session_record_accepts_pristine_inbound_bootstrap_state() {
+        // A freshly bootstrapped inbound (Bob) session holds only the X3DH root key:
+        // no sending chain, no receiving chain, no remote ratchet key. This is the
+        // libsignal-correct state before the first inbound message drives the initial
+        // DH ratchet, so it must round-trip through encode/decode.
         let local_key_pair = generate_key_pair();
         let record = SignalProviderSessionRecord {
             remote_registration_id: 88,
@@ -6055,39 +6479,11 @@ mod tests {
             local_ratchet_key_pair: local_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: Some(prefixed_test_signal_key(42)),
         };
-        let err = encode_signal_provider_session_record(&record).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::Protocol(message)
-                if message == "Signal provider session uninitialized sending chain requires remote ratchet key"
-        ));
-
-        let mut encoded = BytesMut::new();
-        encoded.put_u8(PROVIDER_SESSION_VERSION);
-        encoded.put_u8(PROVIDER_SESSION_RECORD_KIND);
-        encoded.put_u32(record.remote_registration_id);
-        put_bytes(&mut encoded, &record.remote_identity_key).unwrap();
-        put_bytes(&mut encoded, record.root_key.key.expose()).unwrap();
-        encoded.put_u32(record.sending_chain.counter);
-        put_bytes(&mut encoded, record.sending_chain.key.expose()).unwrap();
-        put_bytes(
-            &mut encoded,
-            &prefixed_signal_public_key(&local_key_pair.public),
-        )
-        .unwrap();
-        put_bytes(&mut encoded, local_key_pair.private.expose()).unwrap();
-        encoded.put_u32(record.previous_counter);
-        encoded.put_u8(0);
-        encoded.put_u8(0);
-        encoded.put_u32(0);
-
-        let err = decode_signal_provider_session_record(&encoded).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreError::Protocol(message)
-                if message == "Signal provider session uninitialized sending chain requires remote ratchet key"
-        ));
+        let encoded = encode_signal_provider_session_record(&record).unwrap();
+        let decoded = decode_signal_provider_session_record(&encoded).unwrap();
+        assert_eq!(decoded, record);
     }
 
     #[test]
@@ -6122,6 +6518,7 @@ mod tests {
             local_ratchet_key_pair: local_key_pair,
             previous_counter: 0,
             message_keys: vec![skipped_message_key(3)],
+            inbound_base_key: None,
         };
         let err = encode_signal_provider_session_record(&record).unwrap_err();
         assert!(matches!(
@@ -6164,9 +6561,16 @@ mod tests {
                 ciphertext: Bytes::from(ciphertext),
             };
 
-            let decoded =
-                decode_signal_whisper_message(&encode_signal_whisper_message(&message).unwrap())
-                    .unwrap();
+            let mac_key = fixed_mac_key();
+            let sender = fixed_sender_identity();
+            let receiver = fixed_receiver_identity();
+            let decoded = decode_signal_whisper_message(
+                &encode_signal_whisper_message(&message, &mac_key, &sender, &receiver).unwrap(),
+                &mac_key,
+                &sender,
+                &receiver,
+            )
+            .unwrap();
 
             let expected_ephemeral_key =
                 Bytes::copy_from_slice(&prefixed_signal_public_key(&ephemeral_key));
@@ -6176,7 +6580,10 @@ mod tests {
             prop_assert_eq!(decoded.ciphertext.as_ref(), message.ciphertext.as_ref());
             prop_assert_eq!(
                 decode_signal_whisper_message(
-                    &encode_signal_whisper_message(&decoded).unwrap()
+                    &encode_signal_whisper_message(&decoded, &mac_key, &sender, &receiver).unwrap(),
+                    &mac_key,
+                    &sender,
+                    &receiver,
                 )
                 .unwrap(),
                 decoded
@@ -6208,8 +6615,12 @@ mod tests {
                 },
             };
 
+            let mac_key = fixed_mac_key();
+            let sender = fixed_sender_identity();
+            let receiver = fixed_receiver_identity();
             let decoded = decode_signal_pre_key_whisper_message(
-                &encode_signal_pre_key_whisper_message(&message).unwrap()
+                &encode_signal_pre_key_whisper_message(&message, &mac_key, &sender, &receiver)
+                    .unwrap()
             )
             .unwrap();
 
@@ -6233,7 +6644,8 @@ mod tests {
             );
             prop_assert_eq!(
                 decode_signal_pre_key_whisper_message(
-                    &encode_signal_pre_key_whisper_message(&decoded).unwrap()
+                    &encode_signal_pre_key_whisper_message(&decoded, &mac_key, &sender, &receiver)
+                        .unwrap()
                 )
                 .unwrap(),
                 decoded
@@ -6309,6 +6721,7 @@ mod tests {
                 },
                 previous_counter,
                 message_keys,
+                inbound_base_key: None,
             };
 
             let decoded = decode_signal_provider_session_record(
@@ -6482,24 +6895,27 @@ mod tests {
             ]
         );
 
+        // The body layer is now PURE AES-256-CBC; authentication (the truncated
+        // HMAC) lives at the WhisperMessage framing layer, so the body itself is
+        // unauthenticated and round-trips/structural-error cases are all we assert
+        // here. Tamper-detection is covered at the whisper-framing layer.
         let encrypted = encrypt_signal_message_body(b"provider plaintext", &keys).unwrap();
         assert_eq!(
             decrypt_signal_message_body(&encrypted, &keys).unwrap(),
             Bytes::from_static(b"provider plaintext")
         );
-        assert!(encrypted.len() > "provider plaintext".len() + SIGNAL_MESSAGE_MAC_LEN);
+        // Pure AES-CBC output is block-aligned with no trailing MAC.
+        assert_eq!(encrypted.len() % 16, 0);
+        assert!(encrypted.len() >= "provider plaintext".len());
 
-        let mut tampered_mac = encrypted.to_vec();
-        *tampered_mac.last_mut().unwrap() ^= 1;
-        assert!(decrypt_signal_message_body(&tampered_mac, &keys).is_err());
+        // Flipping the final ciphertext byte corrupts the last block's PKCS#7
+        // padding, which the AES-CBC layer rejects.
+        let mut tampered_padding = encrypted.to_vec();
+        *tampered_padding.last_mut().unwrap() ^= 1;
+        assert!(decrypt_signal_message_body(&tampered_padding, &keys).is_err());
 
-        let mut tampered_ciphertext = encrypted.to_vec();
-        tampered_ciphertext[0] ^= 1;
-        assert!(decrypt_signal_message_body(&tampered_ciphertext, &keys).is_err());
-
-        let wrong_keys = derive_signal_message_keys(&[2u8; 32]).unwrap();
-        assert!(decrypt_signal_message_body(&encrypted, &wrong_keys).is_err());
         assert!(derive_signal_message_keys(&[1u8; 31]).is_err());
+        // A buffer that is not a whole number of AES blocks cannot decrypt.
         assert!(decrypt_signal_message_body(&[0u8; SIGNAL_MESSAGE_MAC_LEN], &keys).is_err());
     }
 
@@ -6531,7 +6947,9 @@ mod tests {
         );
 
         let step = ratchet_signal_message_chain(&chain_key).unwrap();
-        assert_eq!(step.message_counter, 42);
+        // 0-based: a chain whose `counter` is 41 produces the message at counter 41
+        // and advances the chain's next-message counter to 42.
+        assert_eq!(step.message_counter, 41);
         assert_eq!(step.next_chain_key.counter, 42);
         assert_eq!(step.next_chain_key.key, next_chain_key);
         assert_eq!(
@@ -8815,6 +9233,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
 
@@ -8897,6 +9316,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
 
@@ -9018,6 +9438,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
 
@@ -9151,6 +9572,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         provider_store
@@ -9263,6 +9685,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         let err = provider_store
@@ -13228,6 +13651,8 @@ mod tests {
     async fn provider_state_store_rejects_runtime_session_use_when_identity_mismatches() {
         let store = temp_store().await;
         let provider_store = SignalProviderStateStore::new(store.clone());
+        let credentials = create_initial_credentials().unwrap();
+        save_credentials(&store, credentials.clone()).await.unwrap();
         let remote_jid = "123:7@s.whatsapp.net";
         let remote_ratchet_key_pair = test_key_pair(31);
         let record = SignalProviderSessionRecord {
@@ -13250,6 +13675,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         provider_store
@@ -13288,14 +13714,19 @@ mod tests {
         };
         let step = ratchet_signal_message_chain(&remote_receiving_chain).unwrap();
         remote_receiving_chain = step.next_chain_key;
-        let inbound = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
-                &remote_ratchet_key_pair.public,
-            )),
-            counter: step.message_counter,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
-        })
+        let inbound = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
+                    &remote_ratchet_key_pair.public,
+                )),
+                counter: step.message_counter,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
+            },
+            step.message_keys.mac_key.expose(),
+            &record.remote_identity_key,
+            &record.remote_identity_key,
+        )
         .unwrap();
         assert_eq!(remote_receiving_chain.counter, 1);
         let decrypt_err = provider_store
@@ -13339,6 +13770,9 @@ mod tests {
     async fn provider_state_store_rejects_runtime_session_decrypt_when_identity_missing() {
         let store = temp_store().await;
         let provider_store = SignalProviderStateStore::new(store.clone());
+        let credentials = create_initial_credentials().unwrap();
+        save_credentials(&store, credentials.clone()).await.unwrap();
+        let local_identity = local_key_pair_public_key(&credentials.signed_identity_key);
         let remote_jid = "123:7@s.whatsapp.net";
         let remote_ratchet_key_pair = test_key_pair(31);
         let record = SignalProviderSessionRecord {
@@ -13361,6 +13795,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         provider_store
@@ -13374,14 +13809,19 @@ mod tests {
         };
         let step = ratchet_signal_message_chain(&remote_receiving_chain).unwrap();
         remote_receiving_chain = step.next_chain_key;
-        let inbound = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
-                &remote_ratchet_key_pair.public,
-            )),
-            counter: step.message_counter,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
-        })
+        let inbound = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
+                    &remote_ratchet_key_pair.public,
+                )),
+                counter: step.message_counter,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
+            },
+            step.message_keys.mac_key.expose(),
+            &record.remote_identity_key,
+            &local_identity,
+        )
         .unwrap();
         assert_eq!(remote_receiving_chain.counter, 1);
         let decrypt_err = provider_store
@@ -13421,6 +13861,9 @@ mod tests {
     async fn provider_state_store_rejects_runtime_session_decrypt_when_identity_malformed() {
         let store = temp_store().await;
         let provider_store = SignalProviderStateStore::new(store.clone());
+        let credentials = create_initial_credentials().unwrap();
+        save_credentials(&store, credentials.clone()).await.unwrap();
+        let local_identity = local_key_pair_public_key(&credentials.signed_identity_key);
         let remote_jid = "123:7@s.whatsapp.net";
         let remote_ratchet_key_pair = test_key_pair(31);
         let record = SignalProviderSessionRecord {
@@ -13443,6 +13886,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         provider_store
@@ -13465,14 +13909,19 @@ mod tests {
         };
         let step = ratchet_signal_message_chain(&remote_receiving_chain).unwrap();
         remote_receiving_chain = step.next_chain_key;
-        let inbound = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
-                &remote_ratchet_key_pair.public,
-            )),
-            counter: step.message_counter,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
-        })
+        let inbound = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
+                    &remote_ratchet_key_pair.public,
+                )),
+                counter: step.message_counter,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
+            },
+            step.message_keys.mac_key.expose(),
+            &record.remote_identity_key,
+            &local_identity,
+        )
         .unwrap();
         assert_eq!(remote_receiving_chain.counter, 1);
         let decrypt_err = provider_store
@@ -13604,6 +14053,9 @@ mod tests {
     async fn provider_state_store_rejects_runtime_session_decrypt_when_session_invariant_invalid() {
         let store = temp_store().await;
         let provider_store = SignalProviderStateStore::new(store.clone());
+        let credentials = create_initial_credentials().unwrap();
+        save_credentials(&store, credentials.clone()).await.unwrap();
+        let local_identity = local_key_pair_public_key(&credentials.signed_identity_key);
         let remote_jid = "123:7@s.whatsapp.net";
         let remote_ratchet_key_pair = test_key_pair(31);
         let record = SignalProviderSessionRecord {
@@ -13626,6 +14078,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         let local_public = prefixed_signal_public_key(&record.local_ratchet_key_pair.public);
@@ -13660,14 +14113,19 @@ mod tests {
         };
         let step = ratchet_signal_message_chain(&remote_receiving_chain).unwrap();
         remote_receiving_chain = step.next_chain_key;
-        let inbound = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
-                &remote_ratchet_key_pair.public,
-            )),
-            counter: step.message_counter,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
-        })
+        let inbound = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
+                    &remote_ratchet_key_pair.public,
+                )),
+                counter: step.message_counter,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"inbound", &step.message_keys).unwrap(),
+            },
+            step.message_keys.mac_key.expose(),
+            &record.remote_identity_key,
+            &local_identity,
+        )
         .unwrap();
         assert_eq!(remote_receiving_chain.counter, 1);
         let decrypt_err = provider_store
@@ -13707,8 +14165,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_state_store_rejects_runtime_session_decrypt_when_skipped_key_counter_invalid()
-    {
+    async fn provider_state_store_preserves_session_when_runtime_decrypt_fails_with_zero_counter_skipped_key()
+     {
         let store = temp_store().await;
         let provider_store = SignalProviderStateStore::new(store.clone());
         let remote_jid = "123:7@s.whatsapp.net";
@@ -13744,6 +14202,7 @@ mod tests {
                     iv: [3u8; SIGNAL_MESSAGE_IV_LEN],
                 },
             }],
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         let counter_offset = encoded
@@ -13779,10 +14238,12 @@ mod tests {
             )
             .await
             .unwrap_err();
+        // A skipped key at counter 0 is now valid (0-based counters), so the record
+        // decodes successfully and decrypting a non-WhisperMessage payload fails at
+        // the message-framing layer instead. The stored session must be preserved.
         assert!(matches!(
             decrypt_err,
-            CoreError::Protocol(message)
-                if message == "Signal provider skipped message counter must be greater than zero"
+            CoreError::Protocol(_) | CoreError::Crypto(_)
         ));
         assert_eq!(
             provider_store
@@ -13850,6 +14311,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: vec![skipped_message_key(9), skipped_message_key(10)],
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         let skipped_offsets = encoded
@@ -13954,6 +14416,7 @@ mod tests {
                     iv: [3u8; SIGNAL_MESSAGE_IV_LEN],
                 },
             }],
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         let active_ratchet_offsets = encoded
@@ -14056,10 +14519,13 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
-        assert_eq!(&encoded[encoded.len() - 6..], &[0, 0, 0, 0, 0, 0]);
-        let mut invalid_session = BytesMut::from(&encoded[..encoded.len() - 6]);
+        // Trailing 7 zero bytes: receiving flag, remote-ratchet flag, skipped count
+        // (4), inbound-base-key flag.
+        assert_eq!(&encoded[encoded.len() - 7..], &[0, 0, 0, 0, 0, 0, 0]);
+        let mut invalid_session = BytesMut::from(&encoded[..encoded.len() - 7]);
         invalid_session.put_u8(0);
         invalid_session.put_u8(0);
         invalid_session.put_u32(1);
@@ -14072,6 +14538,7 @@ mod tests {
         .unwrap();
         put_bytes(&mut invalid_session, skipped_message_keys.mac_key.expose()).unwrap();
         put_bytes(&mut invalid_session, &skipped_message_keys.iv).unwrap();
+        invalid_session.put_u8(0);
         let invalid_session = invalid_session.freeze();
 
         store
@@ -14157,12 +14624,15 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         let mut remote_tail = BytesMut::new();
         remote_tail.put_u8(1);
         put_bytes(&mut remote_tail, &remote_ratchet).unwrap();
         remote_tail.put_u32(0);
+        // Trailing inbound-base-key flag (None) appended by the encoder.
+        remote_tail.put_u8(0);
         assert_eq!(
             &encoded[encoded.len() - remote_tail.len()..],
             remote_tail.as_ref()
@@ -14170,6 +14640,7 @@ mod tests {
         let mut invalid_session = BytesMut::from(&encoded[..encoded.len() - remote_tail.len()]);
         invalid_session.put_u8(0);
         invalid_session.put_u32(0);
+        invalid_session.put_u8(0);
         let invalid_session = invalid_session.freeze();
 
         store
@@ -14230,7 +14701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_state_store_rejects_uninitialized_sending_chain_without_remote_ratchet() {
+    async fn provider_state_store_preserves_pristine_bootstrap_after_failed_decrypt() {
         let store = temp_store().await;
         let provider_store = SignalProviderStateStore::new(store.clone());
         let remote_jid = "123:7@s.whatsapp.net";
@@ -14249,6 +14720,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         let sending_key = record.sending_chain.key.expose();
@@ -14291,10 +14763,14 @@ mod tests {
             )
             .await
             .unwrap_err();
+        // A record with an uninitialized sending chain, no receiving chain and no
+        // remote ratchet key is now the libsignal-correct pristine inbound bootstrap
+        // state (valid). Decrypting a non-WhisperMessage payload therefore fails at
+        // the message-framing layer rather than at session validation, and the stored
+        // session must be left untouched.
         assert!(matches!(
             decrypt_err,
-            CoreError::Protocol(message)
-                if message == "Signal provider session uninitialized sending chain requires remote ratchet key"
+            CoreError::Protocol(_) | CoreError::Crypto(_)
         ));
         assert_eq!(
             provider_store
@@ -14347,14 +14823,18 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
-        assert_eq!(&encoded[encoded.len() - 6..], &[0, 0, 0, 0, 0, 0]);
-        let mut invalid_session = BytesMut::from(&encoded[..encoded.len() - 6]);
+        // Trailing 7 zero bytes: receiving flag, remote-ratchet flag, skipped count
+        // (4), inbound-base-key flag.
+        assert_eq!(&encoded[encoded.len() - 7..], &[0, 0, 0, 0, 0, 0, 0]);
+        let mut invalid_session = BytesMut::from(&encoded[..encoded.len() - 7]);
         invalid_session.put_u8(0);
         invalid_session.put_u8(1);
         put_bytes(&mut invalid_session, &remote_ratchet).unwrap();
         invalid_session.put_u32(0);
+        invalid_session.put_u8(0);
         let invalid_session = invalid_session.freeze();
 
         store
@@ -14807,6 +15287,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
 
@@ -14882,6 +15363,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
 
@@ -15268,6 +15750,7 @@ mod tests {
             local_ratchet_key_pair,
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let encoded = encode_signal_provider_session_record(&record).unwrap();
         assert_eq!(
@@ -15275,9 +15758,13 @@ mod tests {
             record
         );
 
-        let first =
-            encrypt_signal_provider_session_record_message(&encoded, b"direct first").unwrap();
-        assert_eq!(first.message.counter, 1);
+        let first = encrypt_signal_provider_session_record_message(
+            &encoded,
+            b"direct first",
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
+        assert_eq!(first.message.counter, 0);
         assert_eq!(first.message.previous_counter, 0);
         assert_eq!(
             first.message.ephemeral_key,
@@ -15294,10 +15781,13 @@ mod tests {
         let after_first = decode_signal_provider_session_record(&first.record).unwrap();
         assert_eq!(after_first.sending_chain.counter, 1);
 
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"direct second")
-                .unwrap();
-        assert_eq!(second.message.counter, 2);
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"direct second",
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
+        assert_eq!(second.message.counter, 1);
         let second_keys = ratchet_signal_message_chain(&after_first.sending_chain).unwrap();
         assert_eq!(
             decrypt_signal_message_body(&second.message.ciphertext, &second_keys.message_keys)
@@ -15331,15 +15821,21 @@ mod tests {
             local_ratchet_key_pair: sender_ratchet_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
+        let identity = prefixed_test_signal_key(21);
         let first = encrypt_signal_provider_session_record_message(
             &encode_signal_provider_session_record(&sender_record).unwrap(),
             b"direct first",
+            &identity,
         )
         .unwrap();
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"direct second")
-                .unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"direct second",
+            &identity,
+        )
+        .unwrap();
         let receiver_record = SignalProviderSessionRecord {
             remote_registration_id: 88,
             remote_identity_key: prefixed_test_signal_key(21),
@@ -15357,12 +15853,16 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let receiver_record = encode_signal_provider_session_record(&receiver_record).unwrap();
 
-        let decrypted =
-            decrypt_signal_provider_session_record_message(&receiver_record, &first.message_bytes)
-                .unwrap();
+        let decrypted = decrypt_signal_provider_session_record_message(
+            &receiver_record,
+            &first.message_bytes,
+            &identity,
+        )
+        .unwrap();
         assert_eq!(decrypted.plaintext, Bytes::from_static(b"direct first"));
         assert_eq!(
             decode_signal_provider_session_record(&decrypted.record)
@@ -15374,12 +15874,17 @@ mod tests {
             1
         );
         assert!(
-            decrypt_signal_provider_session_record_message(&decrypted.record, &first.message_bytes)
-                .is_err()
+            decrypt_signal_provider_session_record_message(
+                &decrypted.record,
+                &first.message_bytes,
+                &identity,
+            )
+            .is_err()
         );
         let decrypted_second = decrypt_signal_provider_session_record_message(
             &decrypted.record,
             &second.message_bytes,
+            &identity,
         )
         .unwrap();
         assert_eq!(
@@ -15390,7 +15895,8 @@ mod tests {
         let mut tampered = second.message_bytes.to_vec();
         *tampered.last_mut().unwrap() ^= 1;
         assert!(
-            decrypt_signal_provider_session_record_message(&receiver_record, &tampered).is_err()
+            decrypt_signal_provider_session_record_message(&receiver_record, &tampered, &identity)
+                .is_err()
         );
     }
 
@@ -15412,15 +15918,20 @@ mod tests {
             local_ratchet_key_pair: sender_ratchet_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let first = encrypt_signal_provider_session_record_message(
             &encode_signal_provider_session_record(&sender_record).unwrap(),
             b"direct first",
+            &prefixed_test_signal_key(21),
         )
         .unwrap();
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"direct second")
-                .unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"direct second",
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
         let receiver_record = encode_signal_provider_session_record(&SignalProviderSessionRecord {
             remote_registration_id: 88,
             remote_identity_key: prefixed_test_signal_key(21),
@@ -15438,24 +15949,31 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         })
         .unwrap();
 
-        let second_decrypted =
-            decrypt_signal_provider_session_record_message(&receiver_record, &second.message_bytes)
-                .unwrap();
+        let second_decrypted = decrypt_signal_provider_session_record_message(
+            &receiver_record,
+            &second.message_bytes,
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
         assert_eq!(
             second_decrypted.plaintext,
             Bytes::from_static(b"direct second")
         );
         let after_second = decode_signal_provider_session_record(&second_decrypted.record).unwrap();
+        // 0-based: receiving `second` (counter 1) on a fresh chain stashes the skipped
+        // message at counter 0 and leaves the chain ready to produce counter 2.
         assert_eq!(after_second.receiving_chain.as_ref().unwrap().counter, 2);
         assert_eq!(after_second.message_keys.len(), 1);
-        assert_eq!(after_second.message_keys[0].counter, 1);
+        assert_eq!(after_second.message_keys[0].counter, 0);
 
         let first_decrypted = decrypt_signal_provider_session_record_message(
             &second_decrypted.record,
             &first.message_bytes,
+            &prefixed_test_signal_key(21),
         )
         .unwrap();
         assert_eq!(
@@ -15472,6 +15990,7 @@ mod tests {
             decrypt_signal_provider_session_record_message(
                 &first_decrypted.record,
                 &first.message_bytes,
+                &prefixed_test_signal_key(21),
             )
             .is_err()
         );
@@ -15488,7 +16007,8 @@ mod tests {
         let mut first_keys = None;
         let mut second_keys = None;
         let mut target_keys = None;
-        while chain.counter < target_counter {
+        // 0-based: ratchet through message counters up to and including target_counter.
+        while chain.counter <= target_counter {
             let step = ratchet_signal_message_chain(&chain).unwrap();
             match step.message_counter {
                 1 => first_keys = Some(step.message_keys.clone()),
@@ -15503,26 +16023,42 @@ mod tests {
         let target_keys = target_keys.unwrap();
         let sender_ratchet_key =
             Bytes::copy_from_slice(&prefixed_signal_public_key(&sender_ratchet_key_pair.public));
-        let first = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key.clone(),
-            counter: 1,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"direct first", &first_keys).unwrap(),
-        })
+        let identity = prefixed_test_signal_key(21);
+        let first = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key.clone(),
+                counter: 1,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"direct first", &first_keys).unwrap(),
+            },
+            first_keys.mac_key.expose(),
+            &identity,
+            &identity,
+        )
         .unwrap();
-        let second = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key.clone(),
-            counter: 2,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"direct second", &second_keys).unwrap(),
-        })
+        let second = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key.clone(),
+                counter: 2,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"direct second", &second_keys).unwrap(),
+            },
+            second_keys.mac_key.expose(),
+            &identity,
+            &identity,
+        )
         .unwrap();
-        let target = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key.clone(),
-            counter: target_counter,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"direct target", &target_keys).unwrap(),
-        })
+        let target = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key.clone(),
+                counter: target_counter,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"direct target", &target_keys).unwrap(),
+            },
+            target_keys.mac_key.expose(),
+            &identity,
+            &identity,
+        )
         .unwrap();
         let receiver_record = encode_signal_provider_session_record(&SignalProviderSessionRecord {
             remote_registration_id: 88,
@@ -15539,11 +16075,16 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         })
         .unwrap();
 
-        let target_decrypted =
-            decrypt_signal_provider_session_record_message(&receiver_record, &target).unwrap();
+        let target_decrypted = decrypt_signal_provider_session_record_message(
+            &receiver_record,
+            &target,
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
         assert_eq!(
             target_decrypted.plaintext,
             Bytes::from_static(b"direct target")
@@ -15559,16 +16100,23 @@ mod tests {
             target_counter - 1
         );
 
-        let err = decrypt_signal_provider_session_record_message(&target_decrypted.record, &first)
-            .unwrap_err();
+        let err = decrypt_signal_provider_session_record_message(
+            &target_decrypted.record,
+            &first,
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             CoreError::Protocol(message)
                 if message == "duplicate or old Signal message counter: 1"
         ));
-        let second_decrypted =
-            decrypt_signal_provider_session_record_message(&target_decrypted.record, &second)
-                .unwrap();
+        let second_decrypted = decrypt_signal_provider_session_record_message(
+            &target_decrypted.record,
+            &second,
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
         assert_eq!(
             second_decrypted.plaintext,
             Bytes::from_static(b"direct second")
@@ -15612,41 +16160,66 @@ mod tests {
             b"direct first",
         )
         .unwrap();
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"direct second")
-                .unwrap();
+        let sender_identity = sender_material.identity.public_key.clone();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"direct second",
+            &sender_identity,
+        )
+        .unwrap();
         let receiver_material = signal_local_key_material(receiver_credentials);
+        let receiver_identity = receiver_material.identity.public_key.clone();
         let receiver_after_first = decrypt_signal_inbound_pre_key_session_message(
             &receiver_material,
             Some(&receiver_pre_key),
             &first.message_bytes,
         )
         .unwrap();
-        let reply =
-            encrypt_signal_provider_session_record_message(&receiver_after_first.record, b"reply")
-                .unwrap();
-        let sender_after_reply =
-            decrypt_signal_provider_session_record_message(&second.record, &reply.message_bytes)
-                .unwrap();
-        let third =
-            encrypt_signal_provider_session_record_message(&sender_after_reply.record, b"third")
-                .unwrap();
-        assert_eq!(third.message.previous_counter, 2);
-        let fourth =
-            encrypt_signal_provider_session_record_message(&third.record, b"fourth").unwrap();
+        let reply = encrypt_signal_provider_session_record_message(
+            &receiver_after_first.record,
+            b"reply",
+            &receiver_identity,
+        )
+        .unwrap();
+        let sender_after_reply = decrypt_signal_provider_session_record_message(
+            &second.record,
+            &reply.message_bytes,
+            &sender_identity,
+        )
+        .unwrap();
+        let third = encrypt_signal_provider_session_record_message(
+            &sender_after_reply.record,
+            b"third",
+            &sender_identity,
+        )
+        .unwrap();
+        // 0-based previousCounter: the sender's old chain produced messages 0 and 1,
+        // so its last-produced counter (carried as previousCounter) is 1.
+        assert_eq!(third.message.previous_counter, 1);
+        let fourth = encrypt_signal_provider_session_record_message(
+            &third.record,
+            b"fourth",
+            &sender_identity,
+        )
+        .unwrap();
 
-        let receiver_after_third =
-            decrypt_signal_provider_session_record_message(&reply.record, &third.message_bytes)
-                .unwrap();
+        let receiver_after_third = decrypt_signal_provider_session_record_message(
+            &reply.record,
+            &third.message_bytes,
+            &receiver_identity,
+        )
+        .unwrap();
         assert_eq!(receiver_after_third.plaintext, Bytes::from_static(b"third"));
         let after_third =
             decode_signal_provider_session_record(&receiver_after_third.record).unwrap();
         assert_eq!(after_third.message_keys.len(), 1);
-        assert_eq!(after_third.message_keys[0].counter, 2);
+        // The single stashed key is the unseen message 1 from the previous chain.
+        assert_eq!(after_third.message_keys[0].counter, 1);
 
         let second_decrypted = decrypt_signal_provider_session_record_message(
             &receiver_after_third.record,
             &second.message_bytes,
+            &receiver_identity,
         )
         .unwrap();
         assert_eq!(
@@ -15669,6 +16242,7 @@ mod tests {
         let fourth_decrypted = decrypt_signal_provider_session_record_message(
             &second_decrypted.record,
             &fourth.message_bytes,
+            &receiver_identity,
         )
         .unwrap();
         assert_eq!(fourth_decrypted.plaintext, Bytes::from_static(b"fourth"));
@@ -15716,7 +16290,13 @@ mod tests {
         .unwrap();
         let mut mismatched = decode_signal_pre_key_whisper_message(&first.message_bytes).unwrap();
         mismatched.signed_pre_key_id = receiver_credentials.signed_pre_key.key_id.wrapping_add(1);
-        let mismatched = encode_signal_pre_key_whisper_message(&mismatched).unwrap();
+        let mismatched = encode_signal_pre_key_whisper_message(
+            &mismatched,
+            &[0u8; 32],
+            &mismatched.identity_key,
+            &mismatched.identity_key,
+        )
+        .unwrap();
         let receiver_material = signal_local_key_material(receiver_credentials.clone());
         let expected_error = format!(
             "Signal signed pre-key id mismatch: message {}, local {}",
@@ -15769,7 +16349,13 @@ mod tests {
         .unwrap();
         let mut mismatched = decode_signal_pre_key_whisper_message(&first.message_bytes).unwrap();
         mismatched.pre_key_id = Some(receiver_pre_key.key_id.wrapping_add(1));
-        let mismatched = encode_signal_pre_key_whisper_message(&mismatched).unwrap();
+        let mismatched = encode_signal_pre_key_whisper_message(
+            &mismatched,
+            &[0u8; 32],
+            &mismatched.identity_key,
+            &mismatched.identity_key,
+        )
+        .unwrap();
         let receiver_material = signal_local_key_material(receiver_credentials);
         let expected_error = format!(
             "Signal pre-key id mismatch: message {}, local {}",
@@ -15896,10 +16482,12 @@ mod tests {
             local_ratchet_key_pair: sender_ratchet_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let first = encrypt_signal_provider_session_record_message(
             &encode_signal_provider_session_record(&sender_record).unwrap(),
             b"direct first",
+            &prefixed_test_signal_key(21),
         )
         .unwrap();
         let receiver_record = encode_signal_provider_session_record(&SignalProviderSessionRecord {
@@ -15919,6 +16507,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         })
         .unwrap();
 
@@ -15932,7 +16521,14 @@ mod tests {
         };
         let err = decrypt_signal_provider_session_record_message(
             &receiver_record,
-            &encode_signal_whisper_message(&far_future).unwrap(),
+            &encode_signal_whisper_message(
+                &far_future,
+                &[0u8; 32],
+                &prefixed_test_signal_key(21),
+                &prefixed_test_signal_key(21),
+            )
+            .unwrap(),
+            &prefixed_test_signal_key(21),
         )
         .unwrap_err();
         assert!(matches!(
@@ -15941,9 +16537,12 @@ mod tests {
                 if message == "Signal message is too far in the future: 25001"
         ));
 
-        let decrypted =
-            decrypt_signal_provider_session_record_message(&receiver_record, &first.message_bytes)
-                .unwrap();
+        let decrypted = decrypt_signal_provider_session_record_message(
+            &receiver_record,
+            &first.message_bytes,
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
         assert_eq!(decrypted.plaintext, Bytes::from_static(b"direct first"));
     }
 
@@ -15965,10 +16564,12 @@ mod tests {
             local_ratchet_key_pair: sender_ratchet_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let first = encrypt_signal_provider_session_record_message(
             &encode_signal_provider_session_record(&sender_record).unwrap(),
             b"direct first",
+            &prefixed_test_signal_key(21),
         )
         .unwrap();
         let receiver_record = encode_signal_provider_session_record(&SignalProviderSessionRecord {
@@ -15988,6 +16589,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         })
         .unwrap();
 
@@ -16002,7 +16604,14 @@ mod tests {
         };
         let err = decrypt_signal_provider_session_record_message(
             &receiver_record,
-            &encode_signal_whisper_message(&far_future).unwrap(),
+            &encode_signal_whisper_message(
+                &far_future,
+                &[0u8; 32],
+                &prefixed_test_signal_key(21),
+                &prefixed_test_signal_key(21),
+            )
+            .unwrap(),
+            &prefixed_test_signal_key(21),
         )
         .unwrap_err();
         assert!(matches!(
@@ -16011,9 +16620,12 @@ mod tests {
                 if message == "Signal previous chain is too far in the future: 25001"
         ));
 
-        let decrypted =
-            decrypt_signal_provider_session_record_message(&receiver_record, &first.message_bytes)
-                .unwrap();
+        let decrypted = decrypt_signal_provider_session_record_message(
+            &receiver_record,
+            &first.message_bytes,
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
         assert_eq!(decrypted.plaintext, Bytes::from_static(b"direct first"));
     }
 
@@ -16041,39 +16653,66 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         })
         .unwrap();
 
+        // A message on a NEW ratchet key whose `previous_counter` is at or below the
+        // current (0-based, next-to-produce) receiving-chain counter no longer skips
+        // any keys (libsignal `fillMessageKeys` returns early). The DH ratchet then
+        // proceeds and the message fails at MAC verification because its body was not
+        // produced by this session, not at a counter-ordering check.
         let new_ratchet_key_pair = test_key_pair(51);
         let stale_previous_counter = SignalWhisperMessage {
             ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &new_ratchet_key_pair.public,
             )),
-            counter: 1,
+            counter: 0,
             previous_counter: 1,
-            ciphertext: Bytes::from_static(b"stale-previous-counter"),
+            ciphertext: encrypt_signal_message_body(
+                b"stale-previous-counter",
+                &derive_signal_message_keys(&[5u8; SIGNAL_MESSAGE_KEY_LEN]).unwrap(),
+            )
+            .unwrap(),
         };
         let err = decrypt_signal_provider_session_record_message(
             &receiver_record,
-            &encode_signal_whisper_message(&stale_previous_counter).unwrap(),
+            &encode_signal_whisper_message(
+                &stale_previous_counter,
+                &[0u8; 32],
+                &prefixed_test_signal_key(21),
+                &prefixed_test_signal_key(21),
+            )
+            .unwrap(),
+            &prefixed_test_signal_key(21),
         )
         .unwrap_err();
         assert!(matches!(
             err,
-            CoreError::Protocol(message)
-                if message == "Signal previous chain counter moved backwards: message 1, current 2"
+            CoreError::Crypto(wa_crypto::CryptoError::Decrypt)
         ));
 
-        let third = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key,
-            counter: 3,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"direct third", &third_step.message_keys)
-                .unwrap(),
-        })
+        // A message on the SAME ratchet key at the next 0-based counter (2) decrypts
+        // through the existing receiving chain.
+        let third = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key,
+                counter: 2,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"direct third", &third_step.message_keys)
+                    .unwrap(),
+            },
+            third_step.message_keys.mac_key.expose(),
+            &prefixed_test_signal_key(21),
+            &prefixed_test_signal_key(21),
+        )
         .unwrap();
-        let decrypted =
-            decrypt_signal_provider_session_record_message(&receiver_record, &third).unwrap();
+        let decrypted = decrypt_signal_provider_session_record_message(
+            &receiver_record,
+            &third,
+            &prefixed_test_signal_key(21),
+        )
+        .unwrap();
         assert_eq!(decrypted.plaintext, Bytes::from_static(b"direct third"));
     }
 
@@ -16133,7 +16772,7 @@ mod tests {
             &first_message.identity_key[1..],
             &local_credentials.signed_identity_key.public
         );
-        assert_eq!(first_message.message.counter, 1);
+        assert_eq!(first_message.message.counter, 0);
 
         let first_record = provider
             .state_store()
@@ -16164,20 +16803,20 @@ mod tests {
         );
 
         let local_material = signal_local_key_material(local_credentials);
-        let initial = derive_signal_outbound_pre_key_root_chain_keys(
-            &local_material,
-            &first_record.local_ratchet_key_pair,
-            &remote_session,
-        )
-        .unwrap();
-        let first_keys = ratchet_signal_message_chain(&initial.chain_key).unwrap();
+        // The initiator's first sending chain comes from a DH ratchet against the
+        // remote signed pre-key using a fresh sending-ratchet key pair (libsignal
+        // `calculateSendingRatchet`), stored as `local_ratchet_key_pair`; the X3DH base
+        // key is internal and not recoverable from the record. Body correctness of the
+        // outbound messages is verified end-to-end by
+        // `store_signal_provider_decrypts_inbound_pre_key_then_session_messages`. Here,
+        // verify the framing: the first message advertises the sending ratchet key at
+        // 0-based counter 0, and the second follows on the same chain at counter 1.
+        assert_eq!(first_message.message.counter, 0);
         assert_eq!(
-            decrypt_signal_message_body(
-                &first_message.message.ciphertext,
-                &first_keys.message_keys
-            )
-            .unwrap(),
-            Bytes::from_static(b"direct first")
+            first_message.message.ephemeral_key,
+            Bytes::copy_from_slice(&prefixed_signal_public_key(
+                &first_record.local_ratchet_key_pair.public
+            ))
         );
 
         let second = codec
@@ -16185,8 +16824,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.ciphertext_type, MessageCiphertextType::Message);
-        let second_message = decode_signal_whisper_message(&second.ciphertext).unwrap();
-        assert_eq!(second_message.counter, 2);
+        let second_keys = ratchet_signal_message_chain(&first_record.sending_chain).unwrap();
+        let second_message = decode_signal_whisper_message(
+            &second.ciphertext,
+            second_keys.message_keys.mac_key.expose(),
+            &local_material.identity.public_key,
+            &normalize_signal_public_key(&remote_credentials.signed_identity_key.public).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second_message.counter, 1);
         assert_eq!(second_message.previous_counter, 0);
         assert_eq!(
             second_message.ephemeral_key,
@@ -16194,7 +16840,6 @@ mod tests {
                 &first_record.local_ratchet_key_pair.public
             ))
         );
-        let second_keys = ratchet_signal_message_chain(&first_record.sending_chain).unwrap();
         assert_eq!(
             decrypt_signal_message_body(&second_message.ciphertext, &second_keys.message_keys)
                 .unwrap(),
@@ -16334,6 +16979,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(31),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         provider
             .state_store()
@@ -16435,7 +17081,7 @@ mod tests {
             &first_message.identity_key[1..],
             &local_credentials.signed_identity_key.public
         );
-        assert_eq!(first_message.message.counter, 1);
+        assert_eq!(first_message.message.counter, 0);
 
         let first_record = provider
             .state_store()
@@ -16469,6 +17115,7 @@ mod tests {
         );
 
         let local_material = signal_local_key_material(local_credentials);
+        // No one-time pre-key was offered, so the X3DH used the 3-DH form.
         let initial = derive_signal_outbound_pre_key_root_chain_keys(
             &local_material,
             &first_record.local_ratchet_key_pair,
@@ -16476,14 +17123,17 @@ mod tests {
         )
         .unwrap();
         assert!(!initial.used_one_time_pre_key);
-        let first_keys = ratchet_signal_message_chain(&initial.chain_key).unwrap();
+        // The first sending chain is derived via a DH ratchet against the remote
+        // signed pre-key with a fresh sending-ratchet key pair (libsignal
+        // `calculateSendingRatchet`); the X3DH base key is internal. Body correctness is
+        // verified end-to-end elsewhere. Here, verify the framing: the first message
+        // advertises the sending ratchet key at 0-based counter 0.
+        assert_eq!(first_message.message.counter, 0);
         assert_eq!(
-            decrypt_signal_message_body(
-                &first_message.message.ciphertext,
-                &first_keys.message_keys
-            )
-            .unwrap(),
-            Bytes::from_static(b"direct signed-pre-key only")
+            first_message.message.ephemeral_key,
+            Bytes::copy_from_slice(&prefixed_signal_public_key(
+                &first_record.local_ratchet_key_pair.public
+            ))
         );
 
         let second = codec
@@ -16491,8 +17141,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.ciphertext_type, MessageCiphertextType::Message);
-        let second_message = decode_signal_whisper_message(&second.ciphertext).unwrap();
-        assert_eq!(second_message.counter, 2);
+        let second_keys = ratchet_signal_message_chain(&first_record.sending_chain).unwrap();
+        let second_message = decode_signal_whisper_message(
+            &second.ciphertext,
+            second_keys.message_keys.mac_key.expose(),
+            &local_material.identity.public_key,
+            &normalize_signal_public_key(&remote_credentials.signed_identity_key.public).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second_message.counter, 1);
         assert_eq!(second_message.previous_counter, 0);
         assert_eq!(
             second_message.ephemeral_key,
@@ -16500,7 +17157,6 @@ mod tests {
                 &first_record.local_ratchet_key_pair.public
             ))
         );
-        let second_keys = ratchet_signal_message_chain(&first_record.sending_chain).unwrap();
         assert_eq!(
             decrypt_signal_message_body(&second_message.ciphertext, &second_keys.message_keys)
                 .unwrap(),
@@ -16617,7 +17273,7 @@ mod tests {
             sender_material.identity.public_key
         );
         assert_eq!(
-            receiver_record.remote_ratchet_key,
+            receiver_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &sender_base_key.public
             )))
@@ -16639,10 +17295,14 @@ mod tests {
             })
             .await
             .unwrap_err();
+        // The existing-session pre-key replay path authenticates the inner
+        // WhisperMessage MAC, which requires the LOCAL identity key. With the
+        // credential material removed, authentication cannot proceed and the
+        // session record is left untouched.
         assert!(matches!(
             replay_without_material_err,
             CoreError::Protocol(message)
-                if message == "duplicate or old Signal message counter: 1"
+                if message == "missing local Signal credentials for 1:1 message authentication"
         ));
         assert_eq!(
             provider
@@ -16699,7 +17359,7 @@ mod tests {
         assert!(matches!(
             replay_err,
             CoreError::Protocol(message)
-                if message == "duplicate or old Signal message counter: 1"
+                if message == "duplicate or old Signal message counter: 0"
         ));
         assert_eq!(
             provider
@@ -16711,9 +17371,12 @@ mod tests {
             receiver_record_bytes
         );
 
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"inbound second")
-                .unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"inbound second",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         let plaintext = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
                 sender_jid: sender_jid.to_owned(),
@@ -16745,16 +17408,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply.ciphertext_type, MessageCiphertextType::Message);
-        let reply_message = decode_signal_whisper_message(&reply.ciphertext).unwrap();
-        assert_eq!(reply_message.counter, 1);
+        let reply_message = split_signal_whisper_message_frame(&reply.ciphertext)
+            .unwrap()
+            .message;
+        assert_eq!(reply_message.counter, 0);
         assert_eq!(reply_message.previous_counter, 0);
         assert_ne!(
             reply_message.ephemeral_key,
             Bytes::copy_from_slice(&prefixed_signal_public_key(&sender_base_key.public))
         );
-        let decrypted_reply =
-            decrypt_signal_provider_session_record_message(&first.record, &reply.ciphertext)
-                .unwrap();
+        let decrypted_reply = decrypt_signal_provider_session_record_message(
+            &first.record,
+            &reply.ciphertext,
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         assert_eq!(
             decrypted_reply.plaintext,
             Bytes::from_static(b"receiver reply")
@@ -16768,7 +17436,7 @@ mod tests {
         let receiver_record = decode_signal_provider_session_record(&receiver_record).unwrap();
         assert_eq!(receiver_record.sending_chain.counter, 1);
         assert_eq!(
-            receiver_record.remote_ratchet_key,
+            receiver_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &sender_base_key.public
             )))
@@ -17021,8 +17689,13 @@ mod tests {
         let mut wrong_pre_key_message =
             decode_signal_pre_key_whisper_message(&first.message_bytes).unwrap();
         wrong_pre_key_message.pre_key_id = Some(wrong_pre_key_id);
-        let wrong_pre_key_message =
-            encode_signal_pre_key_whisper_message(&wrong_pre_key_message).unwrap();
+        let wrong_pre_key_message = encode_signal_pre_key_whisper_message(
+            &wrong_pre_key_message,
+            &[0u8; 32],
+            &wrong_pre_key_message.identity_key,
+            &normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap(),
+        )
+        .unwrap();
 
         let sender_jid = "123:7@s.whatsapp.net";
         let codec = SignalMessageCodec::new(
@@ -17272,7 +17945,7 @@ mod tests {
             sender_material.identity.public_key
         );
         assert_eq!(
-            receiver_record.remote_ratchet_key,
+            receiver_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &sender_base_key.public
             )))
@@ -17294,10 +17967,14 @@ mod tests {
             })
             .await
             .unwrap_err();
+        // The existing-session pre-key replay path authenticates the inner
+        // WhisperMessage MAC, which requires the LOCAL identity key. With the
+        // credential material removed, authentication cannot proceed and the
+        // session record is left untouched.
         assert!(matches!(
             replay_without_material_err,
             CoreError::Protocol(message)
-                if message == "duplicate or old Signal message counter: 1"
+                if message == "missing local Signal credentials for 1:1 message authentication"
         ));
         assert_eq!(
             provider
@@ -17343,11 +18020,16 @@ mod tests {
             .await
             .unwrap();
 
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"signed-only second")
-                .unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"signed-only second",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         let sender_base_public_key =
             Bytes::copy_from_slice(&prefixed_signal_public_key(&sender_base_key.public));
+        let receiver_identity =
+            normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap();
         let mismatched_signed_pre_key_wrapped_second = SignalPreKeyWhisperMessage {
             registration_id: sender_material.registration_id,
             pre_key_id: None,
@@ -17356,9 +18038,13 @@ mod tests {
             identity_key: sender_material.identity.public_key.clone(),
             message: second.message,
         };
-        let mismatched_signed_pre_key_wrapped_second =
-            encode_signal_pre_key_whisper_message(&mismatched_signed_pre_key_wrapped_second)
-                .expect("signed-only same-base mismatch wrapper should encode");
+        let mismatched_signed_pre_key_wrapped_second = encode_signal_pre_key_whisper_message(
+            &mismatched_signed_pre_key_wrapped_second,
+            &[0u8; 32],
+            &sender_material.identity.public_key,
+            &receiver_identity,
+        )
+        .expect("signed-only same-base mismatch wrapper should encode");
         let expected_signed_pre_key_error = format!(
             "Signal signed pre-key id mismatch: message {}, local {}",
             receiver_credentials.signed_pre_key.key_id.wrapping_add(1),
@@ -17407,7 +18093,7 @@ mod tests {
         assert!(matches!(
             replay_err,
             CoreError::Protocol(message)
-                if message == "duplicate or old Signal message counter: 1"
+                if message == "duplicate or old Signal message counter: 0"
         ));
         assert_eq!(
             provider
@@ -17500,7 +18186,7 @@ mod tests {
         let replacement_record =
             decode_signal_provider_session_record(&replacement_record).unwrap();
         assert_eq!(
-            replacement_record.remote_ratchet_key,
+            replacement_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &replacement_base_key.public
             )))
@@ -17618,7 +18304,13 @@ mod tests {
         let mut tampered_ciphertext = tampered.message.ciphertext.to_vec();
         *tampered_ciphertext.last_mut().unwrap() ^= 1;
         tampered.message.ciphertext = Bytes::from(tampered_ciphertext);
-        let tampered = encode_signal_pre_key_whisper_message(&tampered).unwrap();
+        let tampered = encode_signal_pre_key_whisper_message(
+            &tampered,
+            &[0u8; 32],
+            &tampered.identity_key,
+            &normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap(),
+        )
+        .unwrap();
 
         let err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
@@ -17653,6 +18345,7 @@ mod tests {
         let old_session_second = encrypt_signal_provider_session_record_message(
             &first.record,
             b"old session still decrypts",
+            &sender_material.identity.public_key,
         )
         .unwrap();
         let old_plaintext = codec
@@ -17691,7 +18384,7 @@ mod tests {
         let replacement_record =
             decode_signal_provider_session_record(&replacement_record).unwrap();
         assert_eq!(
-            replacement_record.remote_ratchet_key,
+            replacement_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &replacement_base_key.public
             )))
@@ -17853,6 +18546,7 @@ mod tests {
         let old_session_second = encrypt_signal_provider_session_record_message(
             &first.record,
             b"old session still decrypts after signed identity change",
+            &sender_material.identity.public_key,
         )
         .unwrap();
         let old_plaintext = codec
@@ -17901,7 +18595,7 @@ mod tests {
         let replacement_record =
             decode_signal_provider_session_record(&replacement_record).unwrap();
         assert_eq!(
-            replacement_record.remote_ratchet_key,
+            replacement_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &valid_replacement_base_key.public
             )))
@@ -18049,8 +18743,13 @@ mod tests {
                 ciphertext: replacement_ciphertext,
             },
         };
-        let wrapped_replacement = encode_signal_pre_key_whisper_message(&wrapped_replacement)
-            .expect("replacement pre-key wrapper should encode");
+        let wrapped_replacement = encode_signal_pre_key_whisper_message(
+            &wrapped_replacement,
+            message_step.message_keys.mac_key.expose(),
+            &sender_material.identity.public_key,
+            &normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap(),
+        )
+        .expect("replacement pre-key wrapper should encode");
 
         let err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
@@ -18093,6 +18792,7 @@ mod tests {
         let old_session_second = encrypt_signal_provider_session_record_message(
             &first.record,
             b"old session still decrypts after missing one-time replacement",
+            &sender_material.identity.public_key,
         )
         .unwrap();
         let old_plaintext = codec
@@ -18203,8 +18903,11 @@ mod tests {
         let second = encrypt_signal_provider_session_record_message(
             &first.record,
             b"same-base wrapped existing session",
+            &sender_material.identity.public_key,
         )
         .unwrap();
+        let receiver_identity =
+            normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap();
         let changed_sender_material =
             signal_local_key_material(create_initial_credentials().unwrap());
         assert_ne!(
@@ -18216,12 +18919,16 @@ mod tests {
             pre_key_id: Some(receiver_pre_key_id),
             signed_pre_key_id: receiver_credentials.signed_pre_key.key_id,
             base_key: sender_base_public_key.clone(),
-            identity_key: changed_sender_material.identity.public_key,
+            identity_key: changed_sender_material.identity.public_key.clone(),
             message: second.message.clone(),
         };
-        let changed_identity_wrapped_second =
-            encode_signal_pre_key_whisper_message(&changed_identity_wrapped_second)
-                .expect("same-base changed-identity wrapper should encode");
+        let changed_identity_wrapped_second = encode_signal_pre_key_whisper_message(
+            &changed_identity_wrapped_second,
+            &[0u8; 32],
+            &changed_sender_material.identity.public_key,
+            &receiver_identity,
+        )
+        .expect("same-base changed-identity wrapper should encode");
         let changed_identity_err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
                 sender_jid: sender_jid.to_owned(),
@@ -18267,9 +18974,13 @@ mod tests {
             identity_key: sender_material.identity.public_key.clone(),
             message: second.message.clone(),
         };
-        let mismatched_signed_pre_key_wrapped_second =
-            encode_signal_pre_key_whisper_message(&mismatched_signed_pre_key_wrapped_second)
-                .expect("same-base signed-pre-key-id mismatch wrapper should encode");
+        let mismatched_signed_pre_key_wrapped_second = encode_signal_pre_key_whisper_message(
+            &mismatched_signed_pre_key_wrapped_second,
+            &[0u8; 32],
+            &sender_material.identity.public_key,
+            &receiver_identity,
+        )
+        .expect("same-base signed-pre-key-id mismatch wrapper should encode");
         let expected_signed_pre_key_error = format!(
             "Signal signed pre-key id mismatch: message {}, local {}",
             receiver_credentials.signed_pre_key.key_id.wrapping_add(1),
@@ -18320,8 +19031,11 @@ mod tests {
             identity_key: sender_material.identity.public_key.clone(),
             message: second.message,
         };
-        let wrapped_second = encode_signal_pre_key_whisper_message(&wrapped_second)
-            .expect("same-base existing-session wrapper should encode");
+        let wrapped_second = encode_signal_pre_key_whisper_message_with_inner(
+            &wrapped_second,
+            &second.message_bytes,
+        )
+        .expect("same-base existing-session wrapper should encode");
 
         let second_plaintext = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
@@ -18344,7 +19058,7 @@ mod tests {
         assert_ne!(after_second, established_record);
         let decoded_after_second = decode_signal_provider_session_record(&after_second).unwrap();
         assert_eq!(
-            decoded_after_second.remote_ratchet_key,
+            decoded_after_second.inbound_base_key,
             Some(sender_base_public_key)
         );
         assert_eq!(
@@ -18383,7 +19097,7 @@ mod tests {
         assert!(matches!(
             replay_err,
             CoreError::Protocol(message)
-                if message == "duplicate or old Signal message counter: 2"
+                if message == "duplicate or old Signal message counter: 1"
         ));
         assert_eq!(
             provider_probe
@@ -18521,7 +19235,13 @@ mod tests {
         let mut tampered_ciphertext = tampered.message.ciphertext.to_vec();
         *tampered_ciphertext.last_mut().unwrap() ^= 1;
         tampered.message.ciphertext = Bytes::from(tampered_ciphertext);
-        let tampered = encode_signal_pre_key_whisper_message(&tampered).unwrap();
+        let tampered = encode_signal_pre_key_whisper_message(
+            &tampered,
+            &[0u8; 32],
+            &tampered.identity_key,
+            &normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap(),
+        )
+        .unwrap();
 
         let err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
@@ -18563,6 +19283,7 @@ mod tests {
         let old_session_second = encrypt_signal_provider_session_record_message(
             &first.record,
             b"old session still decrypts after one-time replacement failure",
+            &sender_material.identity.public_key,
         )
         .unwrap();
         let old_plaintext = codec
@@ -18608,7 +19329,7 @@ mod tests {
         let replacement_record =
             decode_signal_provider_session_record(&replacement_record).unwrap();
         assert_eq!(
-            replacement_record.remote_ratchet_key,
+            replacement_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &replacement_base_key.public
             )))
@@ -18790,6 +19511,7 @@ mod tests {
         let old_session_second = encrypt_signal_provider_session_record_message(
             &first.record,
             b"old session still decrypts after one-time identity change",
+            &sender_material.identity.public_key,
         )
         .unwrap();
         let old_plaintext = codec
@@ -18843,7 +19565,7 @@ mod tests {
         let replacement_record =
             decode_signal_provider_session_record(&replacement_record).unwrap();
         assert_eq!(
-            replacement_record.remote_ratchet_key,
+            replacement_record.inbound_base_key,
             Some(Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &valid_replacement_base_key.public
             )))
@@ -18906,15 +19628,24 @@ mod tests {
             b"inbound first",
         )
         .unwrap();
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"inbound second")
-                .unwrap();
-        let third =
-            encrypt_signal_provider_session_record_message(&second.record, b"inbound third")
-                .unwrap();
-        let fourth =
-            encrypt_signal_provider_session_record_message(&third.record, b"inbound fourth")
-                .unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"inbound second",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
+        let third = encrypt_signal_provider_session_record_message(
+            &second.record,
+            b"inbound third",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
+        let fourth = encrypt_signal_provider_session_record_message(
+            &third.record,
+            b"inbound fourth",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         let sender_jid = "123:7@s.whatsapp.net";
         let chat_jid = "123@s.whatsapp.net";
 
@@ -18965,7 +19696,8 @@ mod tests {
             3
         );
         assert_eq!(stored_after_third.message_keys.len(), 1);
-        assert_eq!(stored_after_third.message_keys[0].counter, 2);
+        // 0-based: receiving first (0) then third (2) stashes the skipped message 1.
+        assert_eq!(stored_after_third.message_keys[0].counter, 1);
 
         let second_provider = StoreSignalSenderKeyProvider::new(receiver_store.clone());
         let second_codec = SignalMessageCodec::new(
@@ -19012,7 +19744,7 @@ mod tests {
         assert!(matches!(
             replay_err,
             CoreError::Protocol(message)
-                if message == "duplicate or old Signal message counter: 2"
+                if message == "duplicate or old Signal message counter: 1"
         ));
         assert_eq!(
             provider_probe
@@ -19044,6 +19776,9 @@ mod tests {
     async fn store_signal_provider_prunes_oldest_skipped_message_keys_from_store() {
         let store = temp_store().await;
         let provider_store = SignalProviderStateStore::new(store.clone());
+        let credentials = create_initial_credentials().unwrap();
+        save_credentials(&store, credentials.clone()).await.unwrap();
+        let local_identity = local_key_pair_public_key(&credentials.signed_identity_key);
         let sender_jid = "123:7@s.whatsapp.net";
         let sender_ratchet_key_pair = test_key_pair(31);
         let sender_ratchet_key =
@@ -19056,7 +19791,8 @@ mod tests {
         let mut first_keys = None;
         let mut second_keys = None;
         let mut target_keys = None;
-        while chain.counter < target_counter {
+        // 0-based: ratchet through message counters up to and including target_counter.
+        while chain.counter <= target_counter {
             let step = ratchet_signal_message_chain(&chain).unwrap();
             match step.message_counter {
                 1 => first_keys = Some(step.message_keys.clone()),
@@ -19066,29 +19802,54 @@ mod tests {
             }
             chain = step.next_chain_key;
         }
-        let first = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key.clone(),
-            counter: 1,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound first", &first_keys.unwrap())
+        let remote_identity = prefixed_test_signal_key(21);
+        let first = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key.clone(),
+                counter: 1,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(
+                    b"inbound first",
+                    &first_keys.clone().unwrap(),
+                )
                 .unwrap(),
-        })
+            },
+            first_keys.unwrap().mac_key.expose(),
+            &remote_identity,
+            &local_identity,
+        )
         .unwrap();
-        let second = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key.clone(),
-            counter: 2,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound second", &second_keys.unwrap())
+        let second = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key.clone(),
+                counter: 2,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(
+                    b"inbound second",
+                    &second_keys.clone().unwrap(),
+                )
                 .unwrap(),
-        })
+            },
+            second_keys.unwrap().mac_key.expose(),
+            &remote_identity,
+            &local_identity,
+        )
         .unwrap();
-        let target = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key.clone(),
-            counter: target_counter,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound target", &target_keys.unwrap())
+        let target = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key.clone(),
+                counter: target_counter,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(
+                    b"inbound target",
+                    &target_keys.clone().unwrap(),
+                )
                 .unwrap(),
-        })
+            },
+            target_keys.unwrap().mac_key.expose(),
+            &remote_identity,
+            &local_identity,
+        )
         .unwrap();
         let receiver_record = SignalProviderSessionRecord {
             remote_registration_id: 88,
@@ -19105,6 +19866,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         provider_store
             .store_session_and_identity_records(
@@ -19184,7 +19946,10 @@ mod tests {
     #[tokio::test]
     async fn store_signal_provider_rejects_stale_previous_counter_without_mutation() {
         let store = temp_store().await;
-        let provider_store = SignalProviderStateStore::new(store);
+        let provider_store = SignalProviderStateStore::new(store.clone());
+        let credentials = create_initial_credentials().unwrap();
+        save_credentials(&store, credentials.clone()).await.unwrap();
+        let local_identity = local_key_pair_public_key(&credentials.signed_identity_key);
         let sender_jid = "123:7@s.whatsapp.net";
         let sender_ratchet_key_pair = test_key_pair(31);
         let sender_ratchet_key =
@@ -19208,6 +19973,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let receiver_record_bytes =
             encode_signal_provider_session_record(&receiver_record).unwrap();
@@ -19220,25 +19986,38 @@ mod tests {
             .await
             .unwrap();
 
+        // A message on a NEW ratchet key whose `previous_counter` is at/below the
+        // current 0-based receiving-chain counter no longer triggers a backwards
+        // ordering error (libsignal tolerates it); it fails at MAC verification, and
+        // the stored session must be left untouched.
         let stale_previous_counter = SignalWhisperMessage {
             ephemeral_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
                 &test_key_pair(51).public,
             )),
-            counter: 1,
+            counter: 0,
             previous_counter: 1,
-            ciphertext: Bytes::from_static(b"stale-previous-counter"),
+            ciphertext: encrypt_signal_message_body(
+                b"stale-previous-counter",
+                &derive_signal_message_keys(&[5u8; SIGNAL_MESSAGE_KEY_LEN]).unwrap(),
+            )
+            .unwrap(),
         };
         let err = provider_store
             .decrypt_session_record_message(
                 sender_jid,
-                encode_signal_whisper_message(&stale_previous_counter).unwrap(),
+                encode_signal_whisper_message(
+                    &stale_previous_counter,
+                    &[0u8; 32],
+                    &receiver_record.remote_identity_key,
+                    &local_identity,
+                )
+                .unwrap(),
             )
             .await
             .unwrap_err();
         assert!(matches!(
             err,
-            CoreError::Protocol(message)
-                if message == "Signal previous chain counter moved backwards: message 1, current 2"
+            CoreError::Crypto(wa_crypto::CryptoError::Decrypt)
         ));
         assert_eq!(
             provider_store
@@ -19249,13 +20028,18 @@ mod tests {
             receiver_record_bytes
         );
 
-        let third = encode_signal_whisper_message(&SignalWhisperMessage {
-            ephemeral_key: sender_ratchet_key,
-            counter: 3,
-            previous_counter: 0,
-            ciphertext: encrypt_signal_message_body(b"inbound third", &third_step.message_keys)
-                .unwrap(),
-        })
+        let third = encode_signal_whisper_message(
+            &SignalWhisperMessage {
+                ephemeral_key: sender_ratchet_key,
+                counter: 2,
+                previous_counter: 0,
+                ciphertext: encrypt_signal_message_body(b"inbound third", &third_step.message_keys)
+                    .unwrap(),
+            },
+            third_step.message_keys.mac_key.expose(),
+            &receiver_record.remote_identity_key,
+            &local_identity,
+        )
         .unwrap();
         let decrypted = provider_store
             .decrypt_session_record_message(sender_jid, third)
@@ -19267,14 +20051,17 @@ mod tests {
     #[tokio::test]
     async fn store_signal_provider_rejects_far_future_counters_without_mutation() {
         let store = temp_store().await;
-        let provider_store = SignalProviderStateStore::new(store);
+        let provider_store = SignalProviderStateStore::new(store.clone());
+        let credentials = create_initial_credentials().unwrap();
+        save_credentials(&store, credentials.clone()).await.unwrap();
+        let local_identity = local_key_pair_public_key(&credentials.signed_identity_key);
         let active_sender_jid = "123:7@s.whatsapp.net";
         let sender_ratchet_key_pair = test_key_pair(31);
         let sender_ratchet_key =
             Bytes::copy_from_slice(&prefixed_signal_public_key(&sender_ratchet_key_pair.public));
         let sender_record = SignalProviderSessionRecord {
             remote_registration_id: 88,
-            remote_identity_key: prefixed_test_signal_key(21),
+            remote_identity_key: local_identity.clone(),
             root_key: SignalRootKey {
                 key: SecretBytes::from(vec![9u8; 32]),
             },
@@ -19287,10 +20074,12 @@ mod tests {
             local_ratchet_key_pair: sender_ratchet_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let first = encrypt_signal_provider_session_record_message(
             &encode_signal_provider_session_record(&sender_record).unwrap(),
             b"inbound first",
+            &prefixed_test_signal_key(21),
         )
         .unwrap();
         let receiver_record = SignalProviderSessionRecord {
@@ -19308,6 +20097,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(41),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let receiver_record_bytes =
             encode_signal_provider_session_record(&receiver_record).unwrap();
@@ -19329,7 +20119,13 @@ mod tests {
         let err = provider_store
             .decrypt_session_record_message(
                 active_sender_jid,
-                encode_signal_whisper_message(&far_future).unwrap(),
+                encode_signal_whisper_message(
+                    &far_future,
+                    &[0u8; 32],
+                    &prefixed_test_signal_key(21),
+                    &local_identity,
+                )
+                .unwrap(),
             )
             .await
             .unwrap_err();
@@ -19358,7 +20154,7 @@ mod tests {
             Bytes::copy_from_slice(&prefixed_signal_public_key(&sender_ratchet_key_pair.public));
         let sender_record = SignalProviderSessionRecord {
             remote_registration_id: 89,
-            remote_identity_key: prefixed_test_signal_key(22),
+            remote_identity_key: local_identity.clone(),
             root_key: SignalRootKey {
                 key: SecretBytes::from(vec![11u8; 32]),
             },
@@ -19371,10 +20167,12 @@ mod tests {
             local_ratchet_key_pair: sender_ratchet_key_pair.clone(),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let first = encrypt_signal_provider_session_record_message(
             &encode_signal_provider_session_record(&sender_record).unwrap(),
             b"inbound previous first",
+            &prefixed_test_signal_key(22),
         )
         .unwrap();
         let receiver_record = SignalProviderSessionRecord {
@@ -19392,6 +20190,7 @@ mod tests {
             local_ratchet_key_pair: test_key_pair(61),
             previous_counter: 0,
             message_keys: Vec::new(),
+            inbound_base_key: None,
         };
         let receiver_record_bytes =
             encode_signal_provider_session_record(&receiver_record).unwrap();
@@ -19415,7 +20214,13 @@ mod tests {
         let err = provider_store
             .decrypt_session_record_message(
                 previous_sender_jid,
-                encode_signal_whisper_message(&far_future).unwrap(),
+                encode_signal_whisper_message(
+                    &far_future,
+                    &[0u8; 32],
+                    &prefixed_test_signal_key(22),
+                    &local_identity,
+                )
+                .unwrap(),
             )
             .await
             .unwrap_err();
@@ -19490,9 +20295,12 @@ mod tests {
             b"inbound first",
         )
         .unwrap();
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"inbound second")
-                .unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"inbound second",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         let sender_jid = "123:7@s.whatsapp.net";
         let chat_jid = "123@s.whatsapp.net";
 
@@ -19520,18 +20328,25 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sender_after_reply =
-            decrypt_signal_provider_session_record_message(&second.record, &reply.message_bytes)
-                .unwrap();
+        let sender_after_reply = decrypt_signal_provider_session_record_message(
+            &second.record,
+            &reply.message_bytes,
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         let third = encrypt_signal_provider_session_record_message(
             &sender_after_reply.record,
             b"inbound third",
+            &sender_material.identity.public_key,
         )
         .unwrap();
-        assert_eq!(third.message.previous_counter, 2);
-        let fourth =
-            encrypt_signal_provider_session_record_message(&third.record, b"inbound fourth")
-                .unwrap();
+        assert_eq!(third.message.previous_counter, 1);
+        let fourth = encrypt_signal_provider_session_record_message(
+            &third.record,
+            b"inbound fourth",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
 
         let third_provider = SignalProviderStateStore::new(receiver_store.clone());
         let third_decrypted = third_provider
@@ -19550,7 +20365,7 @@ mod tests {
         let stored_after_third =
             decode_signal_provider_session_record(&stored_after_third).unwrap();
         assert_eq!(stored_after_third.message_keys.len(), 1);
-        assert_eq!(stored_after_third.message_keys[0].counter, 2);
+        assert_eq!(stored_after_third.message_keys[0].counter, 1);
 
         let second_provider = SignalProviderStateStore::new(receiver_store.clone());
         let second_decrypted = second_provider
@@ -19641,13 +20456,19 @@ mod tests {
             b"inbound first",
         )
         .unwrap();
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"inbound second")
-                .unwrap();
-        let old_third =
-            encrypt_signal_provider_session_record_message(&second.record, b"inbound old third")
-                .unwrap();
-        assert_eq!(old_third.message.counter, 3);
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"inbound second",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
+        let old_third = encrypt_signal_provider_session_record_message(
+            &second.record,
+            b"inbound old third",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
+        assert_eq!(old_third.message.counter, 2);
 
         let sender_jid = "123:7@s.whatsapp.net";
         let chat_jid = "123@s.whatsapp.net";
@@ -19674,18 +20495,25 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sender_after_reply =
-            decrypt_signal_provider_session_record_message(&old_third.record, &reply.message_bytes)
-                .unwrap();
+        let sender_after_reply = decrypt_signal_provider_session_record_message(
+            &old_third.record,
+            &reply.message_bytes,
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         let fourth = encrypt_signal_provider_session_record_message(
             &sender_after_reply.record,
             b"inbound fourth",
+            &sender_material.identity.public_key,
         )
         .unwrap();
-        assert_eq!(fourth.message.previous_counter, 3);
-        let fifth =
-            encrypt_signal_provider_session_record_message(&fourth.record, b"inbound fifth")
-                .unwrap();
+        assert_eq!(fourth.message.previous_counter, 2);
+        let fifth = encrypt_signal_provider_session_record_message(
+            &fourth.record,
+            b"inbound fifth",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
 
         let fourth_provider = SignalProviderStateStore::new(receiver_store.clone());
         let fourth_decrypted = fourth_provider
@@ -19715,13 +20543,15 @@ mod tests {
                 .counter,
             1
         );
+        // 0-based: the unseen messages 1 and 2 from the previous chain are stashed
+        // when the DH ratchet for `fourth` occurs.
         assert_eq!(
             stored_after_fourth
                 .message_keys
                 .iter()
                 .map(|message_key| message_key.counter)
                 .collect::<Vec<_>>(),
-            vec![2, 3]
+            vec![1, 2]
         );
         let stored_after_fourth_bytes = SignalProviderStateStore::new(receiver_store.clone())
             .load_session_record(sender_jid)
@@ -19729,12 +20559,19 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let mut tampered_old_third =
-            decode_signal_whisper_message(&old_third.message_bytes).unwrap();
+        let mut tampered_old_third = split_signal_whisper_message_frame(&old_third.message_bytes)
+            .unwrap()
+            .message;
         let mut tampered_ciphertext = tampered_old_third.ciphertext.to_vec();
         *tampered_ciphertext.last_mut().unwrap() ^= 1;
         tampered_old_third.ciphertext = Bytes::from(tampered_ciphertext);
-        let tampered_old_third = encode_signal_whisper_message(&tampered_old_third).unwrap();
+        let tampered_old_third = encode_signal_whisper_message(
+            &tampered_old_third,
+            &[0u8; 32],
+            &sender_material.identity.public_key,
+            &normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap(),
+        )
+        .unwrap();
         let tampered_old_third_provider = SignalProviderStateStore::new(receiver_store.clone());
         let err = tampered_old_third_provider
             .decrypt_session_record_message(sender_jid, tampered_old_third)
@@ -19769,19 +20606,25 @@ mod tests {
             .unwrap();
         let stored_after_old_third =
             decode_signal_provider_session_record(&stored_after_old_third_bytes).unwrap();
+        // Decrypting `old_third` (counter 2 on the previous chain) consumes the stashed
+        // key at counter 2, leaving only the unseen message 1.
         assert_eq!(
             stored_after_old_third
                 .message_keys
                 .iter()
                 .map(|message_key| message_key.counter)
                 .collect::<Vec<_>>(),
-            vec![2]
+            vec![1]
         );
         assert_eq!(
             stored_after_old_third.remote_ratchet_key,
             Some(fourth.message.ephemeral_key.clone())
         );
 
+        // Replaying `old_third` after its skipped key was consumed: its (now stale)
+        // ratchet key no longer matches the active receiving chain, so the attempted
+        // DH re-ratchet yields keys that fail MAC verification. The replay is rejected
+        // and (below) the session is left untouched.
         let old_third_replay_provider = SignalProviderStateStore::new(receiver_store.clone());
         let replay_err = old_third_replay_provider
             .decrypt_session_record_message(sender_jid, old_third.message_bytes)
@@ -19789,8 +20632,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             replay_err,
-            CoreError::Protocol(message)
-                if message == "Signal previous chain counter moved backwards: message 0, current 1"
+            CoreError::Crypto(wa_crypto::CryptoError::Decrypt)
         ));
         assert_eq!(
             SignalProviderStateStore::new(receiver_store.clone())
@@ -19904,11 +20746,19 @@ mod tests {
             b"inbound first",
         )
         .unwrap();
+        let receiver_identity =
+            normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap();
         let mut tampered = decode_signal_pre_key_whisper_message(&first.message_bytes).unwrap();
         let mut tampered_ciphertext = tampered.message.ciphertext.to_vec();
         *tampered_ciphertext.last_mut().unwrap() ^= 1;
         tampered.message.ciphertext = Bytes::from(tampered_ciphertext);
-        let tampered = encode_signal_pre_key_whisper_message(&tampered).unwrap();
+        let tampered = encode_signal_pre_key_whisper_message(
+            &tampered,
+            &[0u8; 32],
+            &tampered.identity_key,
+            &receiver_identity,
+        )
+        .unwrap();
 
         let sender_jid = "123:7@s.whatsapp.net";
         let provider = StoreSignalSenderKeyProvider::new(receiver_store.clone());
@@ -19930,8 +20780,13 @@ mod tests {
             decode_signal_pre_key_whisper_message(&first.message_bytes).unwrap();
         mismatched_signed_pre_key.signed_pre_key_id =
             receiver_credentials.signed_pre_key.key_id.wrapping_add(1);
-        let mismatched_signed_pre_key =
-            encode_signal_pre_key_whisper_message(&mismatched_signed_pre_key).unwrap();
+        let mismatched_signed_pre_key = encode_signal_pre_key_whisper_message(
+            &mismatched_signed_pre_key,
+            &[0u8; 32],
+            &mismatched_signed_pre_key.identity_key,
+            &receiver_identity,
+        )
+        .unwrap();
         let expected_signed_pre_key_error = format!(
             "Signal signed pre-key id mismatch: message {}, local {}",
             receiver_credentials.signed_pre_key.key_id.wrapping_add(1),
@@ -19970,8 +20825,13 @@ mod tests {
         let mut tampered_signed_only_ciphertext = tampered_signed_only.message.ciphertext.to_vec();
         *tampered_signed_only_ciphertext.last_mut().unwrap() ^= 1;
         tampered_signed_only.message.ciphertext = Bytes::from(tampered_signed_only_ciphertext);
-        let tampered_signed_only =
-            encode_signal_pre_key_whisper_message(&tampered_signed_only).unwrap();
+        let tampered_signed_only = encode_signal_pre_key_whisper_message(
+            &tampered_signed_only,
+            &[0u8; 32],
+            &tampered_signed_only.identity_key,
+            &receiver_identity,
+        )
+        .unwrap();
         let err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
                 sender_jid: sender_jid.to_owned(),
@@ -20079,20 +20939,39 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"inbound second")
-                .unwrap();
-        let third =
-            encrypt_signal_provider_session_record_message(&second.record, b"inbound third")
-                .unwrap();
-        let fourth =
-            encrypt_signal_provider_session_record_message(&third.record, b"inbound fourth")
-                .unwrap();
-        let mut tampered = decode_signal_whisper_message(&third.message_bytes).unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"inbound second",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
+        let third = encrypt_signal_provider_session_record_message(
+            &second.record,
+            b"inbound third",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
+        let fourth = encrypt_signal_provider_session_record_message(
+            &third.record,
+            b"inbound fourth",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
+        let receiver_identity =
+            normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap();
+        let mut tampered = split_signal_whisper_message_frame(&third.message_bytes)
+            .unwrap()
+            .message;
         let mut tampered_ciphertext = tampered.ciphertext.to_vec();
         *tampered_ciphertext.last_mut().unwrap() ^= 1;
         tampered.ciphertext = Bytes::from(tampered_ciphertext);
-        let tampered = encode_signal_whisper_message(&tampered).unwrap();
+        let tampered = encode_signal_whisper_message(
+            &tampered,
+            &[0u8; 32],
+            &sender_material.identity.public_key,
+            &receiver_identity,
+        )
+        .unwrap();
         let err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
                 sender_jid: sender_jid.to_owned(),
@@ -20137,13 +21016,21 @@ mod tests {
             3
         );
         assert_eq!(stored_after_third.message_keys.len(), 1);
-        assert_eq!(stored_after_third.message_keys[0].counter, 2);
+        assert_eq!(stored_after_third.message_keys[0].counter, 1);
 
-        let mut tampered_skipped = decode_signal_whisper_message(&second.message_bytes).unwrap();
+        let mut tampered_skipped = split_signal_whisper_message_frame(&second.message_bytes)
+            .unwrap()
+            .message;
         let mut tampered_skipped_ciphertext = tampered_skipped.ciphertext.to_vec();
         *tampered_skipped_ciphertext.last_mut().unwrap() ^= 1;
         tampered_skipped.ciphertext = Bytes::from(tampered_skipped_ciphertext);
-        let tampered_skipped = encode_signal_whisper_message(&tampered_skipped).unwrap();
+        let tampered_skipped = encode_signal_whisper_message(
+            &tampered_skipped,
+            &[0u8; 32],
+            &sender_material.identity.public_key,
+            &receiver_identity,
+        )
+        .unwrap();
         let err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
                 sender_jid: sender_jid.to_owned(),
@@ -20261,9 +21148,12 @@ mod tests {
             b"inbound first",
         )
         .unwrap();
-        let second =
-            encrypt_signal_provider_session_record_message(&first.record, b"inbound second")
-                .unwrap();
+        let second = encrypt_signal_provider_session_record_message(
+            &first.record,
+            b"inbound second",
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
 
         let sender_jid = "123:7@s.whatsapp.net";
         let chat_jid = "123@s.whatsapp.net";
@@ -20289,26 +21179,40 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sender_after_reply =
-            decrypt_signal_provider_session_record_message(&second.record, &reply.message_bytes)
-                .unwrap();
+        let sender_after_reply = decrypt_signal_provider_session_record_message(
+            &second.record,
+            &reply.message_bytes,
+            &sender_material.identity.public_key,
+        )
+        .unwrap();
         let third = encrypt_signal_provider_session_record_message(
             &sender_after_reply.record,
             b"inbound third",
+            &sender_material.identity.public_key,
         )
         .unwrap();
-        assert_eq!(third.message.previous_counter, 2);
+        assert_eq!(third.message.previous_counter, 1);
         let stored_after_reply = provider_probe
             .load_session_record(sender_jid)
             .await
             .unwrap()
             .unwrap();
 
-        let mut tampered = decode_signal_whisper_message(&third.message_bytes).unwrap();
+        let receiver_identity =
+            normalize_signal_public_key(&receiver_credentials.signed_identity_key.public).unwrap();
+        let mut tampered = split_signal_whisper_message_frame(&third.message_bytes)
+            .unwrap()
+            .message;
         let mut tampered_ciphertext = tampered.ciphertext.to_vec();
         *tampered_ciphertext.last_mut().unwrap() ^= 1;
         tampered.ciphertext = Bytes::from(tampered_ciphertext);
-        let tampered = encode_signal_whisper_message(&tampered).unwrap();
+        let tampered = encode_signal_whisper_message(
+            &tampered,
+            &[0u8; 32],
+            &sender_material.identity.public_key,
+            &receiver_identity,
+        )
+        .unwrap();
         let err = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
                 sender_jid: sender_jid.to_owned(),
@@ -20349,7 +21253,7 @@ mod tests {
         let stored_after_third =
             decode_signal_provider_session_record(&stored_after_third).unwrap();
         assert_eq!(stored_after_third.message_keys.len(), 1);
-        assert_eq!(stored_after_third.message_keys[0].counter, 2);
+        assert_eq!(stored_after_third.message_keys[0].counter, 1);
 
         let plaintext = codec
             .decrypt_inbound_message(InboundEncryptedPayload {
@@ -20474,9 +21378,16 @@ mod tests {
     fn pre_key_message_outer_unknown_field(message: &[u8]) -> Bytes {
         let mut unknown = message.to_vec();
         unknown.extend_from_slice(&[0x78, 0x63]);
-        let decoded = decode_signal_pre_key_whisper_message(&unknown).unwrap();
+        let (decoded, inner_frame) = decode_signal_pre_key_whisper_message_frame(&unknown).unwrap();
+        // Re-encode using the original framed inner WhisperMessage bytes (which
+        // already carry the correct MAC) so the canonical re-encoding equals the
+        // original message minus the appended unknown outer field.
         assert_eq!(
-            encode_signal_pre_key_whisper_message(&decoded).unwrap(),
+            encode_signal_pre_key_whisper_message_with_inner(
+                &decoded,
+                &inner_frame.to_framed_bytes()
+            )
+            .unwrap(),
             Bytes::copy_from_slice(message)
         );
         Bytes::from(unknown)
@@ -20542,15 +21453,15 @@ mod tests {
             .collect()
     }
 
-    // WhatsApp interop conformance: decrypt a REAL libsignal PreKeyWhisperMessage
+    // WhatsApp interop conformance: decrypt REAL libsignal messages
     // (generated by the `libsignal` pkg Baileys/WhatsApp use; vectors in
     // tests/fixtures/signal_conformance.json via tools/compat/signal_*).
-    // Currently #[ignore]d: the project-owned 1:1 whisper framing differs from
-    // libsignal (no 0x33 version byte; 8-byte MAC inside the ciphertext field;
-    // MAC over ciphertext-only vs identities||version||protobuf). Un-ignore once
-    // the framing/MAC are fixed; this is the gate for that work.
+    // Proves the project-owned 1:1 wire format is byte-compatible with libsignal:
+    // 0x33 version byte; pure-AES ciphertext field; 8-byte MAC over
+    // senderId||receiverId||version||protobuf. Decrypts both the initial
+    // PreKeyWhisperMessage (vector[0]) and the follow-on WhisperMessage
+    // (vector[1]) through the now-established session.
     #[tokio::test]
-    #[ignore = "WhatsApp Signal wire-format interop not yet implemented (see signal-wire-incompat); gate for the 1:1 framing/MAC fix"]
     async fn signal_conformance_decrypts_libsignal_pre_key_message() {
         let fx: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -20608,6 +21519,65 @@ mod tests {
         assert_eq!(
             plaintext,
             Bytes::from(v0["plaintext"].as_str().unwrap().as_bytes().to_vec())
+        );
+
+        // Follow-on WhisperMessage (vector[1], a real libsignal type-1 message)
+        // decrypted through the established session proves the non-pre-key 1:1
+        // framing/MAC as well. In the libsignal flow this message is the SECOND on
+        // Alice's side: it is encrypted against Bob's sending-ratchet key that Bob
+        // generated when he sent his reply (m2). Alice folded that key in when she
+        // decrypted m2, so Bob must hold the same ratchet key pair to decrypt m3.
+        // We inject Bob's captured post-m2 sending ratchet (the fixture records its
+        // public+private halves) and advance the root key exactly as Bob would have
+        // when sending m2 (DH(remote_ratchet_key, bob_ratchet) -> WhisperRatchet),
+        // then decrypt the real follow-on WhisperMessage.
+        let bob_ratchet = &fx["bobRatchetAfterM2"];
+        let bob_ratchet_kp = kp(
+            &conformance_hex(bob_ratchet["pub"].as_str().unwrap()),
+            &conformance_hex(bob_ratchet["priv"].as_str().unwrap()),
+        );
+        let provider_state = codec.provider().state_store();
+        let record_bytes = provider_state
+            .load_session_record("alice:1@s.whatsapp.net")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut record = decode_signal_provider_session_record(&record_bytes).unwrap();
+        let remote_ratchet_key = record
+            .remote_ratchet_key
+            .clone()
+            .expect("inbound session must hold the remote ratchet key after the first message");
+        // Mirror libsignal's `calculateSendingRatchet`: install Bob's captured ratchet
+        // key pair and roll the root key forward via a DH with the remote ratchet key.
+        let send_step = ratchet_signal_root_key(
+            &record.root_key,
+            bob_ratchet_kp.private.expose(),
+            &remote_ratchet_key,
+        )
+        .unwrap();
+        record.root_key = send_step.root_key;
+        record.sending_chain = send_step.chain_key;
+        record.local_ratchet_key_pair = bob_ratchet_kp;
+        let updated = encode_signal_provider_session_record(&record).unwrap();
+        provider_state
+            .store_record(SignalProviderRecordKind::Session, "alice.1", &updated)
+            .await
+            .unwrap();
+
+        let v1 = &fx["vectors"].as_array().unwrap()[1];
+        let ct1 = conformance_hex(v1["body"].as_str().unwrap());
+        let plaintext1 = codec
+            .decrypt_inbound_message(InboundEncryptedPayload {
+                sender_jid: "alice:1@s.whatsapp.net".to_owned(),
+                chat_jid: "alice@s.whatsapp.net".to_owned(),
+                ciphertext_type: InboundCiphertextType::Message,
+                ciphertext: Bytes::from(ct1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            plaintext1,
+            Bytes::from(v1["plaintext"].as_str().unwrap().as_bytes().to_vec())
         );
     }
 

@@ -1,42 +1,46 @@
 {
   "note": "Authoritative libsignal (Baileys) conformance vectors. Rust provider must decrypt these.",
   "bob": {
-    "registrationId": 144,
-    "identityKeyPub": "053be47ffc794674290a0737c8de10d4017f734fa8a0331f273db183458a13aa08",
-    "identityKeyPriv": "40938218193bc7659bab41fc702740cb8cb7e6be811f247653b51b498233ce53",
+    "registrationId": 189,
+    "identityKeyPub": "054312044f6d637c9729fc01e394d139808c27cdc46be52bbf1cf4f1e95cf8c469",
+    "identityKeyPriv": "989952d1670066a57b80fd6fad520a9dd0abfcd05cf468e1f4cff8ee39be1f67",
     "preKeyId": 31337,
-    "preKeyPub": "05ee594b46d45725a8bca5f0c6db9991b2aa0ac57e292416f28619c9e6e6e4615f",
-    "preKeyPriv": "90e6f64c444a6633220b0cfda9a4089f90c56c1c6eaf8c4eab7f29c68c2c0071",
+    "preKeyPub": "051fa3d1cf5cdb992e2e8eaab159f2c26ac1b688dc7f98f911e1d78ca00769a724",
+    "preKeyPriv": "e0c76dfde2d43efb8e35d52b0a7a21a22997b556103ba62605ec9e686043ce4f",
     "signedPreKeyId": 22,
-    "signedPreKeyPub": "052d5f78f208b9e97cec613f5f54a712427b9f7c429f71b676169079cb11d59772",
-    "signedPreKeyPriv": "901b21084488c8862fbe2093baa9eafa7955d0850e89696e383bb70d65843444",
-    "signedPreKeySig": "050c451e3e30961880b716ac076899b7bc939374eca2faf084e901d0c600bf6285b803206c6405fb5aed7cc4c1577b6d0337eab258b246f2d2e1dd2518117588"
+    "signedPreKeyPub": "053fc0200950cc84f364eb381cd3528e7e7fde5be3fc8cf526ba1abee2b1ed3658",
+    "signedPreKeyPriv": "9877d77edb5e7ac7d3be7114288337431fa53b707186212d577ba8448225f051",
+    "signedPreKeySig": "81a4b6eb27fa5607339980d2d4810b56984b7ee84624cdff5b82c0fbbaea0f4daca32583fce443c5b2881869f704b582254d4f8395f0c5af0533a84fce8cf407"
   },
   "alice": {
-    "registrationId": 0,
-    "identityKeyPub": "056973e5b8e411adca9481ce67a6436282a8a6a01fe61e287218992447f51f5c4f"
+    "registrationId": 233,
+    "identityKeyPub": "05571efe0d8b93238f1de9894333bb62096d907cac0ccd6b44ef936ce506cdad41"
   },
   "vectors": [
     {
       "dir": "alice->bob",
       "kind": "prekey",
       "type": 3,
-      "body": "3308e9f4011221058f2c50de2b6ea940d90deb2ff1cb3764ae38bd2388f4f527e662468d5ddaaf101a21056973e5b8e411adca9481ce67a6436282a8a6a01fe61e287218992447f51f5c4f2242330a21059bcebf25be2bf4934fd8bcbba03fc92b7fa7fca0c8e96a3044353635d6b86d7c100018002210f567b03e8c66a9380d713dbbf7fcb6be3873869409b0fd3228003016",
+      "body": "3308e9f4011221053a8ef30dbe7fe58e87876b977db054b346ea88a6003f9bd60760f6c41ca5cc661a2105571efe0d8b93238f1de9894333bb62096d907cac0ccd6b44ef936ce506cdad412242330a21053a71b03fde14a6c0126e9e019bf09a201f1dc7449017ce36f224d9375fffe753100018002210bbfb2b18ee5205de228fcdc4a105244db725d99c2b483d9428e9013016",
       "plaintext": "hello bob"
     },
     {
       "dir": "alice->bob",
       "kind": "whisper",
       "type": 1,
-      "body": "330a2105c41db93cc8c908a96b80e570f64ef415f797bdabe110396bc05ffc61830883661000180022200ac0be6ea96bfb768768ea035da7a548a01e29ea4fdc7da19e752d7645781978a2fae2a355054a5a",
+      "body": "330a2105f5f1421e6a0a2425ae0be8836efe7829a53d5c23813bb6507087ee603d819707100018002220ac3ec0f0990bd178ee6762baafd942a26ce3cad63d600efb62e79cb090f05a4adf4404c3b0d7f9fd",
       "plaintext": "second from alice"
     }
   ],
+  "bobRatchetAfterM2": {
+    "pub": "05ea23d92002b754c13e533ea7c59c64a29700c1d8976d5b21e431eeb455569805",
+    "priv": "788b834fd5f3ca724d8b2cba47111e08fa758e58b54041053090465d4d59d15e"
+  },
   "bobToAlice": {
     "dir": "bob->alice",
     "kind": "whisper",
     "type": 1,
-    "body": "330a210575f941403158dd16eb07073a5a7ec022b8d81c26100784f1bd54e3864d09007b100018002220a69a238e5e8b6ea2371235d41252437402d1883da5e8d19a55362e03eed489dd522b4a690b7c1420",
+    "body": "330a2105ea23d92002b754c13e533ea7c59c64a29700c1d8976d5b21e431eeb45556980510001800222075e4dff938b5e608b6c60d38e2c654769e1b46531357ec5c9448b2e835843770d78aeecabe401fe2",
     "plaintext": "hi alice from bob"
   }
 }

@@ -451,6 +451,7 @@ pub use signal::{
     encode_signal_sender_key_message, encode_signal_sender_key_record,
     encode_signal_whisper_message, encrypt_signal_message_body,
     encrypt_signal_outbound_pre_key_session_message,
+    encrypt_signal_outbound_pre_key_session_message_with_sending_ratchet,
     encrypt_signal_provider_session_record_message, encrypt_signal_sender_key_record_message,
     encrypt_signal_sender_message_body, is_lid_signal_jid, mapped_lid_session_jid,
     normalize_signal_public_key, parse_e2e_sessions_node,

@@ -48,6 +48,12 @@ function makeStore(identity, regId, prekeys = {}, signed = {}) {
   const bobCipher = new SessionCipher(bobStore, aliceAddr);
   await bobCipher.decryptPreKeyWhisperMessage(Buffer.from(m1.body, 'binary'));
   const m2 = await new SessionCipher(bobStore, aliceAddr).encrypt(Buffer.from('hi alice from bob'));
+  // Capture Bob's sending ratchet key pair after he sends m2. The follow-on
+  // alice->bob WhisperMessage (m3) is encrypted against THIS ratchet key (Alice
+  // incorporates it when she decrypts m2), so any party reproducing Bob's side
+  // needs this exact key pair to decrypt m3 — random regeneration would diverge.
+  const bobRec = await bobStore.loadSession('alice.1');
+  const bobRatchetAfterM2 = bobRec.getOpenSession().currentRatchet.ephemeralKeyPair;
   // alice decrypts m2 to advance, then sends a plain whisper m3 alice->bob
   await new SessionCipher(aliceStore, bobAddr).decryptWhisperMessage(Buffer.from(m2.body, 'binary'));
   const m3 = await new SessionCipher(aliceStore, bobAddr).encrypt(Buffer.from('second from alice'));
@@ -66,6 +72,8 @@ function makeStore(identity, regId, prekeys = {}, signed = {}) {
       { dir: 'alice->bob', kind: 'prekey', type: m1.type, body: H(m1.body), plaintext: 'hello bob' },
       { dir: 'alice->bob', kind: 'whisper', type: m3.type, body: H(m3.body), plaintext: 'second from alice' },
     ],
+    // Bob's sending ratchet after m2 (needed to decrypt the type-1 m3 follow-on).
+    bobRatchetAfterM2: { pub: H(bobRatchetAfterM2.pubKey), priv: H(bobRatchetAfterM2.privKey) },
     bobToAlice: { dir: 'bob->alice', kind: 'whisper', type: m2.type, body: H(m2.body), plaintext: 'hi alice from bob' },
   };
   const out = process.argv[2] || '/tmp/sigoracle/signal_conformance.json';

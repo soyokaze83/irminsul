@@ -155,6 +155,10 @@ pub struct SignalPreKeySessionMessageFixture {
     pub bob_one_time_pre_key_id: u32,
     pub alice_identity_private_hex: String,
     pub alice_base_private_hex: String,
+    /// Initiator's fresh sending-ratchet key (libsignal `calculateSendingRatchet`),
+    /// supplied explicitly so the outbound wire bytes are deterministic.
+    #[serde(default)]
+    pub alice_sending_ratchet_private_hex: String,
     pub bob_identity_private_hex: String,
     pub bob_signed_pre_key_private_hex: String,
     pub bob_one_time_pre_key_private_hex: String,
@@ -215,6 +219,8 @@ pub struct SignalPreKeySessionPreKeyIdMismatchFixture {
     pub mismatched_one_time_pre_key_id: u32,
     pub alice_identity_private_hex: String,
     pub alice_base_private_hex: String,
+    #[serde(default)]
+    pub alice_sending_ratchet_private_hex: String,
     pub bob_identity_private_hex: String,
     pub bob_signed_pre_key_private_hex: String,
     pub bob_one_time_pre_key_private_hex: String,
@@ -232,6 +238,8 @@ pub struct SignalPreKeySessionPreKeyStateMismatchFixture {
     pub bob_one_time_pre_key_id: u32,
     pub alice_identity_private_hex: String,
     pub alice_base_private_hex: String,
+    #[serde(default)]
+    pub alice_sending_ratchet_private_hex: String,
     pub bob_identity_private_hex: String,
     pub bob_signed_pre_key_private_hex: String,
     pub bob_one_time_pre_key_private_hex: String,
@@ -249,6 +257,8 @@ pub struct SignalPreKeySessionUnexpectedPreKeyStateMismatchFixture {
     pub unexpected_one_time_pre_key_id: u32,
     pub alice_identity_private_hex: String,
     pub alice_base_private_hex: String,
+    #[serde(default)]
+    pub alice_sending_ratchet_private_hex: String,
     pub bob_identity_private_hex: String,
     pub bob_signed_pre_key_private_hex: String,
     pub unexpected_one_time_pre_key_private_hex: String,
@@ -267,6 +277,8 @@ pub struct SignalPreKeySessionSignedPreKeyIdMismatchFixture {
     pub bob_one_time_pre_key_id: u32,
     pub alice_identity_private_hex: String,
     pub alice_base_private_hex: String,
+    #[serde(default)]
+    pub alice_sending_ratchet_private_hex: String,
     pub bob_identity_private_hex: String,
     pub bob_signed_pre_key_private_hex: String,
     pub bob_one_time_pre_key_private_hex: String,
@@ -283,6 +295,8 @@ pub struct SignalPreKeySessionMessageNoOneTimeFixture {
     pub bob_signed_pre_key_id: u32,
     pub alice_identity_private_hex: String,
     pub alice_base_private_hex: String,
+    #[serde(default)]
+    pub alice_sending_ratchet_private_hex: String,
     pub bob_identity_private_hex: String,
     pub bob_signed_pre_key_private_hex: String,
     pub plaintext_hex: String,
