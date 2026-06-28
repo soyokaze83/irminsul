@@ -15,7 +15,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
-authors = ["WhatsApp Agent Contributors"]
+authors = ["Irminsul Contributors"]
 
 [workspace.dependencies]
 async-trait = "0.1.89"

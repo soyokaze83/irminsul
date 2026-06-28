@@ -1332,7 +1332,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "whatsapp-agent-fuzz"
+name = "irminsul-fuzz"
 version = "0.0.0"
 dependencies = [
  "bytes",

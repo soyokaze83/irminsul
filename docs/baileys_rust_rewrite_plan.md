@@ -14468,8 +14468,8 @@ record decoder preserves the expected stable protocol errors while also driving
 a matching valid structured row through the decoder. It was verified in the
 current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
@@ -14485,10 +14485,10 @@ on the wire, and pre-key whisper frames without `registration_id` or
 `signed_pre_key_id` keep their stable protocol errors. It was verified in the
 current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_wire_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_whisper --quiet`
 - `cargo test -p wa-core --features noise signal_wire_pre_key_whisper --quiet`
@@ -14530,10 +14530,10 @@ missing remote-ratchet flag after a receiving-chain section while preserving the
 stable decoder error text. It was verified in the current VM
 with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14552,10 +14552,10 @@ signing-key, short chain-key, and raw unprefixed signing-key frames while
 preserving the stable decoder error text. It was verified in the current VM
 with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_distribution_message --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_distribution_message --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14573,10 +14573,10 @@ too-short, bad message-version, bad ciphertext-version, missing id, missing
 iteration, missing ciphertext, and empty-ciphertext frames while preserving the
 stable decoder error text. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_message --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_message --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14594,10 +14594,10 @@ required-field failures for missing state id, chain-key container, chain-key
 seed, chain iteration, signing-key container, signing public key, skipped
 iteration, and skipped seed. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_record_rejects_missing_required_wire_fields --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_record_rejects_missing_required_wire_fields --quiet`
 - `cargo test -p wa-core --features noise signal_sender_key_record --quiet`
@@ -14616,10 +14616,10 @@ key, short inner-ratchet-key, missing inner-message, and missing
 inner-ciphertext frames while pinning the stable decoder errors already covered
 by the Signal fixture manifest. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_wire_pre_key_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_pre_key_whisper --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14636,10 +14636,10 @@ ephemeral-key, missing ciphertext, missing counter, absent previous-counter,
 and explicit-zero-counter frames while pinning the stable decoder behavior. It
 was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_wire_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_whisper --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14656,10 +14656,10 @@ missing registration ids, invalid receiving-chain and remote-ratchet flags, and
 trailing bytes after an otherwise complete empty optional section while pinning
 the stable decoder diagnostics. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14677,10 +14677,10 @@ same bytes against a deterministic signing public key, pinning the stable
 `invalid Signal sender-key message signature` diagnostic covered by the fixture
 manifest. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_message --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_message --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14699,10 +14699,10 @@ container, chain-key seed, chain iteration, signing-key container, signing
 public key, skipped iteration, and skipped seed. It was verified in the current
 VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_record_rejects_missing_required_wire_fields --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_record_rejects_missing_required_wire_fields --quiet`
 - `cargo test -p wa-core --features noise signal_sender_key_record --quiet`
@@ -14724,10 +14724,10 @@ uninitialized send chains without a remote ratchet, zero skipped counters,
 duplicate skipped keys, and active-ratchet future skipped keys. It was verified
 in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14735,7 +14735,7 @@ in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The stateful Signal sender-key invalid-record invariant fuzz slice added after
 the provider-session invalid-record invariant fuzz work extends
@@ -14746,10 +14746,10 @@ for mismatched signing key pairs, duplicate sender-key states, duplicate
 skipped message iterations, and skipped message iterations that are not below
 the active chain iteration. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_record_rejects_malformed_state --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_record_rejects_malformed_state --quiet`
 - `cargo test -p wa-core --features noise signal_sender_key_record --quiet`
@@ -14759,7 +14759,7 @@ the active chain iteration. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal provider-session skipped-key count-limit fuzz and fixture slice
 added after the sender-key invalid-record invariant fuzz work extends both the
@@ -14770,10 +14770,10 @@ payloads, pinning the stable `Signal provider session must contain at most 2000
 skipped message keys` diagnostic in deterministic fixture coverage and fuzz
 coverage. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14781,7 +14781,7 @@ coverage. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal sender-key record state-count-limit fuzz and fixture slice added
 after the provider-session skipped-key count-limit work extends the shared
@@ -14791,10 +14791,10 @@ record must contain at most 5 states` diagnostic in deterministic fixture
 coverage and structured fuzz coverage without requiring a large message-key
 payload. It was verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_record --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14802,7 +14802,7 @@ payload. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal sender-key distribution too-short fuzz and fixture slice added after
 the sender-key record state-count-limit work extends the shared Signal manifest
@@ -14812,10 +14812,10 @@ short: 1` diagnostic in deterministic fixture coverage and structured fuzz
 coverage, matching the existing sender-key message too-short coverage. It was
 verified in the current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-core --features noise signal_sender_key_distribution_message --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_distribution_message --quiet`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
@@ -14823,7 +14823,7 @@ verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal provider-session metadata invalid-wire fixture slice added after the
 sender-key distribution too-short fuzz and fixture work promotes the compact
@@ -14841,7 +14841,7 @@ was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal provider-session skipped-key field invalid-wire fuzz and fixture
 slice added after the provider-session metadata invalid-wire fixture work fills
@@ -14852,10 +14852,10 @@ missing/truncated/short cipher and MAC keys, and missing/truncated/short IVs
 against the stable provider-session decoder errors. It was verified in the
 current VM with:
 
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_provider_session_record --quiet`
@@ -14863,7 +14863,7 @@ current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal pre-key whisper signed-pre-key-only wire fixture and fuzz slice added
 after the provider-session skipped-key field invalid-wire work promotes the
@@ -14877,15 +14877,15 @@ in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_wire_pre_key_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_pre_key_whisper --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal whisper omitted-previous-counter fixture and fuzz slice added after
 the pre-key whisper signed-pre-key-only wire work promotes another accepted
@@ -14899,15 +14899,15 @@ current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_wire_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_whisper --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal pre-key whisper inner omitted-previous-counter fixture and fuzz
 slice added after the plain whisper omitted-previous-counter work extends the
@@ -14921,15 +14921,15 @@ path. It was verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_wire_pre_key_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_pre_key_whisper --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal whisper explicit-zero counter fixture and fuzz slice added after
 the pre-key whisper inner omitted-previous-counter work promotes another
@@ -14943,15 +14943,15 @@ canonical output. It was verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_wire_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_whisper --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal pre-key whisper inner explicit-zero counter fixture and fuzz slice
 added after the plain whisper explicit-zero work extends that field-presence
@@ -14964,15 +14964,15 @@ encoder's canonical output. It was verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_wire_pre_key_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_pre_key_whisper --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal whisper unknown-field canonicalization fixture and fuzz slice added
 after the pre-key whisper inner explicit-zero work promotes another protobuf
@@ -14986,15 +14986,15 @@ verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_wire_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_whisper --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal pre-key whisper unknown-field canonicalization fixture and fuzz
 slice added after the plain whisper unknown-field work extends that accepted
@@ -15008,15 +15008,15 @@ verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_wire_pre_key_whisper --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_wire_pre_key_whisper --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal sender-key distribution unknown-field canonicalization fixture and
 fuzz slice added after the pre-key whisper unknown-field work extends the same
@@ -15030,15 +15030,15 @@ the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_sender_key_distribution_message --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_distribution_message --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal sender-key message unknown-field canonicalization fixture and fuzz
 slice added after the sender-key distribution unknown-field work extends the
@@ -15052,15 +15052,15 @@ path. It was verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_sender_key_message --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_message --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal sender-key record unknown-field canonicalization fixture and fuzz
 slice added after the sender-key message unknown-field work extends the same
@@ -15074,15 +15074,15 @@ It was verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_sender_key_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_record --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal sender-key record nested unknown-field canonicalization fixture and
 fuzz slice added after the top-level sender-key record unknown-field work
@@ -15097,15 +15097,15 @@ with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_sender_key_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_sender_key_record --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_wire_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_wire_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal sender-key message unknown-field verification slice added after the
 nested sender-key record unknown-field work aligns the byte-verification API
@@ -15123,7 +15123,7 @@ the original signed bytes. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal provider-session unknown-field decrypt fixture and fuzz slice added
 after the sender-key message unknown-field verification work extends accepted
@@ -15138,13 +15138,13 @@ decrypt invariant. It was verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise signal_provider_session_record --quiet`
 - `cargo test -p wa-core --no-default-features --features noise signal_provider_session_record --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal pre-key session unknown-field decrypt fixture and fuzz slice added
 after the provider-session unknown-field decrypt work extends the same accepted
@@ -15162,13 +15162,13 @@ verified in the current VM with:
 - `cargo test -p wa-testkit --test signal_fixtures --quiet`
 - `cargo test -p wa-core --features noise pre_key_session --quiet`
 - `cargo test -p wa-core --no-default-features --features noise pre_key_session --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The store-backed Signal pre-key unknown-field receive slice added after the
 pre-key session unknown-field decrypt fixture and fuzz work promotes that
@@ -15189,7 +15189,7 @@ replacement-session assertions. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned incoming-processor Signal pre-key unknown-field receive slice added
 after the store-backed provider boundary work carries the same accepted `pkmsg`
@@ -15209,7 +15209,7 @@ remain unchanged. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The explicit client receive-facade Signal pre-key unknown-field receive slice
 added after the spawned incoming-processor boundary work carries the same
@@ -15234,7 +15234,7 @@ unchanged. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The status/broadcast retry-resend caching slice added after the explicit
 receive-facade work hardens the public status send path. A new client
@@ -15251,7 +15251,7 @@ successful replay. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The store-backed Signal-provider status retry-resend caching slice added after
 the mock-encryptor status retry work promotes the same `status@broadcast`
@@ -15269,7 +15269,7 @@ It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target`
 
 The all-device status retry-resend caching slice added after the
 store-backed participant status retry coverage hardens `status@broadcast`
@@ -15288,7 +15288,7 @@ removes the cached status after replay. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The store-backed Signal-provider all-device status retry-resend caching slice
 added after the mock all-device status retry coverage promotes the same bare
@@ -15308,7 +15308,7 @@ verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The media status retry-resend caching slice added after the store-backed
 all-device text status retry coverage broadens the mock-encryptor
@@ -15326,7 +15326,7 @@ verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The store-backed Signal-provider media status retry-resend caching slice added
 after the mock media status retry work promotes the same non-text
@@ -15344,7 +15344,7 @@ after replay. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The all-device media status retry-resend caching slice added after the
 device-scoped media retry work closes the remaining media half of the
@@ -15367,7 +15367,7 @@ in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The store-backed provider-backed half of that media status all-device retry
 slice now also runs from an account with both `999:7@s.whatsapp.net` and
@@ -15403,7 +15403,7 @@ the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The store-backed Signal-provider status poll retry sidecar-suppression slice
 added after the mock status poll retry work promotes the same poll replay
@@ -15422,7 +15422,7 @@ the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The all-device status poll retry sidecar-suppression slice added after the
 device-scoped poll retry coverage closes the bare-requester `status@broadcast`
@@ -15446,7 +15446,7 @@ in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The status event reporting-token and all-device retry sidecar-suppression slice
 added after poll retry coverage closes the event half of the
@@ -15472,7 +15472,7 @@ in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The status event facade and device-scoped retry sidecar-suppression slice added
 after the all-device event retry work exposes typed
@@ -15495,7 +15495,7 @@ status event after replay. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The status poll facade slice added after the typed status event work exposes
 `send_status_poll`/`send_status_poll_with_signal_provider` helpers so callers
@@ -15513,7 +15513,7 @@ verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The status image facade slice added after the typed status poll work exposes
 `send_status_image`/`send_status_image_with_signal_provider` helpers for the
@@ -15532,7 +15532,7 @@ new test names. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The status video/document facade slice added after the typed status image work
 exposes `send_status_video`/`send_status_video_with_signal_provider` and
@@ -15551,7 +15551,7 @@ current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The status audio/sticker facade slice added after the video/document status
 work exposes `send_status_audio`/`send_status_audio_with_signal_provider` and
@@ -15569,7 +15569,7 @@ thumbnail, and direct path. It was verified in the current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The ignored live status image-media smoke slice added after the status media
 facade work extends the `live_e2e` harness with
@@ -15587,7 +15587,7 @@ without live credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The ignored live status generated video/document thumbnail smoke slice added
 after the live status image-media smoke extends `live_e2e` with
@@ -15610,7 +15610,7 @@ verified in the current VM without live credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The ignored live status audio/sticker media smoke slice added after the live
 status generated video/document thumbnail smokes extends `live_e2e` with
@@ -15631,7 +15631,7 @@ credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The ignored live status poll/event smoke slice added after the live status
 audio/sticker media smokes extends `live_e2e` with
@@ -15651,7 +15651,7 @@ without live credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The live status smoke documentation slice added after the poll/event live-smoke
 work updates the README's operator-facing live e2e environment-variable section
@@ -15664,7 +15664,7 @@ current VM with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The public live status image-media example slice added after the live status
 smoke documentation work extends the existing `live_status` example with an
@@ -15684,7 +15684,7 @@ credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The public live status poll/event example slice added after the status
 image-media example work extends `live_status` with `WA_STATUS_KIND`
@@ -15704,7 +15704,7 @@ with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The public live status audio/sticker example slice added after the status
 poll/event example modes extends `live_status` with `audio` and `sticker`
@@ -15725,7 +15725,7 @@ with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The public live status video/document thumbnail example slice added after the
 status audio/sticker example modes extends `live_status` with `video` and
@@ -15749,7 +15749,7 @@ with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The direct contact/location live-send slice added after the live status
 video/document example modes extends `live_text` with `WA_MESSAGE_KIND`
@@ -15772,7 +15772,7 @@ surface. It was verified in the current VM without live credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The direct poll/event live-send slice added after the direct contact/location
 live-send work extends `live_text` with `WA_MESSAGE_KIND=poll` and
@@ -15795,7 +15795,7 @@ credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The direct reaction live-send slice added after the direct poll/event live-send
 work extends `live_text` with `WA_MESSAGE_KIND=reaction`. The example builds a
@@ -15814,7 +15814,7 @@ surface. It was verified in the current VM without live credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The direct edit/delete/pin protocol live-send slice added after direct reaction
 live-send work extends `live_text` with `WA_MESSAGE_KIND=edit`,
@@ -15842,7 +15842,7 @@ without live credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The trusted-contact-token parser fuzz slice added after the direct
 edit/delete/pin live-send work adds a `tc_token_parse` fuzz target. The target
@@ -15858,11 +15858,11 @@ target. It was verified in the current VM with:
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml`
 - `cargo test -p wa-core --features noise tctoken --quiet`
 - `cargo check --manifest-path fuzz/Cargo.toml --bins`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The live media-retry response smoke slice added after the
 trusted-contact-token parser fuzz work extends the ignored live e2e harness with
@@ -15886,7 +15886,7 @@ verified in the current VM without live credentials with:
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The media-retry parser/application fuzz slice added after the live media-retry
 response smoke adds a `media_retry_parse` fuzz target. The target drives raw
@@ -15901,14 +15901,14 @@ network parser fuzz surface. The fuzz README and manifest document the new
 target. It was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
 - `cargo test -p wa-core --features noise media_retry --quiet`
 - `cargo test -p wa-core --no-default-features --features noise media_retry --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The USync query/result fuzz slice added after the media-retry parser/application
 fuzz work adds a `usync_result_parse` fuzz target. The target drives raw
@@ -15921,14 +15921,14 @@ target so malformed USync responses join the network parser fuzz surface. It
 was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
 - `cargo test -p wa-core --features noise usync --quiet`
 - `cargo test -p wa-core --no-default-features --features noise usync --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The chat/account parser fuzz slice added after the USync query/result fuzz work
 adds a `chat_account_parse` fuzz target. The target drives raw binary-node
@@ -15941,14 +15941,14 @@ chat/account IQ responses and builder-shaped nodes join the network parser fuzz
 surface. It was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bins`
 - `cargo test -p wa-core --features noise chat --quiet`
 - `cargo test -p wa-core --no-default-features --features noise chat --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
 - `test ! -e fuzz/target`
-- `test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e /tmp/irminsul-fuzz-target`
 
 The non-blocking history-sync mapping slice added after the chat/account parser
 fuzz work broadens receive/history processing for `NON_BLOCKING_DATA` payloads.
@@ -15995,15 +15995,15 @@ and after a prost encode/decode round trip. It was verified in the current VM
 with:
 
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin history_sync_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin history_sync_decode`
 - `cargo fmt --all --manifest-path Cargo.toml`
 - `cargo test -p wa-core processes_non_blocking_history_pushnames_statuses_and_lid_mappings --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin history_sync_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin history_sync_decode -- -D warnings`
 - `cargo test -p wa-core --no-default-features processes_non_blocking_history_pushnames_statuses_and_lid_mappings --quiet`
 - `cargo fmt --all --check`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `git diff --check`
-- `test ! -e fuzz/target && rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target && test ! -e fuzz/target`
+- `test ! -e fuzz/target && rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target && test ! -e fuzz/target`
 
 The history sync account-settings follow-up added after the recent-sticker and
 default-disappearing-mode work introduces a durable `AccountSettingsEvent` for
@@ -16025,14 +16025,14 @@ exercises the same fields. It was verified in the current VM with:
 - `cargo test -p wa-core --no-default-features processes_non_blocking_history_pushnames_statuses_and_lid_mappings --quiet`
 - `cargo test -p wa-client --features memory-store,noise history_sync_non_blocking_data_persists_and_emits_contact_status_and_mapping --quiet`
 - `cargo test -p wa-client --no-default-features --features memory-store,noise history_sync_non_blocking_data_persists_and_emits_contact_status_and_mapping --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin history_sync_decode`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin history_sync_decode`
 - `cargo clippy -p wa-core --features noise --tests -- -D warnings`
 - `cargo clippy -p wa-client --features memory-store,noise --lib -- -D warnings`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin history_sync_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin history_sync_decode -- -D warnings`
 - `cargo fmt --all --check`
 - `cargo fmt --all --manifest-path fuzz/Cargo.toml --check`
 - `git diff --check`
-- `test ! -e fuzz/target && rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target && test ! -e fuzz/target`
+- `test ! -e fuzz/target && rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target && test ! -e fuzz/target`
 
 The store-backed sender-key distribution retry slice added after the history
 sync account-settings work tightens group Signal-provider recovery. When a
@@ -16055,7 +16055,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-core --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The attached sender-key distribution atomicity follow-up added after the
 store-backed sender-key distribution retry slice extends the same commit-after-
@@ -16076,7 +16076,7 @@ the record from the distribution. It was verified in the current VM with:
 - `cargo clippy -p wa-core --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The sender-key distribution memory validation slice hardens the store-backed
 repository boundary used by sender-key distribution retry memory. Direct
@@ -16098,7 +16098,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-core --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The typed direct contact/location facade slice added after the sender-key
 distribution memory validation work broadens the public direct-send API surface
@@ -16123,7 +16123,7 @@ with:
 - `cargo clippy -p wa-client --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The typed direct media facade slice added after the direct contact/location
 facades extends the same public API shape to media sends. `wa-client` now
@@ -16149,7 +16149,7 @@ the typed media facade surface. It was verified in the current VM with:
 - `cargo clippy -p wa-client --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The live direct media facade slice added after the typed direct media facade
 work moves the public live media workflows onto the same typed API surface and
@@ -16188,7 +16188,7 @@ media modes. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media,image --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The typed direct PTV facade slice added after the live direct media work closes
 the remaining uploaded-media direct facade named in the media foundation
@@ -16217,7 +16217,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The typed direct GIF facade slice added after the direct PTV work closes the
 remaining GIF media send facade named in the media checklist. `wa-client` now
@@ -16246,7 +16246,7 @@ VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The typed direct PTT facade slice added after the direct GIF work closes the
 remaining push-to-talk media send facade named in the media checklist.
@@ -16274,7 +16274,7 @@ metadata. The live media example and ignored e2e harness expose PTT mode through
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The typed direct view-once media facade slice added after the direct PTT work
 promotes the already-landed core `FutureProofMessage` view-once wrapper into
@@ -16297,7 +16297,7 @@ the current VM with:
 - `cargo clippy -p wa-client --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The live view-once media workflow slice extends that facade work into the
 operator-facing live surfaces. The `live_media` example now accepts
@@ -16322,7 +16322,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The direct video/document live media smoke slice added after the live view-once
 media workflow broadens ignored live validation for direct media sends that
@@ -16346,7 +16346,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The live business-profile read workflow slice added after the direct
 video/document live media smokes broadens the business-helper foundations into
@@ -16370,7 +16370,7 @@ in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds emitted the pre-existing dead-code
 warnings for helper functions only used by `http-media` media-retry tests; the
@@ -16398,7 +16398,7 @@ the catalog example and ignored smoke. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for media-retry helpers only compiled when `http-media` is disabled;
@@ -16428,7 +16428,7 @@ in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for media-retry helpers only compiled when `http-media` is disabled;
@@ -16457,7 +16457,7 @@ smoke. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for media-retry helpers only compiled when `http-media` is disabled;
@@ -16491,7 +16491,7 @@ with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The live business-profile update workflow slice added after business-media live
 validation broadens business-helper live coverage into explicitly gated
@@ -16516,7 +16516,7 @@ mutating workflow and warning. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for media-retry helpers only compiled when `http-media` is disabled;
@@ -16545,7 +16545,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The live business-cover-photo remove workflow slice added after cover-photo
 update validation completes the current cover-photo mutation pair. The
@@ -16573,7 +16573,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for media-retry helpers only compiled when `http-media` is disabled;
@@ -16601,7 +16601,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for media-retry helpers only compiled when `http-media` is disabled;
@@ -16631,7 +16631,7 @@ in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for the media-retry helpers only compiled when `http-media` is
@@ -16663,7 +16663,7 @@ coverage. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features sqlite-store,noise,websocket,http-media --test live_e2e -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The no-`http-media` live-e2e no-run builds still emitted pre-existing dead-code
 warnings for the media-retry helpers only compiled when `http-media` is
@@ -16702,7 +16702,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The focused `wa-client` default-feature tests still emitted the pre-existing
 no-`http-media` live-e2e dead-code warnings for media-retry helpers because
@@ -16738,7 +16738,7 @@ session. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` assertion tests still emitted the pre-existing
 no-`http-media` live-e2e dead-code warnings for media-retry helpers because
@@ -16765,7 +16765,7 @@ and provider mapped LID snapshots. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` retry snapshot tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -16796,7 +16796,7 @@ the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` retry cleanup tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -16827,7 +16827,7 @@ passes. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` retry planning/resend tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -16858,7 +16858,7 @@ VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` incoming retry/key-bundle tests still emitted
 the pre-existing no-`http-media` live-e2e dead-code warnings for media-retry
@@ -16891,7 +16891,7 @@ filters still pass. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` incoming retry/key-bundle tests still emitted
 the pre-existing no-`http-media` live-e2e dead-code warnings for media-retry
@@ -16933,7 +16933,7 @@ It was verified in the current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The client inbound sender-key distribution legacy-PN canonicalization slice
 added after core Signal codec canonicalization carries the same `c.us` to
@@ -16962,7 +16962,7 @@ invariant. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` sender-key distribution and incoming-processor
 tests still emitted the pre-existing no-`http-media` live-e2e dead-code warnings
@@ -16994,7 +16994,7 @@ It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` direct receive and incoming-processor tests
 still emitted the pre-existing no-`http-media` live-e2e dead-code warnings for
@@ -17029,7 +17029,7 @@ VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` offline receive and incoming-processor tests
 still emitted the pre-existing no-`http-media` live-e2e dead-code warnings for
@@ -17063,7 +17063,7 @@ in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` placeholder-resend tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -17094,7 +17094,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` offline placeholder and legacy-missing-key tests
 still emitted the pre-existing no-`http-media` live-e2e dead-code warnings for
@@ -17125,7 +17125,7 @@ facades. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` combined placeholder/retry and
 legacy-missing-key tests still emitted the pre-existing no-`http-media`
@@ -17158,7 +17158,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` direct combined placeholder/retry/media and
 legacy-missing-key tests still emitted the pre-existing no-`http-media`
@@ -17191,7 +17191,7 @@ offline combined facades. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` spawned placeholder/retry/media and
 legacy-missing-key tests still emitted the pre-existing no-`http-media`
@@ -17223,7 +17223,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` media-retry tests still emitted the pre-existing
 no-`http-media` live-e2e dead-code warnings for media-retry helpers because
@@ -17253,7 +17253,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` spawned media-retry tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -17282,7 +17282,7 @@ the native media-retry store. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` offline media-retry and legacy-retry-key tests
 still emitted the pre-existing no-`http-media` live-e2e dead-code warnings for
@@ -17313,7 +17313,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` media-retry startup replay tests still emitted
 the pre-existing no-`http-media` live-e2e dead-code warnings for media-retry
@@ -17348,7 +17348,7 @@ cached retry is finalized. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` retry-resend tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -17384,7 +17384,7 @@ the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` combined direct/offline retry tests still
 emitted the pre-existing no-`http-media` live-e2e dead-code warnings for
@@ -17419,7 +17419,7 @@ in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` spawned combined retry tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -17447,7 +17447,7 @@ It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --lib -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The default-feature `wa-client` direct retry-resend tests still emitted the
 pre-existing no-`http-media` live-e2e dead-code warnings for media-retry helpers
@@ -17473,7 +17473,7 @@ It was verified in the current VM with:
 - `cargo test -p wa-testkit --quiet`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The app-state parser structured fuzz slice added after the binary-node AD-JID
 fixture work broadens `fuzz/fuzz_targets/app_state_node_parse.rs` beyond raw
@@ -17488,13 +17488,13 @@ retry/resync parser hardening even when arbitrary bytes do not decode to a
 protocol-shaped stanza. It was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin app_state_node_parse --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin app_state_node_parse -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin app_state_node_parse --quiet`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin app_state_node_parse -- -D warnings`
 - `cargo test -p wa-core --features noise app_state --quiet`
 - `cargo test -p wa-core --no-default-features app_state --quiet`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Noise frame decode fuzz slice added after structured app-state parser
 fuzzing closes the planned `noise_frame_decode` target gap. The new
@@ -17507,13 +17507,13 @@ manifest and README now list `noise_frame_decode` alongside the other
 network-facing parser targets. It was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin noise_frame_decode --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin noise_frame_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin noise_frame_decode --quiet`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin noise_frame_decode -- -D warnings`
 - `cargo test -p wa-crypto noise --quiet`
 - `cargo test -p wa-core --features noise noise --quiet`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The app-state patch decode fuzz slice added after Noise frame fuzzing closes the
 planned `app_state_patch_decode` target gap. The new
@@ -17528,13 +17528,13 @@ README now list `app_state_patch_decode` with the other planned parser targets.
 It was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin app_state_patch_decode --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin app_state_patch_decode -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin app_state_patch_decode --quiet`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin app_state_patch_decode -- -D warnings`
 - `cargo test -p wa-core --features noise app_state --quiet`
 - `cargo test -p wa-core --no-default-features app_state --quiet`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The binary-node decompression fuzz slice added after app-state patch decode
 fuzzing closes the planned `decompressing_if_required` target gap. The new
@@ -17549,12 +17549,12 @@ README now list `decompressing_if_required` with the other planned parser
 targets. It was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin decompressing_if_required --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin decompressing_if_required -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin decompressing_if_required --quiet`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin decompressing_if_required -- -D warnings`
 - `cargo test -p wa-binary --quiet`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The file-backed large-media profiling slice added after decompression fuzzing
 tightens the e2e-sized streamed media fixture. The file-backed transport now
@@ -17575,7 +17575,7 @@ round-trip. It was verified in the current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The SQLite stored-media-retry retention slice added after large-media profiling
 hardens replay behavior for transient refreshed-media download failures. A new
@@ -17599,7 +17599,7 @@ current VM with:
 - `cargo test -p wa-client --no-default-features --features memory-store,noise plan_retry_resend_normalizes_legacy_c_us_requester_and_chat_before_replay --quiet`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal replacement pre-key failure slice added after SQLite media-retry
 retention hardens the store-backed one-to-one provider session boundary. A new
@@ -17622,7 +17622,7 @@ poisoning an existing session. It was verified in the current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The follow-up Signal one-time replacement pre-key failure slice broadens the
 same store-backed provider boundary. A new `wa-core` regression establishes an
@@ -17645,7 +17645,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The next Signal identity-change replacement slice adds the decodable
 provider-session sibling to the earlier opaque-session guard. A new `wa-core`
@@ -17668,7 +17668,7 @@ with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The signed-pre-key replacement identity-change slice completes the immediate
 store-backed sibling of the one-time replacement guard. A new `wa-core`
@@ -17691,7 +17691,7 @@ signed-pre-key-only replacement paths. It was verified in the current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The missing-one-time replacement base-key guard tightens another store-backed
 provider fallback edge. The existing fallback for a consumed one-time pre-key
@@ -17717,7 +17717,7 @@ current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The same-base missing-one-time fallback slice preserves the compatible side of
 the tightened guard. A new `wa-core` regression establishes a one-time-pre-key
@@ -17739,7 +17739,7 @@ base-key discriminator. It was verified in the current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The receive-facade same-base missing-one-time fallback slice lifts the core
 provider proof into the client inbound path. A new `wa-client` regression
@@ -17762,7 +17762,7 @@ APIs. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The offline receive same-base missing-one-time fallback slice mirrors that
 client receive proof for offline batches. A new `wa-client` regression processes
@@ -17784,7 +17784,7 @@ with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned incoming processor same-base missing-one-time fallback slice lifts
 the direct receive proof into the background raw-node pump. The existing
@@ -17806,7 +17806,7 @@ and offline receive facades. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned offline raw-node same-base missing-one-time fallback slice completes
 the raw-node pump sibling of the direct, explicit-offline, and live-spawned
@@ -17830,7 +17830,7 @@ pre-key wrappers. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The media-capable spawned Signal-provider pump same-base fallback slice carries
 the consumed one-time-pre-key wrapper proof into the combined placeholder,
@@ -17857,7 +17857,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The retry-resend spawned Signal-provider pump same-base fallback slice carries
 the consumed one-time-pre-key wrapper proof into the automatic retry-resend
@@ -17882,7 +17882,7 @@ media-capable combined processor. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The placeholder-plus-retry spawned Signal-provider pump same-base fallback
 slice carries the consumed one-time-pre-key wrapper proof into the combined
@@ -17908,7 +17908,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The placeholder-only spawned Signal-provider pump same-base fallback slice
 carries the consumed one-time-pre-key wrapper proof into the automatic
@@ -17934,7 +17934,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The media-retry-only spawned Signal-provider pump same-base fallback slice
 carries the consumed one-time-pre-key wrapper proof into the automatic
@@ -17962,7 +17962,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The direct placeholder-resend Signal-provider facade same-base fallback slice
 carries the consumed one-time-pre-key wrapper proof into the explicit
@@ -17988,7 +17988,7 @@ placeholder-resend pump. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The direct retry-resend Signal-provider facade same-base fallback slice carries
 the consumed one-time-pre-key wrapper proof into the explicit retry-resend
@@ -18016,7 +18016,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The direct media-retry Signal-provider facade same-base fallback slice carries
 the consumed one-time-pre-key wrapper proof into the explicit media-retry
@@ -18044,7 +18044,7 @@ the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The direct placeholder/retry/media Signal-provider facade same-base fallback
 slice carries the consumed one-time-pre-key wrapper proof into the explicit
@@ -18074,7 +18074,7 @@ with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The offline placeholder/retry/media Signal-provider facade same-base fallback
 slice carries the consumed one-time-pre-key wrapper proof into the explicit
@@ -18104,7 +18104,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The basic direct/offline Signal-provider same-base recovery slice closes the
 post-replay gap in the base receive wrappers. The existing `wa-client`
@@ -18128,7 +18128,7 @@ VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The inbound call timeout receive-path slice closes a Phase 11 coverage gap for
 live call stanza processing through the public client wrapper. The new
@@ -18150,7 +18150,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The inbound group-call offer receive-path slice extends the live call stanza
 coverage beyond missed-call timeouts. The new `wa-client` regression
@@ -18171,7 +18171,7 @@ the lower-level call-event mapper. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The offline group-call timeout receive-path slice closes the same-call
 offer/timeout collision that can happen when derived call messages share the
@@ -18196,7 +18196,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned raw-node call timeout slice promotes the offline group-call
 offer/timeout behavior through the automatic processor path. The new
@@ -18217,7 +18217,7 @@ call-derived message updates. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The incoming-node group notification derived-stub slice promotes the
 payload-bearing group notification message-stub path through the public client
@@ -18239,7 +18239,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned raw-node group notification derived-stub slice promotes the
 payload-bearing group notification message-stub path through the automatic
@@ -18261,7 +18261,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The offline-node group notification derived-stub slice promotes the
 payload-bearing group notification message-stub path through the explicit
@@ -18283,7 +18283,7 @@ gap for group-derived message updates. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The offline group-notification append-kind slice tightens the Baileys-style
 offline semantics for derived group message stubs. Group notification parsing
@@ -18313,7 +18313,7 @@ group-derived message updates. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned offline group-notification append-stub slice promotes the offline
 group notification append semantics through the automatic raw-node processor.
@@ -18335,7 +18335,7 @@ offline group-derived message updates. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The combined offline placeholder/retry/media group-notification append-stub
 slice promotes the same offline group notification append semantics through
@@ -18361,7 +18361,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned combined placeholder/retry/media group-notification append-stub
 slice promotes the offline group notification append semantics through the
@@ -18387,7 +18387,7 @@ offline group-derived message updates. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned media-retry-only group-notification append-stub slice promotes the
 offline group notification append semantics through the automatic media-retry
@@ -18413,7 +18413,7 @@ placeholder/retry/media processor. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned placeholder-resend-only group-notification append-stub slice
 promotes the offline group notification append semantics through the automatic
@@ -18439,7 +18439,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned retry-resend-only group-notification append-stub slice promotes
 the offline group notification append semantics through the automatic
@@ -18465,7 +18465,7 @@ with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned placeholder+retry group-notification append-stub slice promotes
 the offline group notification append semantics through the automatic
@@ -18492,7 +18492,7 @@ processors. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The public incoming-node group participant-add stub slice broadens group
 notification receive coverage beyond the disappearing-message payload stub.
@@ -18514,7 +18514,7 @@ verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The public offline-node group participant-add append-stub slice carries the
 non-payload participant metadata coverage into explicit offline processing.
@@ -18537,7 +18537,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned live raw-node group participant-add stub slice promotes the
 non-payload participant metadata coverage through the automatic processor. The
@@ -18560,7 +18560,7 @@ current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned offline raw-node group participant-add append-stub slice carries
 the non-payload participant metadata coverage through the automatic processor's
@@ -18584,7 +18584,7 @@ was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The explicit combined offline group participant-add append-stub slice carries
 the non-payload participant metadata coverage through the side-effect-capable
@@ -18609,7 +18609,7 @@ disappearing-message payload stubs. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned combined offline group participant-add append-stub slice carries
 the non-payload participant metadata coverage through the automatic
@@ -18634,7 +18634,7 @@ disappearing-message payload stubs. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned media-retry-only offline group participant-add append-stub slice
 carries the non-payload participant metadata coverage through the automatic
@@ -18659,7 +18659,7 @@ disappearing-message payload stubs. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned placeholder-resend-only offline group participant-add append-stub
 slice carries the non-payload participant metadata coverage through the
@@ -18684,7 +18684,7 @@ disappearing-message payload stubs. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned retry-resend-only offline group participant-add append-stub slice
 carries the non-payload participant metadata coverage through the automatic
@@ -18709,7 +18709,7 @@ stubs. It was verified in the current VM with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The spawned placeholder+retry offline group participant-add append-stub slice
 carries the non-payload participant metadata coverage through the automatic
@@ -18736,7 +18736,7 @@ with:
 - `cargo clippy -p wa-client --no-default-features --features memory-store,noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The store-backed sender-key same-signer stale-chain retry slice narrows the
 group Signal provider cryptographic recovery gap called out in Section 13.
@@ -18763,7 +18763,7 @@ the current VM with:
 - `cargo clippy -p wa-core --no-default-features --features noise --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The Signal stateful sender-key same-signer stale-chain retry fuzz slice extends
 the store-backed sender-key recovery work into the existing
@@ -18778,13 +18778,13 @@ stateful coverage for the same stale-chain distribution retry class covered by
 the focused store-backed regression. It was verified in the current VM with:
 
 - `cargo fmt --all --manifest-path Cargo.toml`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records --quiet`
-- `CARGO_TARGET_DIR=/tmp/whatsapp-agent-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo check --manifest-path fuzz/Cargo.toml --bin signal_stateful_records --quiet`
+- `CARGO_TARGET_DIR=/tmp/irminsul-fuzz-target cargo clippy --manifest-path fuzz/Cargo.toml --bin signal_stateful_records -- -D warnings`
 - `cargo test -p wa-core --features noise store_sender_key_provider_recovers_same_signer_stale_chain_from_distribution_after_decrypt_failure --quiet`
 - `cargo test -p wa-core --no-default-features --features noise store_sender_key_provider_recovers_same_signer_stale_chain_from_distribution_after_decrypt_failure --quiet`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && rm -rf /tmp/whatsapp-agent-fuzz-target && test ! -e /tmp/whatsapp-agent-fuzz-target && test ! -e fuzz/target`
+- `test ! -e fuzz/target && rm -rf /tmp/irminsul-fuzz-target && test ! -e /tmp/irminsul-fuzz-target && test ! -e fuzz/target`
 
 The Signal sender-key same-signer stale-chain retry fixture slice extends the
 shared deterministic Signal manifest for the recovery path covered by the
@@ -18806,7 +18806,7 @@ for the same stale-chain retry class. It was verified in the current VM with:
 - `cargo clippy -p wa-testkit --tests -- -D warnings`
 - `cargo fmt --all --check`
 - `git diff --check`
-- `test ! -e fuzz/target && test ! -e /tmp/whatsapp-agent-fuzz-target`
+- `test ! -e fuzz/target && test ! -e /tmp/irminsul-fuzz-target`
 
 The consumed one-time same-base identity-change guard slice tightens the
 store-backed one-to-one Signal fallback that handles pre-key wrappers after the
