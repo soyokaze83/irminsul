@@ -1,0 +1,161 @@
+[package]
+name = "whatsapp-agent-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.96"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1"
+flate2 = "1"
+libfuzzer-sys = "0.4"
+prost = "0.14.4"
+wa-binary = { path = "../crates/wa-binary" }
+wa-core = { path = "../crates/wa-core", default-features = false, features = ["noise"] }
+wa-crypto = { path = "../crates/wa-crypto" }
+wa-proto = { path = "../crates/wa-proto" }
+
+[workspace]
+
+[[bin]]
+name = "binary_node_decode"
+path = "fuzz_targets/binary_node_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decompressing_if_required"
+path = "fuzz_targets/decompressing_if_required.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jid_decode"
+path = "fuzz_targets/jid_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "noise_frame_decode"
+path = "fuzz_targets/noise_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signal_wire_decode"
+path = "fuzz_targets/signal_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signal_stateful_records"
+path = "fuzz_targets/signal_stateful_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inbound_node_decode"
+path = "fuzz_targets/inbound_node_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "history_sync_decode"
+path = "fuzz_targets/history_sync_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "app_state_node_parse"
+path = "fuzz_targets/app_state_node_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "app_state_patch_decode"
+path = "fuzz_targets/app_state_patch_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "retry_receipt_parse"
+path = "fuzz_targets/retry_receipt_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "group_notification_parse"
+path = "fuzz_targets/group_notification_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "newsletter_notification_parse"
+path = "fuzz_targets/newsletter_notification_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "business_notification_parse"
+path = "fuzz_targets/business_notification_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "community_surface_parse"
+path = "fuzz_targets/community_surface_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "account_call_notification_parse"
+path = "fuzz_targets/account_call_notification_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chat_account_parse"
+path = "fuzz_targets/chat_account_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tc_token_parse"
+path = "fuzz_targets/tc_token_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_retry_parse"
+path = "fuzz_targets/media_retry_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "usync_result_parse"
+path = "fuzz_targets/usync_result_parse.rs"
+test = false
+doc = false
+bench = false

@@ -315,6 +315,35 @@ pub fn tc_token_records_from_issue_result(
     Ok(records)
 }
 
+#[must_use]
+pub fn privacy_token_notification_sender_lid(node: &BinaryNode) -> Option<String> {
+    if node.tag != "notification"
+        || node.attrs.get("type").map(String::as_str) != Some("privacy_token")
+    {
+        return None;
+    }
+    let sender_lid = node
+        .attrs
+        .get("sender_lid")
+        .filter(|value| !value.is_empty())?;
+    let normalized = jid_normalized_user(sender_lid)?;
+    let decoded = jid_decode(&normalized)?;
+    matches!(decoded.server, JidServer::Lid | JidServer::HostedLid).then_some(normalized)
+}
+
+pub fn tc_token_records_from_privacy_token_notification(
+    node: &BinaryNode,
+    fallback_jid: Option<&str>,
+) -> CoreResult<Vec<TcTokenRecord>> {
+    if node.tag != "notification"
+        || node.attrs.get("type").map(String::as_str) != Some("privacy_token")
+        || child_node(node, "tokens").is_none()
+    {
+        return Ok(Vec::new());
+    }
+    tc_token_records_from_issue_result(node, fallback_jid)
+}
+
 pub async fn save_tc_token<S>(store: &S, record: TcTokenRecord) -> CoreResult<()>
 where
     S: AuthStore,
@@ -335,6 +364,28 @@ where
     S: AuthStore,
 {
     let records = tc_token_records_from_issue_result(node, fallback_jid)?;
+    store_tc_token_records(store, records).await
+}
+
+pub async fn store_tc_tokens_from_privacy_token_notification<S>(
+    store: &S,
+    node: &BinaryNode,
+    fallback_jid: Option<&str>,
+) -> CoreResult<Vec<TcTokenRecord>>
+where
+    S: AuthStore,
+{
+    let records = tc_token_records_from_privacy_token_notification(node, fallback_jid)?;
+    store_tc_token_records(store, records).await
+}
+
+async fn store_tc_token_records<S>(
+    store: &S,
+    records: Vec<TcTokenRecord>,
+) -> CoreResult<Vec<TcTokenRecord>>
+where
+    S: AuthStore,
+{
     let mut saved = Vec::new();
     for mut record in records {
         let existing = load_tc_token(store, &record.jid).await?;
@@ -800,6 +851,75 @@ mod tests {
                     .unwrap()
                     .with_timestamp_seconds(1_700_000_001)
             ]
+        );
+    }
+
+    #[test]
+    fn privacy_token_notification_sender_lid_only_accepts_lid_jids() {
+        let notification = BinaryNode::new("notification")
+            .with_attr("type", "privacy_token")
+            .with_attr("sender_lid", "abc:7@lid");
+        assert_eq!(
+            privacy_token_notification_sender_lid(&notification),
+            Some("abc@lid".to_owned())
+        );
+
+        let pn_sender = BinaryNode::new("notification")
+            .with_attr("type", "privacy_token")
+            .with_attr("sender_lid", "123@c.us");
+        assert_eq!(privacy_token_notification_sender_lid(&pn_sender), None);
+
+        let other_notification = BinaryNode::new("notification")
+            .with_attr("type", "devices")
+            .with_attr("sender_lid", "abc@lid");
+        assert_eq!(
+            privacy_token_notification_sender_lid(&other_notification),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn privacy_token_notification_store_uses_fallback_jid() {
+        let dir = std::env::temp_dir().join(format!(
+            "wa-core-tctoken-privacy-{}",
+            rand::random::<u128>()
+        ));
+        let store = wa_store::SqliteAuthStore::open(dir.join("session.db"))
+            .await
+            .unwrap();
+        save_tc_token(
+            &store,
+            TcTokenRecord::sender_marker("abc@lid", 1_700_000_000).unwrap(),
+        )
+        .await
+        .unwrap();
+        let notification = BinaryNode::new("notification")
+            .with_attr("id", "privacy-1")
+            .with_attr("from", "123@s.whatsapp.net")
+            .with_attr("type", "privacy_token")
+            .with_content(vec![BinaryNode::new("tokens").with_content(vec![
+                BinaryNode::new("token")
+                    .with_attr("t", "1700000001")
+                    .with_attr("type", TRUSTED_CONTACT_TOKEN_TYPE)
+                    .with_content(Bytes::from_static(b"peer-token")),
+            ])]);
+
+        let stored =
+            store_tc_tokens_from_privacy_token_notification(&store, &notification, Some("abc@lid"))
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                TcTokenRecord::new("abc@lid", Bytes::from_static(b"peer-token"))
+                    .unwrap()
+                    .with_timestamp_seconds(1_700_000_001)
+                    .with_sender_timestamp_seconds(1_700_000_000)
+            ]
+        );
+        assert_eq!(
+            load_tc_token(&store, "abc@lid").await.unwrap(),
+            stored.into_iter().next()
         );
     }
 

@@ -251,7 +251,7 @@ impl BusinessProductImage {
     pub fn new(url: impl Into<String>) -> CoreResult<Self> {
         let url = url.into();
         Ok(Self {
-            url: validate_non_empty("business product image URL", &url)?.to_owned(),
+            url: validate_business_media_url("business product image URL", &url)?.to_owned(),
         })
     }
 }
@@ -265,7 +265,7 @@ impl BusinessCoverPhoto {
     pub fn new(url: impl Into<String>) -> CoreResult<Self> {
         let url = url.into();
         Ok(Self {
-            url: validate_non_empty("business cover photo URL", &url)?.to_owned(),
+            url: validate_business_media_url("business cover photo URL", &url)?.to_owned(),
         })
     }
 }
@@ -1027,7 +1027,7 @@ fn product_update_node_without_id(update: BusinessProductUpdate) -> CoreResult<B
                     .map(|image| {
                         Ok(BinaryNode::new("image").with_content(vec![text_node(
                             "url",
-                            validate_non_empty("business product image URL", &image.url)
+                            validate_business_media_url("business product image URL", &image.url)
                                 .map(str::to_owned)?,
                         )]))
                     })
@@ -1092,11 +1092,23 @@ fn business_media_url_from_uploaded_media(
     media: &UploadedMedia,
     fallback_host: Option<&str>,
 ) -> CoreResult<String> {
-    media_download_url(
+    if let Some(direct_path) = media.direct_path.as_deref()
+        && !direct_path.is_empty()
+    {
+        validate_business_media_direct_path(direct_path)?;
+        if let Some(host) = fallback_host
+            && !host.is_empty()
+        {
+            validate_business_media_host(host)?;
+        }
+    }
+    let url = media_download_url(
         media.direct_path.as_deref(),
         media.url.as_deref(),
         fallback_host,
-    )
+    )?;
+    validate_business_media_url("business media URL", &url)?;
+    Ok(url)
 }
 
 fn business_cover_photo_mutation_query(
@@ -1261,6 +1273,55 @@ fn validate_non_negative_price(price: i64) -> CoreResult<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_business_media_url<'a>(label: &str, value: &'a str) -> CoreResult<&'a str> {
+    let value = validate_non_empty(label, value)?;
+    if value.bytes().any(is_ascii_url_separator) {
+        return Err(CoreError::Payload(format!(
+            "{label} must not contain whitespace or control characters"
+        )));
+    }
+    let Some(rest) = value.strip_prefix("https://") else {
+        return Err(CoreError::Payload(format!("{label} must be an HTTPS URL")));
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    if host.is_empty() {
+        return Err(CoreError::Payload(format!("{label} must include a host")));
+    }
+    Ok(value)
+}
+
+fn validate_business_media_direct_path(value: &str) -> CoreResult<&str> {
+    let value = validate_non_empty("business media direct path", value)?;
+    if !value.starts_with('/') {
+        return Err(CoreError::Payload(
+            "business media direct path must start with '/'".to_owned(),
+        ));
+    }
+    if value.bytes().any(is_ascii_url_separator) {
+        return Err(CoreError::Payload(
+            "business media direct path must not contain whitespace or control characters"
+                .to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_business_media_host(value: &str) -> CoreResult<&str> {
+    let value = validate_non_empty("business media fallback host", value)?;
+    if value.bytes().any(is_ascii_url_separator) || value.contains(['/', '?', '#']) {
+        return Err(CoreError::Payload(
+            "business media fallback host must be a host name without path, query, or fragment"
+                .to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+fn is_ascii_url_separator(byte: u8) -> bool {
+    byte <= b' ' || byte == 0x7f
 }
 
 fn validate_collection_limit(limit: u32, label: &str) -> CoreResult<()> {
@@ -1655,6 +1716,33 @@ mod tests {
 
         assert!(business_cover_photo_upload_from_location(&UploadedMediaLocation::new()).is_err());
         assert!(business_cover_photo_from_uploaded_media(&sample_uploaded_media(), None).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_business_media_urls() {
+        assert!(BusinessProductImage::new("http://cdn.test/image").is_err());
+        assert!(BusinessProductImage::new("https:///image").is_err());
+        assert!(BusinessProductImage::new("https://cdn.test/bad image").is_err());
+        assert!(BusinessCoverPhoto::new("ftp://cdn.test/cover").is_err());
+
+        let invalid_url = sample_uploaded_media().with_url("http://cdn.test/image");
+        assert!(business_product_image_from_uploaded_media(&invalid_url, None).is_err());
+
+        let invalid_direct_path = sample_uploaded_media().with_direct_path("product/image/1");
+        assert!(
+            business_product_image_from_uploaded_media(&invalid_direct_path, Some("media.test"))
+                .is_err()
+        );
+
+        let media = sample_uploaded_media().with_direct_path("/product/image/1");
+        assert!(
+            business_product_image_from_uploaded_media(&media, Some("media.test/path")).is_err()
+        );
+
+        let update = BusinessProductUpdate::new().with_images([BusinessProductImage {
+            url: "http://cdn.test/image".to_owned(),
+        }]);
+        assert!(build_business_product_update_query("sku-1", update, "q").is_err());
     }
 
     #[test]

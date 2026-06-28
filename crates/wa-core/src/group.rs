@@ -88,6 +88,7 @@ pub struct GroupParticipantChange {
     pub jid: String,
     pub status: u16,
     pub error_code: Option<u16>,
+    pub content: Option<BinaryNode>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,6 +195,9 @@ impl GroupMutationKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupJoinRequest {
     pub jid: String,
+    pub phone_number: Option<String>,
+    pub lid: Option<String>,
+    pub username: Option<String>,
     pub requested_at: Option<u64>,
     pub request_method: Option<String>,
 }
@@ -569,6 +573,9 @@ pub fn parse_group_metadata(node: &BinaryNode) -> CoreResult<GroupMetadata> {
 }
 
 pub fn parse_group_participating_result(node: &BinaryNode) -> CoreResult<Vec<GroupMetadata>> {
+    if let Some(error) = error_from_result(node) {
+        return Err(error);
+    }
     let Some(groups_node) = child_node(node, "groups") else {
         return Ok(Vec::new());
     };
@@ -588,7 +595,7 @@ pub fn parse_group_participant_action_result(
     }
     let action_node = child_node(node, action.tag());
     let participants = action_node
-        .map(parse_participant_changes)
+        .map(|node| parse_participant_changes(node, true))
         .transpose()?
         .unwrap_or_default();
     Ok(GroupParticipantActionResult {
@@ -609,9 +616,31 @@ pub fn parse_group_accept_invite_result(node: &BinaryNode) -> CoreResult<Option<
     if let Some(error) = error_from_result(node) {
         return Err(error);
     }
-    Ok(child_node(node, "group")
+    child_node(node, "group")
         .and_then(|group| group.attrs.get("jid").or_else(|| group.attrs.get("id")))
-        .cloned())
+        .or_else(|| node.attrs.get("jid"))
+        .map(|jid| group_jid_from_id(jid))
+        .transpose()
+}
+
+pub fn parse_group_invite_v4_accept_result(node: &BinaryNode) -> CoreResult<Option<String>> {
+    if let Some(error) = error_from_result(node) {
+        return Err(error);
+    }
+    if node
+        .attrs
+        .get("type")
+        .is_some_and(|value| value != "result")
+    {
+        return Ok(None);
+    }
+    node.attrs
+        .get("from")
+        .or_else(|| node.attrs.get("jid"))
+        .or_else(|| child_node(node, "group").and_then(|group| group.attrs.get("jid")))
+        .or_else(|| child_node(node, "group").and_then(|group| group.attrs.get("id")))
+        .map(|jid| group_jid_from_id(jid))
+        .transpose()
 }
 
 pub fn parse_group_invite_v4_result(node: &BinaryNode) -> CoreResult<bool> {
@@ -668,8 +697,17 @@ pub fn parse_group_join_requests(node: &BinaryNode) -> CoreResult<Vec<GroupJoinR
             validate_participant_jid(jid)?;
             Ok(GroupJoinRequest {
                 jid: jid.clone(),
+                phone_number: attr_participant_jid_alias(
+                    request,
+                    &["phone_number", "phoneNumber", "pn", "pn_jid", "pnJid"],
+                )?,
+                lid: attr_participant_jid_alias(request, &["lid", "lid_jid", "lidJid"])?,
+                username: attr_alias(
+                    request,
+                    &["participant_username", "participantUsername", "username"],
+                ),
                 requested_at: optional_u64_attr(request, "t")?,
-                request_method: request.attrs.get("request_method").cloned(),
+                request_method: attr_alias(request, &["request_method", "requestMethod", "method"]),
             })
         })
         .collect()
@@ -685,7 +723,7 @@ pub fn parse_group_join_request_action_result(
     let action_node = child_node(node, "membership_requests_action")
         .and_then(|wrapper| child_node(wrapper, action.tag()));
     let participants = action_node
-        .map(parse_participant_changes)
+        .map(|node| parse_participant_changes(node, false))
         .transpose()?
         .unwrap_or_default();
     Ok(GroupJoinRequestActionResult {
@@ -712,12 +750,7 @@ fn parse_group_node(group: &BinaryNode) -> CoreResult<GroupMetadata> {
     let id = group.attrs.get("id").ok_or_else(|| {
         CoreError::Protocol("group metadata response missing group id".to_owned())
     })?;
-    let group_jid = if id.contains('@') {
-        id.clone()
-    } else {
-        jid_encode(id, JidServer::GUs, None, None)
-    };
-    validate_group_jid(&group_jid)?;
+    let group_jid = group_jid_from_id(id)?;
 
     let description_node = child_node(group, "description");
     let description = description_node.and_then(|node| child_text(node, "body"));
@@ -748,15 +781,16 @@ fn parse_group_node(group: &BinaryNode) -> CoreResult<GroupMetadata> {
         .map(|node| optional_u32_attr(node, "expiration"))
         .transpose()?
         .flatten();
+    let addressing_mode = group
+        .attrs
+        .get("addressing_mode")
+        .cloned()
+        .or_else(|| child_node(group, "addressing_mode").and_then(node_text));
 
     Ok(GroupMetadata {
         jid: group_jid,
         notify: group.attrs.get("notify").cloned(),
-        addressing_mode: if group
-            .attrs
-            .get("addressing_mode")
-            .is_some_and(|value| value == "lid")
-        {
+        addressing_mode: if addressing_mode.as_deref() == Some("lid") {
             GroupAddressingMode::Lid
         } else {
             GroupAddressingMode::PhoneNumber
@@ -787,7 +821,12 @@ fn parse_group_node(group: &BinaryNode) -> CoreResult<GroupMetadata> {
         description_owner_username,
         description_time,
         linked_parent: child_node(group, "linked_parent")
-            .and_then(|node| node.attrs.get("jid").cloned()),
+            .and_then(|node| node.attrs.get("jid"))
+            .map(|jid| {
+                validate_group_jid(jid)?;
+                Ok::<String, CoreError>(jid.clone())
+            })
+            .transpose()?,
         restrict: child_node(group, "locked").is_some(),
         announce: child_node(group, "announcement").is_some(),
         is_community: child_node(group, "parent").is_some(),
@@ -809,13 +848,15 @@ fn parse_group_participant(node: &BinaryNode) -> CoreResult<GroupParticipant> {
     validate_participant_jid(jid)?;
     Ok(GroupParticipant {
         jid: jid.clone(),
-        phone_number: node.attrs.get("phone_number").cloned(),
-        lid: node.attrs.get("lid").cloned(),
-        username: node
-            .attrs
-            .get("participant_username")
-            .or_else(|| node.attrs.get("username"))
-            .cloned(),
+        phone_number: attr_participant_jid_alias(
+            node,
+            &["phone_number", "phoneNumber", "pn", "pn_jid", "pnJid"],
+        )?,
+        lid: attr_participant_jid_alias(node, &["lid", "lid_jid", "lidJid"])?,
+        username: attr_alias(
+            node,
+            &["participant_username", "participantUsername", "username"],
+        ),
         role: match node.attrs.get("type").map(String::as_str) {
             Some("superadmin") => GroupParticipantRole::SuperAdmin,
             Some("admin") => GroupParticipantRole::Admin,
@@ -824,7 +865,10 @@ fn parse_group_participant(node: &BinaryNode) -> CoreResult<GroupParticipant> {
     })
 }
 
-fn parse_participant_changes(node: &BinaryNode) -> CoreResult<Vec<GroupParticipantChange>> {
+fn parse_participant_changes(
+    node: &BinaryNode,
+    include_content: bool,
+) -> CoreResult<Vec<GroupParticipantChange>> {
     child_nodes(node)
         .iter()
         .filter(|child| child.tag == "participant")
@@ -841,6 +885,7 @@ fn parse_participant_changes(node: &BinaryNode) -> CoreResult<Vec<GroupParticipa
                 jid: jid.clone(),
                 status,
                 error_code,
+                content: include_content.then(|| (*participant).clone()),
             })
         })
         .collect()
@@ -858,6 +903,16 @@ where
             Ok(BinaryNode::new("participant").with_attr("jid", participant))
         })
         .collect()
+}
+
+fn group_jid_from_id(id: &str) -> CoreResult<String> {
+    let jid = if id.contains('@') {
+        id.to_owned()
+    } else {
+        jid_encode(id, JidServer::GUs, None, None)
+    };
+    validate_group_jid(&jid)?;
+    Ok(jid)
 }
 
 fn group_node_from_result(node: &BinaryNode) -> CoreResult<&BinaryNode> {
@@ -954,6 +1009,19 @@ fn child_node<'a>(node: &'a BinaryNode, tag: &str) -> Option<&'a BinaryNode> {
 
 fn child_text(node: &BinaryNode, child_tag: &str) -> Option<String> {
     child_node(node, child_tag).and_then(node_text)
+}
+
+fn attr_alias(node: &BinaryNode, attrs: &[&str]) -> Option<String> {
+    attrs.iter().find_map(|attr| node.attrs.get(*attr).cloned())
+}
+
+fn attr_participant_jid_alias(node: &BinaryNode, attrs: &[&str]) -> CoreResult<Option<String>> {
+    attr_alias(node, attrs)
+        .map(|jid| {
+            validate_participant_jid(&jid)?;
+            Ok(jid)
+        })
+        .transpose()
 }
 
 fn node_text(node: &BinaryNode) -> Option<String> {
@@ -1141,7 +1209,9 @@ mod tests {
                         .with_attr("lid", "abc@lid"),
                     BinaryNode::new("participant")
                         .with_attr("jid", "222@lid")
-                        .with_attr("username", "two"),
+                        .with_attr("phoneNumber", "222@s.whatsapp.net")
+                        .with_attr("lid_jid", "222@lid")
+                        .with_attr("participantUsername", "two"),
                 ]),
         ]);
 
@@ -1163,7 +1233,42 @@ mod tests {
         assert_eq!(metadata.participants.len(), 2);
         assert_eq!(metadata.participants[0].role, GroupParticipantRole::Admin);
         assert_eq!(metadata.participants[0].lid.as_deref(), Some("abc@lid"));
+        assert_eq!(
+            metadata.participants[1].phone_number.as_deref(),
+            Some("222@s.whatsapp.net")
+        );
+        assert_eq!(metadata.participants[1].lid.as_deref(), Some("222@lid"));
         assert_eq!(metadata.participants[1].username.as_deref(), Some("two"));
+
+        let participating_error = BinaryNode::new("iq")
+            .with_attr("type", "error")
+            .with_attr("code", "503")
+            .with_attr("text", "groups unavailable");
+        assert!(matches!(
+            parse_group_participating_result(&participating_error),
+            Err(CoreError::Protocol(message))
+                if message == "group query failed (503): groups unavailable"
+        ));
+
+        let invalid_participant_alias = BinaryNode::new("iq").with_content(vec![
+            BinaryNode::new("group")
+                .with_attr("id", "123")
+                .with_content(vec![
+                    BinaryNode::new("participant")
+                        .with_attr("jid", "111@s.whatsapp.net")
+                        .with_attr("phoneNumber", "not-a-jid"),
+                ]),
+        ]);
+        assert!(parse_group_metadata(&invalid_participant_alias).is_err());
+
+        let invalid_linked_parent = BinaryNode::new("iq").with_content(vec![
+            BinaryNode::new("group")
+                .with_attr("id", "123")
+                .with_content(vec![
+                    BinaryNode::new("linked_parent").with_attr("jid", "111@s.whatsapp.net"),
+                ]),
+        ]);
+        assert!(parse_group_metadata(&invalid_linked_parent).is_err());
     }
 
     #[test]
@@ -1181,23 +1286,45 @@ mod tests {
         assert_eq!(result.participants[0].status, SUCCESS_STATUS);
         assert_eq!(result.participants[1].status, 403);
         assert_eq!(result.participants[1].error_code, Some(403));
+        assert_eq!(
+            result.participants[1]
+                .content
+                .as_ref()
+                .and_then(|node| node.attrs.get("error"))
+                .map(String::as_str),
+            Some("403")
+        );
 
         let requests = BinaryNode::new("iq").with_content(vec![
             BinaryNode::new("membership_approval_requests").with_content(vec![
                 BinaryNode::new("membership_approval_request")
                     .with_attr("jid", "333@s.whatsapp.net")
+                    .with_attr("phoneNumber", "333@s.whatsapp.net")
+                    .with_attr("lidJid", "333@lid")
+                    .with_attr("participantUsername", "three")
                     .with_attr("t", "55")
-                    .with_attr("request_method", "invite_link"),
+                    .with_attr("requestMethod", "invite_link"),
             ]),
         ]);
         assert_eq!(
             parse_group_join_requests(&requests).unwrap(),
             vec![GroupJoinRequest {
                 jid: "333@s.whatsapp.net".to_owned(),
+                phone_number: Some("333@s.whatsapp.net".to_owned()),
+                lid: Some("333@lid".to_owned()),
+                username: Some("three".to_owned()),
                 requested_at: Some(55),
                 request_method: Some("invite_link".to_owned()),
             }]
         );
+        let invalid_request_alias = BinaryNode::new("iq").with_content(vec![
+            BinaryNode::new("membership_approval_requests").with_content(vec![
+                BinaryNode::new("membership_approval_request")
+                    .with_attr("jid", "333@s.whatsapp.net")
+                    .with_attr("lidJid", "not-a-jid"),
+            ]),
+        ]);
+        assert!(parse_group_join_requests(&invalid_request_alias).is_err());
 
         let action = BinaryNode::new("iq").with_content(vec![
             BinaryNode::new("membership_requests_action").with_content(vec![
@@ -1211,6 +1338,7 @@ mod tests {
                 .unwrap();
         assert_eq!(action_result.participants.len(), 1);
         assert_eq!(action_result.participants[0].status, SUCCESS_STATUS);
+        assert!(action_result.participants[0].content.is_none());
 
         assert!(
             parse_group_invite_v4_result(
@@ -1227,6 +1355,35 @@ mod tests {
                     .with_content(vec![BinaryNode::new("revoke")])
             )
             .unwrap()
+        );
+        assert_eq!(
+            parse_group_invite_v4_accept_result(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_attr("from", "123@g.us")
+                    .with_content(vec![BinaryNode::new("accept")])
+            )
+            .unwrap()
+            .as_deref(),
+            Some("123@g.us")
+        );
+        assert_eq!(
+            parse_group_invite_v4_accept_result(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("group").with_attr("id", "456")])
+            )
+            .unwrap()
+            .as_deref(),
+            Some("456@g.us")
+        );
+        assert!(
+            parse_group_invite_v4_accept_result(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_attr("from", "111@s.whatsapp.net")
+            )
+            .is_err()
         );
     }
 

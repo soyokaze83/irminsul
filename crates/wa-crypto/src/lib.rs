@@ -14,11 +14,12 @@ pub use app_state::{
     encrypt_app_state_value_with_iv,
 };
 pub use keys::{
-    KeyPair, SIGNAL_PUBLIC_KEY_VERSION, generate_key_pair, prefixed_signal_public_key, shared_key,
-    sign_x25519,
+    KeyPair, SIGNAL_PUBLIC_KEY_VERSION, generate_key_pair, prefixed_signal_public_key,
+    public_key_from_private, shared_key, sign_x25519, verify_curve25519_signature,
 };
 pub use media::{
-    EncryptedMedia, MediaKeyMaterial, MediaKind, MediaRetryPayload, decrypt_media_bytes,
+    EncryptedMedia, MediaEncryptionMetadata, MediaKeyMaterial, MediaKind, MediaRetryPayload,
+    MediaStreamDecryptor, MediaStreamEncryptFinal, MediaStreamEncryptor, decrypt_media_bytes,
     decrypt_media_retry_notification, derive_media_keys, derive_media_retry_key,
     encrypt_media_bytes, encrypt_media_bytes_with_key, encrypt_media_retry_notification_with_iv,
     encrypt_media_retry_request, encrypt_media_retry_request_with_iv, generate_media_key,

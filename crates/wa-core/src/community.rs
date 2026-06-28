@@ -1,9 +1,10 @@
 use crate::group::{
     GroupInviteV4, GroupJoinApprovalMode, GroupJoinRequest, GroupJoinRequestAction,
     GroupJoinRequestActionResult, GroupMemberAddMode, GroupMetadata, GroupParticipantAction,
-    GroupParticipantActionResult, GroupSettingUpdate, parse_group_accept_invite_result,
-    parse_group_invite_code, parse_group_invite_v4_result, parse_group_join_request_action_result,
-    parse_group_join_requests, parse_group_metadata, parse_group_participant_action_result,
+    GroupParticipantActionResult, GroupSettingUpdate, parse_group_invite_code,
+    parse_group_invite_v4_accept_result, parse_group_invite_v4_result,
+    parse_group_join_request_action_result, parse_group_join_requests, parse_group_metadata,
+    parse_group_participant_action_result,
 };
 use crate::{CoreError, CoreResult};
 use bytes::Bytes;
@@ -21,6 +22,13 @@ pub struct CommunityLinkedGroup {
     pub creation: Option<u64>,
     pub owner: Option<String>,
     pub size: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommunityLinkedGroups {
+    pub community_jid: String,
+    pub is_community: bool,
+    pub linked_groups: Vec<CommunityLinkedGroup>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -478,16 +486,54 @@ pub fn parse_community_metadata(node: &BinaryNode) -> CoreResult<GroupMetadata> 
     parse_community_node(community)
 }
 
+pub fn parse_community_create_result_jid(node: &BinaryNode) -> CoreResult<Option<String>> {
+    if let Some(error) = error_from_result(node) {
+        return Err(error);
+    }
+    if let Some(id) = create_result_child_id(node, "group", "group")? {
+        return community_jid_from_id(id).map(Some);
+    }
+    if let Some(community) = child_node(node, "community")
+        && community.content.is_none()
+        && !community.attrs.contains_key("subject")
+    {
+        let id = create_result_node_id(community, "community")?;
+        return community_jid_from_id(id).map(Some);
+    }
+    if let Some(id) = node.attrs.get("from").or_else(|| node.attrs.get("jid")) {
+        return community_jid_from_id(id).map(Some);
+    }
+    Ok(None)
+}
+
+fn create_result_child_id<'a>(
+    node: &'a BinaryNode,
+    tag: &str,
+    label: &str,
+) -> CoreResult<Option<&'a str>> {
+    child_node(node, tag)
+        .map(|child| create_result_node_id(child, label))
+        .transpose()
+}
+
+fn create_result_node_id<'a>(node: &'a BinaryNode, label: &str) -> CoreResult<&'a str> {
+    node.attrs
+        .get("jid")
+        .or_else(|| node.attrs.get("id"))
+        .map(String::as_str)
+        .ok_or_else(|| CoreError::Protocol(format!("community create response {label} missing id")))
+}
+
 pub fn parse_community_participating_result(node: &BinaryNode) -> CoreResult<Vec<GroupMetadata>> {
     if let Some(error) = error_from_result(node) {
         return Err(error);
     }
-    let Some(communities_node) = child_node(node, "communities") else {
+    let Some(communities_node) = first_child_node(node, &["communities", "groups"]) else {
         return Ok(Vec::new());
     };
     child_nodes(communities_node)
         .iter()
-        .filter(|child| child.tag == "community")
+        .filter(|child| child.tag == "community" || child.tag == "group")
         .map(parse_community_node)
         .collect()
 }
@@ -496,12 +542,15 @@ pub fn parse_community_linked_groups(node: &BinaryNode) -> CoreResult<Vec<Commun
     if let Some(error) = error_from_result(node) {
         return Err(error);
     }
-    let Some(sub_groups) = child_node(node, "sub_groups") else {
+    let Some(sub_groups) = first_child_node(node, &["sub_groups", "linked_groups", "groups"])
+    else {
         return Ok(Vec::new());
     };
     child_nodes(sub_groups)
         .iter()
-        .filter(|child| child.tag == "group")
+        .filter(|child| {
+            child.tag == "group" || child.tag == "community" || child.tag == "linked_group"
+        })
         .map(parse_linked_group)
         .collect()
 }
@@ -528,12 +577,36 @@ pub fn parse_community_invite_code(node: &BinaryNode) -> CoreResult<Option<Strin
     parse_group_invite_code(node)
 }
 
+pub fn parse_community_invite_info_result(node: &BinaryNode) -> CoreResult<GroupMetadata> {
+    if node.tag == "group" || child_node(node, "group").is_some() {
+        parse_group_metadata(node)
+    } else {
+        parse_community_metadata(node)
+    }
+}
+
 pub fn parse_community_accept_invite_result(node: &BinaryNode) -> CoreResult<Option<String>> {
-    parse_group_accept_invite_result(node)
+    if let Some(error) = error_from_result(node) {
+        return Err(error);
+    }
+    child_node(node, "community")
+        .and_then(|community| {
+            community
+                .attrs
+                .get("jid")
+                .or_else(|| community.attrs.get("id"))
+        })
+        .or_else(|| node.attrs.get("jid"))
+        .map(|jid| community_jid_from_id(jid))
+        .transpose()
 }
 
 pub fn parse_community_invite_v4_result(node: &BinaryNode) -> CoreResult<bool> {
     parse_group_invite_v4_result(node)
+}
+
+pub fn parse_community_invite_v4_accept_result(node: &BinaryNode) -> CoreResult<Option<String>> {
+    parse_group_invite_v4_accept_result(node)
 }
 
 pub fn parse_community_mutation_result(
@@ -611,6 +684,16 @@ fn parse_linked_group(node: &BinaryNode) -> CoreResult<CommunityLinkedGroup> {
             .transpose()?,
         size: optional_usize_attr(node, "size")?,
     })
+}
+
+fn community_jid_from_id(id: &str) -> CoreResult<String> {
+    let jid = if id.contains('@') {
+        id.to_owned()
+    } else {
+        jid_encode(id, JidServer::GUs, None, None)
+    };
+    validate_group_jid(&jid)?;
+    Ok(jid)
 }
 
 fn community_node_from_result(node: &BinaryNode) -> CoreResult<&BinaryNode> {
@@ -727,6 +810,10 @@ fn child_node<'a>(node: &'a BinaryNode, tag: &str) -> Option<&'a BinaryNode> {
     child_nodes(node).iter().find(|child| child.tag == tag)
 }
 
+fn first_child_node<'a>(node: &'a BinaryNode, tags: &[&str]) -> Option<&'a BinaryNode> {
+    tags.iter().find_map(|tag| child_node(node, tag))
+}
+
 fn optional_u64_attr(node: &BinaryNode, attr: &str) -> CoreResult<Option<u64>> {
     node.attrs
         .get(attr)
@@ -838,6 +925,141 @@ mod tests {
         let invite = build_community_accept_invite_query("code", "q-6").unwrap();
         assert_eq!(invite.attrs["to"], COMMUNITY_COLLECTION_JID);
         assert_eq!(child_node(&invite, "invite").unwrap().attrs["code"], "code");
+        assert_eq!(
+            parse_community_accept_invite_result(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![
+                        BinaryNode::new("community").with_attr("jid", "123@g.us"),
+                    ])
+            )
+            .unwrap()
+            .as_deref(),
+            Some("123@g.us")
+        );
+        assert_eq!(
+            parse_community_accept_invite_result(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("community").with_attr("id", "456")])
+            )
+            .unwrap()
+            .as_deref(),
+            Some("456@g.us")
+        );
+        assert!(
+            parse_community_accept_invite_result(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![
+                        BinaryNode::new("community").with_attr("jid", "111@s.whatsapp.net"),
+                    ])
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("group").with_attr("id", "456")])
+            )
+            .unwrap()
+            .as_deref(),
+            Some("456@g.us")
+        );
+        assert_eq!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("group").with_attr("jid", "789@g.us")])
+            )
+            .unwrap()
+            .as_deref(),
+            Some("789@g.us")
+        );
+        assert!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![
+                        BinaryNode::new("group").with_attr("jid", "111@s.whatsapp.net")
+                    ])
+            )
+            .is_err()
+        );
+        assert!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("group")])
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("community").with_attr("id", "654")])
+            )
+            .unwrap()
+            .as_deref(),
+            Some("654@g.us")
+        );
+        assert_eq!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_attr("from", "987@g.us")
+            )
+            .unwrap()
+            .as_deref(),
+            Some("987@g.us")
+        );
+        assert_eq!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_attr("jid", "988@g.us")
+            )
+            .unwrap()
+            .as_deref(),
+            Some("988@g.us")
+        );
+        assert_eq!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![
+                        BinaryNode::new("community")
+                            .with_attr("id", "555")
+                            .with_attr("subject", "Full metadata")
+                            .with_content(vec![BinaryNode::new("parent")])
+                    ])
+            )
+            .unwrap(),
+            None
+        );
+        assert!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("community")])
+            )
+            .is_err()
+        );
+        assert!(
+            parse_community_create_result_jid(
+                &BinaryNode::new("iq")
+                    .with_attr("type", "result")
+                    .with_attr("from", "111@s.whatsapp.net")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_community_create_result_jid(&BinaryNode::new("iq").with_attr("type", "result"))
+                .unwrap(),
+            None
+        );
 
         let v4 = GroupInviteV4::new("123@g.us", "code", 1700, "111@s.whatsapp.net").unwrap();
         let accept_v4 = build_community_accept_invite_v4_query(&v4, "q-7").unwrap();
@@ -858,6 +1080,7 @@ mod tests {
                 .with_content(vec![
                     BinaryNode::new("parent"),
                     BinaryNode::new("default_sub_community"),
+                    BinaryNode::new("addressing_mode").with_content("lid"),
                     BinaryNode::new("description")
                         .with_attr("id", "desc-1")
                         .with_content(vec![BinaryNode::new("body").with_content("Daily")]),
@@ -870,6 +1093,10 @@ mod tests {
         assert_eq!(metadata.jid, "123@g.us");
         assert_eq!(metadata.subject.as_deref(), Some("Updates"));
         assert_eq!(metadata.description.as_deref(), Some("Daily"));
+        assert_eq!(
+            metadata.addressing_mode,
+            crate::group::GroupAddressingMode::Lid
+        );
         assert!(metadata.is_community);
         assert!(metadata.is_community_announce);
         assert_eq!(metadata.participants.len(), 1);
@@ -886,6 +1113,31 @@ mod tests {
         let communities = parse_community_participating_result(&participating).unwrap();
         assert_eq!(communities.len(), 1);
         assert_eq!(communities[0].subject.as_deref(), Some("One"));
+
+        let group_wrapped_participating =
+            BinaryNode::new("iq").with_content(vec![BinaryNode::new("groups").with_content(vec![
+                BinaryNode::new("group")
+                    .with_attr("id", "124")
+                    .with_attr("subject", "Group-shaped community")
+                    .with_content(vec![
+                        BinaryNode::new("parent"),
+                        BinaryNode::new("default_sub_group"),
+                        BinaryNode::new("participant")
+                            .with_attr("jid", "222@s.whatsapp.net")
+                            .with_attr("type", "admin"),
+                    ]),
+            ])]);
+        let communities =
+            parse_community_participating_result(&group_wrapped_participating).unwrap();
+        assert_eq!(communities.len(), 1);
+        assert_eq!(communities[0].jid, "124@g.us");
+        assert_eq!(
+            communities[0].subject.as_deref(),
+            Some("Group-shaped community")
+        );
+        assert!(communities[0].is_community);
+        assert!(communities[0].is_community_announce);
+        assert_eq!(communities[0].participants.len(), 1);
 
         let linked =
             BinaryNode::new("iq").with_content(vec![BinaryNode::new("sub_groups").with_content(
@@ -904,6 +1156,76 @@ mod tests {
         assert_eq!(groups[0].owner.as_deref(), Some("222@s.whatsapp.net"));
         assert_eq!(groups[0].creation, Some(10));
         assert_eq!(groups[0].size, Some(7));
+
+        let linked_alias = BinaryNode::new("iq").with_content(vec![
+            BinaryNode::new("linked_groups").with_content(vec![
+                BinaryNode::new("linked_group")
+                    .with_attr("jid", "457@g.us")
+                    .with_attr("subject", "Alias Chat")
+                    .with_attr("creator", "223@c.us")
+                    .with_attr("creation", "11")
+                    .with_attr("size", "8"),
+            ]),
+        ]);
+        let groups = parse_community_linked_groups(&linked_alias).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].jid, "457@g.us");
+        assert_eq!(groups[0].subject.as_deref(), Some("Alias Chat"));
+        assert_eq!(groups[0].owner.as_deref(), Some("223@s.whatsapp.net"));
+        assert_eq!(groups[0].creation, Some(11));
+        assert_eq!(groups[0].size, Some(8));
+
+        let groups_alias =
+            BinaryNode::new("iq").with_content(vec![BinaryNode::new("groups").with_content(vec![
+                BinaryNode::new("community")
+                    .with_attr("id", "458")
+                    .with_attr("subject", "Community Alias")
+                    .with_attr("creator", "224@c.us"),
+            ])]);
+        let groups = parse_community_linked_groups(&groups_alias).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].jid, "458@g.us");
+        assert_eq!(groups[0].subject.as_deref(), Some("Community Alias"));
+        assert_eq!(groups[0].owner.as_deref(), Some("224@s.whatsapp.net"));
+
+        let community_invite_info = BinaryNode::new("iq").with_content(vec![
+            BinaryNode::new("community")
+                .with_attr("id", "459")
+                .with_attr("subject", "Invite Community")
+                .with_content(vec![BinaryNode::new("parent")]),
+        ]);
+        let invite_info = parse_community_invite_info_result(&community_invite_info).unwrap();
+        assert_eq!(invite_info.jid, "459@g.us");
+        assert_eq!(invite_info.subject.as_deref(), Some("Invite Community"));
+        assert!(invite_info.is_community);
+
+        let group_invite_info = BinaryNode::new("iq").with_content(vec![
+            BinaryNode::new("group")
+                .with_attr("id", "460")
+                .with_attr("subject", "Group-shaped invite")
+                .with_attr("addressing_mode", "lid")
+                .with_content(vec![
+                    BinaryNode::new("parent"),
+                    BinaryNode::new("participant")
+                        .with_attr("jid", "225@s.whatsapp.net")
+                        .with_attr("type", "admin"),
+                ]),
+        ]);
+        let invite_info = parse_community_invite_info_result(&group_invite_info).unwrap();
+        assert_eq!(invite_info.jid, "460@g.us");
+        assert_eq!(invite_info.subject.as_deref(), Some("Group-shaped invite"));
+        assert_eq!(
+            invite_info.addressing_mode,
+            crate::group::GroupAddressingMode::Lid
+        );
+        assert!(invite_info.is_community);
+        assert_eq!(invite_info.participants.len(), 1);
+
+        let error = BinaryNode::new("iq")
+            .with_attr("type", "error")
+            .with_attr("code", "404")
+            .with_attr("text", "missing");
+        assert!(parse_community_invite_info_result(&error).is_err());
     }
 
     #[test]

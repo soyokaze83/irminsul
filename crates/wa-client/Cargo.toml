@@ -16,19 +16,143 @@ rustls = ["websocket", "wa-core/rustls"]
 native-tls = ["websocket", "wa-core/native-tls"]
 noise = ["wa-core/noise"]
 http-media = ["noise", "wa-core/http-media"]
+image = ["wa-core/image"]
+link-preview = ["noise", "wa-core/link-preview"]
+
+# Test-partition feature gates. The in-crate `mod tests` is split into
+# memory-bounded chunks (each `mod chunk_K` is gated behind `watK`) so that the
+# test build of wa-client compiles within the VM RAM budget (3.8GB, no swap).
+# Building the whole test module as one rustc unit OOM-SIGKILLs (~3.9GB peak).
+# Run one chunk at a time; see tools/run_wa_client_tests.sh.
+wat1 = []
+wat2 = []
+wat3 = []
+wat4 = []
+wat5 = []
+wat6 = []
+wat7 = []
+wat8 = []
 
 [dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+prost.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 wa-core = { path = "../wa-core", default-features = false }
 wa-binary = { path = "../wa-binary" }
 wa-store = { path = "../wa-store", default-features = false }
 
 [dev-dependencies]
-async-trait.workspace = true
-bytes.workspace = true
 flate2.workspace = true
-prost.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 wa-crypto = { path = "../wa-crypto" }
 wa-proto = { path = "../wa-proto" }
+
+[[example]]
+name = "session_pairing"
+path = "examples/session_pairing.rs"
+required-features = ["sqlite-store", "noise"]
+
+[[example]]
+name = "live_pairing_code"
+path = "examples/live_pairing_code.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_text"
+path = "examples/live_text.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_receive"
+path = "examples/live_receive.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_history_sync"
+path = "examples/live_history_sync.rs"
+required-features = ["sqlite-store", "noise", "websocket", "http-media"]
+
+[[example]]
+name = "live_chat_pin"
+path = "examples/live_chat_pin.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_media"
+path = "examples/live_media.rs"
+required-features = ["sqlite-store", "noise", "websocket", "http-media"]
+
+[[example]]
+name = "live_media_retry"
+path = "examples/live_media_retry.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_video_thumbnail"
+path = "examples/live_video_thumbnail.rs"
+required-features = ["sqlite-store", "noise", "websocket", "http-media", "image"]
+
+[[example]]
+name = "live_document_thumbnail"
+path = "examples/live_document_thumbnail.rs"
+required-features = ["sqlite-store", "noise", "websocket", "http-media", "image"]
+
+[[example]]
+name = "live_profile_picture"
+path = "examples/live_profile_picture.rs"
+required-features = ["sqlite-store", "noise", "websocket", "image"]
+
+[[example]]
+name = "live_link_preview"
+path = "examples/live_link_preview.rs"
+required-features = [
+    "sqlite-store",
+    "noise",
+    "websocket",
+    "http-media",
+    "link-preview",
+    "image",
+]
+
+[[example]]
+name = "live_generated_link_preview"
+path = "examples/live_generated_link_preview.rs"
+required-features = [
+    "sqlite-store",
+    "noise",
+    "websocket",
+    "http-media",
+    "link-preview",
+    "image",
+]
+
+[[example]]
+name = "live_status"
+path = "examples/live_status.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_group"
+path = "examples/live_group.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_group_send"
+path = "examples/live_group_send.rs"
+required-features = ["sqlite-store", "noise", "websocket"]
+
+[[example]]
+name = "live_business_media"
+path = "examples/live_business_media.rs"
+required-features = ["sqlite-store", "noise", "websocket", "http-media"]
+
+[[example]]
+name = "custom_auth_store"
+path = "examples/custom_auth_store.rs"
+
+[[test]]
+name = "live_e2e"
+path = "tests/live_e2e.rs"
+required-features = ["sqlite-store", "noise", "websocket"]

@@ -607,24 +607,31 @@ pub fn relay_recipients_from_device_jids(
         .transpose()?;
     let my_device = u32::from(my.device.unwrap_or(0));
     let mut recipients = Vec::with_capacity(devices.len());
+    let mut seen_jids = Vec::with_capacity(devices.len());
+    let mut seen_own_devices = Vec::new();
 
     for device in devices {
         let decoded = jid_decode(&device.jid).ok_or_else(|| {
             CoreError::Protocol(format!("invalid discovered device JID: {}", device.jid))
         })?;
+        if seen_jids.iter().any(|jid| jid == &device.jid) {
+            continue;
+        }
+        seen_jids.push(device.jid.clone());
+        let device_id = u32::from(decoded.device.unwrap_or(0));
         let is_own_user = decoded.user == my.user
             || my_lid_user
                 .as_ref()
                 .is_some_and(|lid_user| lid_user == &decoded.user);
-        if is_own_user && u32::from(decoded.device.unwrap_or(0)) == my_device {
-            continue;
-        }
-
-        recipients.push(if is_own_user {
-            MessageRelayRecipient::own_device(device.jid.clone())
+        if is_own_user {
+            if device_id == my_device || seen_own_devices.contains(&device_id) {
+                continue;
+            }
+            seen_own_devices.push(device_id);
+            recipients.push(MessageRelayRecipient::own_device(device.jid.clone()));
         } else {
-            MessageRelayRecipient::new(device.jid.clone())
-        });
+            recipients.push(MessageRelayRecipient::new(device.jid.clone()));
+        }
     }
 
     Ok(recipients)
@@ -710,7 +717,10 @@ fn encode_device_jid(
             JidServer::Hosted
         }
     } else {
-        domain_type.server(server)
+        match domain_type.server(server) {
+            JidServer::CUs => JidServer::SWhatsAppNet,
+            server => server,
+        }
     };
     let device_id = if device.id == 0 {
         None
@@ -1403,18 +1413,33 @@ mod tests {
                 is_hosted: false,
             },
             USyncDeviceJid {
-                jid: "ownlid:7@lid".to_owned(),
+                jid: "999:8@s.whatsapp.net".to_owned(),
                 key_index: Some(2),
                 is_hosted: false,
             },
             USyncDeviceJid {
-                jid: "ownlid:9@hosted.lid".to_owned(),
+                jid: "ownlid:8@lid".to_owned(),
                 key_index: Some(3),
+                is_hosted: false,
+            },
+            USyncDeviceJid {
+                jid: "ownlid:7@lid".to_owned(),
+                key_index: Some(4),
+                is_hosted: false,
+            },
+            USyncDeviceJid {
+                jid: "ownlid:9@hosted.lid".to_owned(),
+                key_index: Some(5),
                 is_hosted: true,
             },
             USyncDeviceJid {
                 jid: "123:1@s.whatsapp.net".to_owned(),
-                key_index: Some(4),
+                key_index: Some(6),
+                is_hosted: false,
+            },
+            USyncDeviceJid {
+                jid: "123:1@s.whatsapp.net".to_owned(),
+                key_index: Some(6),
                 is_hosted: false,
             },
         ];
@@ -1427,8 +1452,53 @@ mod tests {
             recipients,
             vec![
                 MessageRelayRecipient::own_device("999@s.whatsapp.net"),
+                MessageRelayRecipient::own_device("999:8@s.whatsapp.net"),
                 MessageRelayRecipient::own_device("ownlid:9@hosted.lid"),
                 MessageRelayRecipient::new("123:1@s.whatsapp.net"),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_c_us_device_results_to_s_whatsapp_net() {
+        let result = USyncQueryResult {
+            list: vec![USyncUserResult {
+                id: "123@c.us".to_owned(),
+                devices: Some(USyncDeviceInfo {
+                    device_list: vec![
+                        USyncDevice {
+                            id: 0,
+                            key_index: None,
+                            is_hosted: false,
+                        },
+                        USyncDevice {
+                            id: 4,
+                            key_index: Some(9),
+                            is_hosted: false,
+                        },
+                    ],
+                    key_index: None,
+                }),
+                ..USyncUserResult::default()
+            }],
+            side_list: Vec::new(),
+        };
+
+        let devices = extract_device_jids(&result, "999:7@s.whatsapp.net", None, false).unwrap();
+
+        assert_eq!(
+            devices,
+            vec![
+                USyncDeviceJid {
+                    jid: "123@s.whatsapp.net".to_owned(),
+                    key_index: None,
+                    is_hosted: false,
+                },
+                USyncDeviceJid {
+                    jid: "123:4@s.whatsapp.net".to_owned(),
+                    key_index: Some(9),
+                    is_hosted: false,
+                },
             ]
         );
     }

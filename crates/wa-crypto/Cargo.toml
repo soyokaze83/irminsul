@@ -12,6 +12,8 @@ aes-gcm.workspace = true
 bytes.workspace = true
 cbc = { workspace = true, features = ["alloc"] }
 ctr.workspace = true
+curve25519-dalek.workspace = true
+ed25519-dalek.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
 md-5.workspace = true
@@ -25,3 +27,6 @@ wa-proto = { path = "../wa-proto" }
 xeddsa.workspace = true
 x25519-dalek = { workspace = true, features = ["static_secrets", "getrandom"] }
 zeroize.workspace = true
+
+[dev-dependencies]
+proptest = "1.9.0"

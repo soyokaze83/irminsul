@@ -1,5 +1,39 @@
+//! High-level WhatsApp Web client facade.
+//!
+//! This crate wraps the protocol crates in an explicit `Client` API with typed
+//! events, auth stores, connection validation, message helpers, media helpers,
+//! and group/chat/account operations.
+//!
+//! WhatsApp Web is a private protocol and can change without notice. Treat live
+//! usage as experimental, keep session material private, and use accounts you
+//! control.
+//!
+//! ```no_run
+//! use wa_client::prelude::*;
+//!
+//! #[tokio::main(flavor = "current_thread")]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let store = SqliteAuthStore::open(".wa/session.sqlite").await?;
+//!     let client = Client::builder(store).connect().await?;
+//!     let _events = client.subscribe();
+//!
+//!     let qr_payload = client.pairing_qr_data("reference-from-server");
+//!     println!("QR payload bytes: {}", qr_payload.len());
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! See `docs/api_transition_guide.md` and the examples in
+//! `crates/wa-client/examples` for public workflow sketches.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "noise")]
+use async_trait::async_trait;
+#[cfg(feature = "noise")]
+use bytes::Bytes;
+#[cfg(feature = "noise")]
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "noise")]
 use std::{
@@ -7,37 +41,41 @@ use std::{
     sync::Arc,
 };
 #[cfg(feature = "noise")]
-use wa_binary::{jid_decode, jid_normalized_user};
+use wa_binary::{JidServer, jid_decode, jid_encode, jid_normalized_user};
 #[cfg(feature = "noise")]
 use wa_core::BinaryNodeContent;
+#[cfg(feature = "noise")]
+use wa_core::build_call_reject_node;
 #[cfg(feature = "noise")]
 use wa_core::{
     AccountJidKind, AppStatePatchBundle, AppStatePatchState, AuthCredentials, BlocklistAction,
     ChatMutationMessageRange, ChatMutationPatch, ConnectionValidation, ContactSyncAction,
     FrameSink, FrameStream, LabelEditMutation, LidPnMapping, LidPnMappingStore,
-    NoiseCertificateVerifier, PairingCodeRequest, PreKeyUpload, PresenceState, QuickReplyMutation,
-    RetryReceiptSessionBundle, RetryResendPreparation, RetryResendTarget, RetrySessionAction,
-    RetrySessionSnapshot, SignalRepository, SignedPreKey, SignedPreKeyRotation,
-    StoreSignalRepository, USyncDeviceJid, USyncLidMapping, ValidatedConnection,
-    XEdDsaNoiseCertificateVerifier, account_jid_kind, build_app_state_patch_bundle,
-    build_archive_chat_patch, build_blocklist_update_query, build_chat_label_association_patch,
-    build_chat_state_node, build_contact_patch, build_delete_chat_patch,
-    build_device_identity_node, build_device_query, build_e2e_session_query,
-    build_encrypted_media_retry_request_node, build_key_bundle_digest_query,
-    build_label_edit_patch, build_lid_mapping_query, build_mark_chat_read_patch,
-    build_message_label_association_patch, build_mute_chat_patch, build_pairing_code_request,
-    build_pairing_qr_data, build_pin_chat_patch, build_placeholder_resend_request_message,
-    build_pre_key_count_query, build_presence_update_node, build_push_name_patch,
-    build_quick_reply_patch, build_signed_pre_key_rotation, build_star_message_patch,
-    build_tc_token_issue_query, confirm_pre_key_upload, credentials_with_rotated_signed_pre_key,
-    current_pre_key_status, encrypt_chat_mutation_patch, extract_device_jids,
+    LinkCodeCompanionRegistration, NoiseCertificateVerifier, PairingCodeRequest, PreKeyUpload,
+    PresenceState, QuickReplyMutation, RetryReceiptSessionBundle, RetryResendPreparation,
+    RetryResendTarget, RetrySessionAction, RetrySessionSnapshot, SignalRepository, SignedPreKey,
+    SignedPreKeyRotation, StoreSignalRepository, USyncDeviceJid, USyncLidMapping,
+    ValidatedConnection, XEdDsaNoiseCertificateVerifier, account_jid_kind,
+    build_app_state_patch_bundle, build_archive_chat_patch, build_blocklist_update_query,
+    build_chat_label_association_patch, build_chat_state_node, build_contact_patch,
+    build_delete_chat_patch, build_device_identity_node, build_device_query,
+    build_e2e_session_query, build_encrypted_media_retry_request_node,
+    build_key_bundle_digest_query, build_label_edit_patch, build_lid_mapping_query,
+    build_mark_chat_read_patch, build_message_label_association_patch, build_mute_chat_patch,
+    build_pairing_code_request, build_pairing_qr_data, build_pin_chat_patch,
+    build_placeholder_resend_request_message, build_pre_key_count_query,
+    build_presence_update_node, build_push_name_patch, build_quick_reply_patch,
+    build_signed_pre_key_rotation, build_star_message_patch, build_tc_token_issue_query,
+    confirm_pre_key_upload, credentials_with_rotated_signed_pre_key, current_pre_key_status,
+    encrypt_chat_mutation_patch, extract_device_jids, handle_link_code_companion_reg_notification,
     handle_pair_device_challenge, handle_pair_success, is_lid_signal_jid, lid_mappings_from_result,
     lid_user_jid, load_or_init_credentials, mapped_lid_session_jid, mark_tc_token_issued,
     normalize_account_jid, parse_e2e_sessions_node, parse_key_bundle_digest_response,
     parse_pre_key_count_response, parse_pre_key_upload_response,
     parse_signed_pre_key_rotation_response, placeholder_resend_request_from_web_message,
-    pn_user_jid, prepare_pre_key_upload, relay_recipients_from_device_jids,
-    retry_receipt_session_bundle, save_credentials, store_tc_tokens_from_issue_result,
+    pn_user_jid, prepare_pre_key_upload, privacy_token_notification_sender_lid,
+    relay_recipients_from_device_jids, retry_receipt_session_bundle, save_credentials,
+    store_tc_tokens_from_issue_result, store_tc_tokens_from_privacy_token_notification,
     validate_connection,
 };
 use wa_core::{
@@ -45,12 +83,13 @@ use wa_core::{
     BinaryNode, Browser, BusinessCatalog, BusinessCatalogCollection, BusinessCatalogQuery,
     BusinessCollectionsQuery, BusinessOrderDetails, BusinessProduct, BusinessProductCreate,
     BusinessProductUpdate, BusinessProfile, BusinessProfileUpdate, ClientConfig,
-    CommunityLinkedGroup, CommunityMutationKind, Connection, ConnectionState, CoreResult,
-    DirtyBitType, Event, EventHub, GroupInviteV4, GroupJoinApprovalMode, GroupJoinRequest,
-    GroupJoinRequestAction, GroupJoinRequestActionResult, GroupMemberAddMode, GroupMetadata,
-    GroupMutationKind, GroupParticipantAction, GroupParticipantActionResult, GroupSettingUpdate,
-    GroupUpdateEvent, MediaConnectionInfo, MediaRetryPayload, MessageCappingInfo, MessageContent,
-    MessageEncryptor, MessageEvent, MessageKey, MessageReceipt, MessageReceiptType, MessageRelay,
+    CommunityLinkedGroup, CommunityLinkedGroups, CommunityMutationKind, Connection,
+    ConnectionState, CoreResult, DirtyBitType, Event, EventHub, GroupInviteV4,
+    GroupJoinApprovalMode, GroupJoinRequest, GroupJoinRequestAction, GroupJoinRequestActionResult,
+    GroupMemberAddMode, GroupMetadata, GroupMutationKind, GroupParticipantAction,
+    GroupParticipantActionResult, GroupParticipantRole, GroupSettingUpdate, GroupUpdateEvent,
+    MediaConnectionInfo, MediaRetryPayload, MessageCappingInfo, MessageContent, MessageEncryptor,
+    MessageEvent, MessageKey, MessageReceipt, MessageReceiptType, MessageRelay,
     MessageRelayOptions, MessageRelayRecipient, NackReason, NewsletterAction,
     NewsletterLiveUpdateSubscription, NewsletterMetadata, NewsletterMetadataLookup,
     NewsletterMetadataUpdate, OnWhatsAppResult, PrivacyCategory, PrivacySettings, PrivacyValue,
@@ -83,9 +122,10 @@ use wa_core::{
     build_group_join_request_list_query, build_group_leave_query,
     build_group_member_add_mode_query, build_group_metadata_query, build_group_participants_query,
     build_group_participating_query, build_group_revoke_invite_query,
-    build_group_revoke_invite_v4_query, build_group_setting_query, build_group_subject_query,
-    build_media_connection_query, build_media_retry_request_node, build_message_capping_info_query,
-    build_nack_node, build_newsletter_action_query, build_newsletter_admin_count_query,
+    build_group_revoke_invite_v4_query, build_group_sender_key_message_relay,
+    build_group_setting_query, build_group_subject_query, build_media_connection_query,
+    build_media_retry_request_node, build_message_capping_info_query, build_nack_node,
+    build_newsletter_action_query, build_newsletter_admin_count_query,
     build_newsletter_change_owner_query, build_newsletter_create_query,
     build_newsletter_demote_query, build_newsletter_live_updates_query,
     build_newsletter_message_updates_query, build_newsletter_metadata_query,
@@ -100,12 +140,14 @@ use wa_core::{
     parse_business_collections, parse_business_mutation_result, parse_business_order_details,
     parse_business_product_create_result, parse_business_product_delete_result,
     parse_business_product_update_result, parse_business_profile,
-    parse_community_accept_invite_result, parse_community_invite_code,
-    parse_community_invite_v4_result, parse_community_join_request_action_result,
-    parse_community_join_requests, parse_community_linked_groups, parse_community_metadata,
-    parse_community_mutation_result, parse_community_participant_action_result,
-    parse_community_participating_result, parse_dirty_notification_node,
-    parse_group_accept_invite_result, parse_group_invite_code, parse_group_invite_v4_result,
+    parse_community_accept_invite_result, parse_community_create_result_jid,
+    parse_community_invite_code, parse_community_invite_info_result,
+    parse_community_invite_v4_accept_result, parse_community_invite_v4_result,
+    parse_community_join_request_action_result, parse_community_join_requests,
+    parse_community_linked_groups, parse_community_metadata, parse_community_mutation_result,
+    parse_community_participant_action_result, parse_community_participating_result,
+    parse_dirty_notification_nodes, parse_group_accept_invite_result, parse_group_invite_code,
+    parse_group_invite_v4_accept_result, parse_group_invite_v4_result,
     parse_group_join_request_action_result, parse_group_join_requests, parse_group_metadata,
     parse_group_mutation_result, parse_group_participant_action_result,
     parse_group_participating_result, parse_media_connection_info,
@@ -117,16 +159,37 @@ use wa_core::{
     parse_newsletter_reaction_result, parse_newsletter_subscriber_count_result,
     parse_privacy_settings, parse_profile_picture_url, statuses_from_result,
 };
+#[cfg(feature = "noise")]
+use wa_core::{
+    AudioContent, ContactContent, ContactsContent, DeleteContent, DisappearingModeContent,
+    DocumentContent, EditContent, EventContent, EventResponseContent, EventResponsePayload,
+    ImageContent, LiveLocationContent, LocationContent, PinContent, PollContent, PollUpdateContent,
+    PollVoteContent, ReactionContent, StickerContent, VideoContent,
+};
+#[cfg(feature = "noise")]
+use wa_store::SignalKeyStore;
 use wa_store::{AuthStore, KeyNamespace, StoreError};
 
 #[cfg(feature = "noise")]
 const DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS: usize = 4;
+#[cfg(feature = "noise")]
+const DEFAULT_APP_STATE_SERVER_SYNC_RESYNC_ROUNDS: usize = 4;
 #[cfg(feature = "noise")]
 const MAX_IN_FLIGHT_TC_TOKEN_ISSUANCE: usize = 1024;
 #[cfg(feature = "noise")]
 const IDENTITY_CHANGE_DEBOUNCE_MS: u64 = 5_000;
 #[cfg(feature = "noise")]
 const MAX_IDENTITY_CHANGE_DEBOUNCE_JIDS: usize = 1024;
+#[cfg(feature = "noise")]
+const PENDING_MEDIA_RETRY_STORE_PAGE_SIZE: usize = 256;
+#[cfg(feature = "noise")]
+const MEDIA_RETRY_EVENT_STORE_PAGE_SIZE: usize = 256;
+
+#[cfg(feature = "noise")]
+struct PersistedMediaRetryStage {
+    keys: Vec<wa_core::MessageEventKey>,
+    malformed_stored_records: usize,
+}
 
 pub struct Client<S> {
     store: S,
@@ -145,6 +208,91 @@ pub struct Client<S> {
     tc_token_issuance: Arc<std::sync::Mutex<HashSet<String>>>,
     #[cfg(feature = "noise")]
     identity_change_debounce: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    #[cfg(feature = "noise")]
+    signal_mutation_locks: wa_core::SignalMutationLocks,
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupSenderKeyMessageRelay {
+    pub distribution: MessageRelay,
+    pub message: MessageRelay,
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone)]
+pub struct ClientSignalMessageCodec<S> {
+    inner: wa_core::SignalMessageCodec<
+        wa_core::StoreSignalRepository<S>,
+        wa_core::StoreSignalSenderKeyProvider<S>,
+    >,
+}
+
+#[cfg(feature = "noise")]
+impl<S> ClientSignalMessageCodec<S> {
+    #[must_use]
+    pub fn new(
+        inner: wa_core::SignalMessageCodec<
+            wa_core::StoreSignalRepository<S>,
+            wa_core::StoreSignalSenderKeyProvider<S>,
+        >,
+    ) -> Self {
+        Self { inner }
+    }
+
+    #[must_use]
+    pub fn inner(
+        &self,
+    ) -> &wa_core::SignalMessageCodec<
+        wa_core::StoreSignalRepository<S>,
+        wa_core::StoreSignalSenderKeyProvider<S>,
+    > {
+        &self.inner
+    }
+}
+
+#[cfg(feature = "noise")]
+#[async_trait]
+impl<S> MessageEncryptor for ClientSignalMessageCodec<S>
+where
+    S: SignalKeyStore,
+{
+    async fn encrypt_message(
+        &self,
+        recipient_jid: &str,
+        plaintext: Bytes,
+    ) -> CoreResult<wa_core::MessageEncryption> {
+        self.inner
+            .encrypt_message(recipient_jid, wa_core::pad_random_max16(plaintext))
+            .await
+    }
+}
+
+#[cfg(feature = "noise")]
+#[async_trait]
+impl<S> wa_core::InboundMessageDecryptor for ClientSignalMessageCodec<S>
+where
+    S: SignalKeyStore,
+{
+    async fn decrypt_inbound_message(
+        &self,
+        payload: wa_core::InboundEncryptedPayload,
+    ) -> CoreResult<Bytes> {
+        wa_core::InboundMessageDecryptor::decrypt_inbound_message(&self.inner, payload).await
+    }
+
+    async fn process_sender_key_distribution(
+        &self,
+        author_jid: &str,
+        message: &wa_core::ProtoSenderKeyDistributionMessage,
+    ) -> CoreResult<()> {
+        wa_core::InboundMessageDecryptor::process_sender_key_distribution(
+            &self.inner,
+            author_jid,
+            message,
+        )
+        .await
+    }
 }
 
 impl<S> Clone for Client<S>
@@ -169,6 +317,8 @@ where
             tc_token_issuance: Arc::clone(&self.tc_token_issuance),
             #[cfg(feature = "noise")]
             identity_change_debounce: Arc::clone(&self.identity_change_debounce),
+            #[cfg(feature = "noise")]
+            signal_mutation_locks: self.signal_mutation_locks.clone(),
         }
     }
 }
@@ -203,6 +353,13 @@ impl<'a> AppStateMutationUpload<'a> {
             key_data,
         }
     }
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, PartialEq)]
+pub struct ChatMutationApplyOutcome {
+    pub bundle: AppStatePatchBundle,
+    pub batch: wa_core::EventBatch,
 }
 
 #[cfg(feature = "noise")]
@@ -272,6 +429,13 @@ pub struct CommunityDirtyRefresh {
 }
 
 #[cfg(feature = "noise")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GroupSurfaceDirtyRefresh {
+    groups: Option<GroupDirtyRefresh>,
+    communities: Option<CommunityDirtyRefresh>,
+}
+
+#[cfg(feature = "noise")]
 pub struct IncomingProcessor {
     handle: Option<tokio::task::JoinHandle<CoreResult<()>>>,
 }
@@ -301,6 +465,24 @@ pub struct IncomingPlaceholderResendProcessing {
 }
 
 #[cfg(feature = "noise")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct IncomingPlaceholderRetryMediaProcessing {
+    pub inbound: wa_core::InboundNodeProcessing,
+    pub placeholder_resend: Option<MessageRelay>,
+    pub retry_resend: Option<RetryResendOutcome>,
+    pub media_retry: wa_core::MediaRetryBatchOutcome,
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct IncomingOfflinePlaceholderRetryMediaProcessing {
+    pub offline: wa_core::OfflineNodeProcessing,
+    pub placeholder_resends: Vec<MessageRelay>,
+    pub retry_resends: Vec<RetryResendOutcome>,
+    pub media_retry: wa_core::MediaRetryBatchOutcome,
+}
+
+#[cfg(feature = "noise")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetrySessionActionOutcome {
     pub action: RetrySessionAction,
@@ -318,7 +500,16 @@ pub struct RetryResendOutcome {
     pub preparation: RetryResendPreparation,
     pub session_action: RetrySessionActionOutcome,
     pub cleared_group_sender_key_memory: bool,
+    pub sender_key_distribution_relays: Vec<MessageRelay>,
     pub relays: Vec<MessageRelay>,
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetryRecipientCacheEntry {
+    remote_jid: String,
+    target_key: String,
+    recipients: Vec<MessageRelayRecipient>,
 }
 
 #[cfg(feature = "noise")]
@@ -329,6 +520,25 @@ pub struct TcTokenIssueOutcome {
     pub timestamp_seconds: u64,
     pub stored_tokens: Vec<wa_core::TcTokenRecord>,
     pub sender_record: wa_core::TcTokenRecord,
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivacyTokenNotificationOutcome {
+    pub storage_jid: String,
+    pub sender_lid: Option<String>,
+    pub stored_tokens: Vec<wa_core::TcTokenRecord>,
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AckErrorTcTokenRecoveryOutcome {
+    pub ack_id: String,
+    pub remote_jid: String,
+    pub storage_jid: String,
+    pub issue_jid: String,
+    pub timestamp_seconds: u64,
+    pub scheduled: bool,
 }
 
 #[cfg(feature = "noise")]
@@ -358,6 +568,21 @@ pub enum IdentityChangeOutcome {
         token_reissue_scheduled: bool,
         error: String,
     },
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceListNotificationOutcome {
+    pub notification: wa_core::DeviceListNotification,
+    pub device_jids: Vec<String>,
+    pub deleted_sessions: Vec<String>,
+}
+
+#[cfg(feature = "noise")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerSyncNotificationOutcome {
+    pub collections: Vec<AppStateCollection>,
+    pub sync: wa_core::AppStateSyncApplyOutcome,
 }
 
 #[cfg(feature = "noise")]
@@ -569,8 +794,9 @@ where
         session: RetrySessionSnapshot,
         now_ms: u64,
     ) -> CoreResult<wa_core::RetryReceiptPlan> {
+        let receipt = normalize_retry_receipt_signal_jids(receipt)?;
         self.message_retry_lock()?
-            .plan_retry_resend(receipt, session, now_ms)
+            .plan_retry_resend(&receipt, session, now_ms)
     }
 
     #[cfg(feature = "noise")]
@@ -591,19 +817,52 @@ where
     where
         S: Clone,
     {
-        let Some(info) = self
-            .signal_repository()
-            .get_session_info(participant_jid)
+        if let Some(snapshot) = self.retry_session_snapshot_for_jid(participant_jid).await? {
+            return Ok(snapshot);
+        }
+
+        let mappings = LidPnMappingStore::new(self.store.clone());
+        let query_jid = self.session_query_jid(&mappings, participant_jid).await?;
+        if query_jid != participant_jid
+            && let Some(snapshot) = self.retry_session_snapshot_for_jid(&query_jid).await?
+        {
+            return Ok(snapshot);
+        }
+
+        Ok(RetrySessionSnapshot::missing())
+    }
+
+    #[cfg(feature = "noise")]
+    async fn retry_session_snapshot_for_jid(
+        &self,
+        jid: &str,
+    ) -> CoreResult<Option<RetrySessionSnapshot>>
+    where
+        S: Clone,
+    {
+        if let Some(info) = self
+            .signal_provider_state_store()
+            .load_session_info(jid)
             .await?
-        else {
-            return Ok(RetrySessionSnapshot::missing());
-        };
-        Ok(RetrySessionSnapshot {
-            has_session: true,
-            registration_id: Some(info.registration_id),
-            base_key: Some(info.base_key),
-            signal_address: Some(participant_jid.to_owned()),
-        })
+        {
+            return Ok(Some(RetrySessionSnapshot {
+                has_session: true,
+                registration_id: Some(info.registration_id),
+                base_key: Some(info.base_key),
+                signal_address: Some(info.address.to_string()),
+            }));
+        }
+
+        if let Some(info) = self.signal_repository().get_session_info(jid).await? {
+            return Ok(Some(RetrySessionSnapshot {
+                has_session: true,
+                registration_id: Some(info.registration_id),
+                base_key: Some(info.base_key),
+                signal_address: Some(info.address.to_string()),
+            }));
+        }
+
+        Ok(None)
     }
 
     #[cfg(feature = "noise")]
@@ -624,12 +883,32 @@ where
             RetrySessionAction::None => {}
             RetrySessionAction::InjectBundle => {
                 if let Some(bundle) = key_bundle {
+                    let injected_jid = bundle.session.jid.clone();
+                    deleted_sessions = self
+                        .retry_session_jids_for_participant(&plan.participant_jid)
+                        .await?
+                        .into_iter()
+                        .filter(|jid| jid != &injected_jid)
+                        .collect();
+                    if !deleted_sessions.is_empty() {
+                        self.signal_repository()
+                            .delete_sessions(&deleted_sessions)
+                            .await?;
+                    }
                     self.signal_repository()
                         .inject_e2e_session(bundle.session.clone())
                         .await?;
                     injected_bundle = true;
                     injected_key_bundle = Some(bundle);
                 } else {
+                    deleted_sessions = self
+                        .retry_session_jids_for_participant(&plan.participant_jid)
+                        .await?;
+                    if !deleted_sessions.is_empty() {
+                        self.signal_repository()
+                            .delete_sessions(&deleted_sessions)
+                            .await?;
+                    }
                     refreshed_sessions = self
                         .assert_sessions(connection, [plan.participant_jid.as_str()], true)
                         .await?;
@@ -677,6 +956,19 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn handle_retry_receipt_with_signal_provider(
+        &self,
+        connection: &Connection,
+        receipt: &wa_core::RetryReceipt,
+    ) -> CoreResult<RetryResendOutcome>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.handle_retry_receipt(connection, receipt, &codec).await
+    }
+
+    #[cfg(feature = "noise")]
     async fn handle_retry_receipt_with_bundle<E>(
         &self,
         connection: &Connection,
@@ -699,8 +991,26 @@ where
         let preparation = self.prepare_retry_resends(&plan, current_unix_timestamp_ms())?;
         let cleared_group_sender_key_memory =
             self.clear_retry_group_sender_key_memory(&plan).await?;
+        let retry_device_identity = session_action
+            .injected_key_bundle
+            .as_ref()
+            .and_then(|bundle| bundle.device_identity.as_ref());
+        let (sender_key_distribution_relays, cached_retry_recipients) = self
+            .relay_retry_group_sender_key_distributions(
+                connection,
+                &preparation,
+                encryptor,
+                retry_device_identity,
+            )
+            .await?;
         let relays = self
-            .execute_retry_resends(connection, &preparation, encryptor)
+            .execute_retry_resends_with_device_identity(
+                connection,
+                &preparation,
+                encryptor,
+                retry_device_identity,
+                &cached_retry_recipients,
+            )
             .await?;
         Ok(RetryResendOutcome {
             receipt: receipt.clone(),
@@ -708,6 +1018,7 @@ where
             preparation,
             session_action,
             cleared_group_sender_key_memory,
+            sender_key_distribution_relays,
             relays,
         })
     }
@@ -729,6 +1040,67 @@ where
     }
 
     #[cfg(feature = "noise")]
+    async fn relay_retry_group_sender_key_distributions<E>(
+        &self,
+        connection: &Connection,
+        preparation: &RetryResendPreparation,
+        encryptor: &E,
+        retry_device_identity: Option<&Bytes>,
+    ) -> CoreResult<(Vec<MessageRelay>, Vec<RetryRecipientCacheEntry>)>
+    where
+        S: Clone,
+        E: MessageEncryptor,
+    {
+        if !preparation.should_clear_group_sender_key || preparation.jobs.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let mut relays = Vec::new();
+        let mut cached_recipients = Vec::new();
+        for job in &preparation.jobs {
+            let decoded = jid_decode(&job.remote_jid).ok_or_else(|| {
+                wa_core::CoreError::Protocol(format!(
+                    "invalid group retry JID for sender-key distribution: {}",
+                    job.remote_jid
+                ))
+            })?;
+            if decoded.server != wa_binary::JidServer::GUs {
+                continue;
+            }
+            let target_key = retry_resend_target_key(&job.target);
+            if cached_recipients
+                .iter()
+                .any(|entry: &RetryRecipientCacheEntry| {
+                    entry.remote_jid == job.remote_jid && entry.target_key == target_key
+                })
+            {
+                continue;
+            }
+            let recipients = self.retry_resend_recipients(connection, job).await?;
+            let mut options = MessageRelayOptions::new();
+            if let Some(identity) = retry_device_identity {
+                options = retry_options_with_device_identity(options, identity)?;
+            }
+            let relay = self
+                .relay_group_sender_key_distribution_to_devices(
+                    connection,
+                    &job.remote_jid,
+                    &recipients,
+                    encryptor,
+                    options,
+                )
+                .await?;
+            cached_recipients.push(RetryRecipientCacheEntry {
+                remote_jid: job.remote_jid.clone(),
+                target_key,
+                recipients,
+            });
+            relays.push(relay);
+        }
+        Ok((relays, cached_recipients))
+    }
+
+    #[cfg(feature = "noise")]
     #[must_use]
     pub fn credentials(&self) -> &AuthCredentials {
         &self.credentials
@@ -740,7 +1112,58 @@ where
     where
         S: Clone,
     {
-        StoreSignalRepository::new(self.store.clone())
+        StoreSignalRepository::with_mutation_locks(
+            self.store.clone(),
+            self.signal_mutation_locks.clone(),
+        )
+    }
+
+    #[cfg(feature = "noise")]
+    #[must_use]
+    pub fn signal_provider_state_store(&self) -> wa_core::SignalProviderStateStore<S>
+    where
+        S: Clone,
+    {
+        wa_core::SignalProviderStateStore::with_mutation_locks(
+            self.store.clone(),
+            self.signal_mutation_locks.clone(),
+        )
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn signal_sender_key_provider(&self) -> CoreResult<wa_core::StoreSignalSenderKeyProvider<S>>
+    where
+        S: Clone,
+    {
+        self.signal_provider()
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn signal_provider(&self) -> CoreResult<wa_core::StoreSignalSenderKeyProvider<S>>
+    where
+        S: Clone,
+    {
+        let account_jid = self.credentials.account_jid.clone().ok_or_else(|| {
+            wa_core::CoreError::Protocol(
+                "Signal provider requires authenticated account JID".to_owned(),
+            )
+        })?;
+        wa_core::StoreSignalSenderKeyProvider::with_verifier_and_mutation_locks(
+            self.store.clone(),
+            XEdDsaNoiseCertificateVerifier,
+            self.signal_mutation_locks.clone(),
+        )
+        .with_local_sender_jid(account_jid)
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn signal_message_codec(&self) -> CoreResult<ClientSignalMessageCodec<S>>
+    where
+        S: Clone,
+    {
+        Ok(ClientSignalMessageCodec::new(
+            wa_core::SignalMessageCodec::new(self.signal_repository(), self.signal_provider()?),
+        ))
     }
 
     #[cfg(feature = "noise")]
@@ -871,6 +1294,34 @@ where
             .await?;
         connection.send_node(&request.node).await?;
         Ok(request)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn respond_to_link_code_companion_reg_notification(
+        &mut self,
+        connection: &Connection,
+        node: &BinaryNode,
+    ) -> CoreResult<Option<LinkCodeCompanionRegistration>> {
+        let Some(finish) = handle_link_code_companion_reg_notification(
+            node,
+            &self.credentials,
+            self.queries.next_tag(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let response = connection.query_node(finish.reply.clone()).await?;
+        if response.node.tag != "iq"
+            || response.node.attrs.get("type").map(String::as_str) != Some("result")
+        {
+            return Err(wa_core::CoreError::Protocol(
+                "link-code companion finish failed".to_owned(),
+            ));
+        }
+        self.credentials = finish.credentials.clone();
+        save_credentials(&self.store, self.credentials.clone()).await?;
+        self.events.emit(Event::CredentialsUpdated);
+        Ok(Some(finish))
     }
 
     #[cfg(feature = "noise")]
@@ -1131,6 +1582,7 @@ where
         let node = build_account_reachout_timelock_query(self.queries.next_tag())?;
         let response = connection.query_node(node).await?;
         let state = parse_account_reachout_timelock_result(&response.node)?;
+        persist_reachout_timelock_state(&self.store, &state).await?;
         self.events
             .emit(Event::ReachoutTimelockUpdate(state.clone()));
         Ok(state)
@@ -1142,7 +1594,10 @@ where
     ) -> CoreResult<MessageCappingInfo> {
         let node = build_message_capping_info_query(self.queries.next_tag())?;
         let response = connection.query_node(node).await?;
-        parse_message_capping_info_result(&response.node)
+        let info = parse_message_capping_info_result(&response.node)?;
+        persist_message_capping_info(&self.store, &info).await?;
+        self.events.emit(Event::MessageCappingUpdate(info.clone()));
+        Ok(info)
     }
 
     pub async fn fetch_business_profile(
@@ -1415,6 +1870,38 @@ where
         parse_account_mutation_result(&response.node, AccountMutationKind::ProfilePicture)
     }
 
+    #[cfg(feature = "image")]
+    pub async fn update_profile_picture_from_image(
+        &self,
+        connection: &Connection,
+        target_jid: Option<&str>,
+        image: &[u8],
+        options: wa_core::ProfilePictureOptions,
+    ) -> CoreResult<wa_core::GeneratedProfilePicture> {
+        let profile = wa_core::generate_profile_picture(image, options)?;
+        self.update_profile_picture(connection, target_jid, profile.image.clone())
+            .await?;
+        Ok(profile)
+    }
+
+    #[cfg(feature = "image")]
+    pub fn generate_video_thumbnail_from_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        options: wa_core::VideoThumbnailOptions,
+    ) -> CoreResult<wa_core::GeneratedJpegThumbnail> {
+        wa_core::generate_video_thumbnail_from_file(path, options)
+    }
+
+    #[cfg(feature = "image")]
+    pub fn generate_pdf_thumbnail_from_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        options: wa_core::PdfThumbnailOptions,
+    ) -> CoreResult<wa_core::GeneratedJpegThumbnail> {
+        wa_core::generate_pdf_thumbnail_from_file(path, options)
+    }
+
     pub async fn remove_profile_picture(
         &self,
         connection: &Connection,
@@ -1532,7 +2019,7 @@ where
     {
         let node = build_presence_subscribe_node(to_jid, self.queries.next_tag())?;
         #[cfg(feature = "noise")]
-        let node = self.node_with_tc_token_for_jid(to_jid, node, false).await?;
+        let node = self.node_with_tc_token_for_jid(to_jid, node, true).await?;
         connection.send_node(&node).await?;
         Ok(node)
     }
@@ -1643,6 +2130,32 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn upload_chat_mutation_patch_and_apply(
+        &self,
+        connection: &Connection,
+        patch: ChatMutationPatch,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let batch = wa_core::event_batch_from_chat_mutation_patch(&patch, false)?;
+        let bundle = self
+            .upload_chat_mutation_patch(connection, patch, upload)
+            .await?;
+        if !batch.is_empty() {
+            let events = [Event::Batch(Box::new(batch.clone()))];
+            persist_receive_events(&self.store, &events).await?;
+        }
+        wa_core::save_app_state_patch_state(&self.store, bundle.collection, &bundle.next_state)
+            .await?;
+        if !batch.is_empty() {
+            self.events.emit_batch(batch.clone());
+        }
+        Ok(ChatMutationApplyOutcome { bundle, batch })
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn set_chat_pinned(
         &self,
         connection: &Connection,
@@ -1653,6 +2166,23 @@ where
     ) -> CoreResult<AppStatePatchBundle> {
         let patch = build_pin_chat_patch(chat_jid, pinned, action_timestamp_ms)?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn set_chat_pinned_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        pinned: bool,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_pin_chat_patch(chat_jid, pinned, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1673,6 +2203,25 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn set_chat_archived_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        archived: bool,
+        message_range: Option<ChatMutationMessageRange>,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch =
+            build_archive_chat_patch(chat_jid, archived, message_range, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn set_chat_muted(
         &self,
         connection: &Connection,
@@ -1683,6 +2232,23 @@ where
     ) -> CoreResult<AppStatePatchBundle> {
         let patch = build_mute_chat_patch(chat_jid, mute_end_timestamp, action_timestamp_ms)?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn set_chat_muted_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        mute_end_timestamp: Option<u64>,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_mute_chat_patch(chat_jid, mute_end_timestamp, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1702,6 +2268,24 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn set_chat_read_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        read: bool,
+        message_range: Option<ChatMutationMessageRange>,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_mark_chat_read_patch(chat_jid, read, message_range, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn delete_chat(
         &self,
         connection: &Connection,
@@ -1712,6 +2296,23 @@ where
     ) -> CoreResult<AppStatePatchBundle> {
         let patch = build_delete_chat_patch(chat_jid, message_range, action_timestamp_ms)?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn delete_chat_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        message_range: Option<ChatMutationMessageRange>,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_delete_chat_patch(chat_jid, message_range, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1730,6 +2331,23 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn set_message_starred_and_apply(
+        &self,
+        connection: &Connection,
+        key: MessageKey,
+        starred: bool,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_star_message_patch(key, starred, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn update_profile_name(
         &self,
         connection: &Connection,
@@ -1739,6 +2357,22 @@ where
     ) -> CoreResult<AppStatePatchBundle> {
         let patch = build_push_name_patch(name, action_timestamp_ms)?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn update_profile_name_and_apply(
+        &self,
+        connection: &Connection,
+        name: &str,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_push_name_patch(name, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1757,6 +2391,23 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn update_contact_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        contact: ContactSyncAction,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_contact_patch(chat_jid, Some(contact), action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn remove_contact(
         &self,
         connection: &Connection,
@@ -1770,6 +2421,22 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn remove_contact_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_contact_patch(chat_jid, None, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn upsert_quick_reply(
         &self,
         connection: &Connection,
@@ -1779,6 +2446,22 @@ where
     ) -> CoreResult<AppStatePatchBundle> {
         let patch = build_quick_reply_patch(quick_reply, action_timestamp_ms)?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn upsert_quick_reply_and_apply(
+        &self,
+        connection: &Connection,
+        quick_reply: QuickReplyMutation,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_quick_reply_patch(quick_reply, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1799,6 +2482,25 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn delete_quick_reply_and_apply(
+        &self,
+        connection: &Connection,
+        quick_reply_id: &str,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_quick_reply_patch(
+            QuickReplyMutation::delete(quick_reply_id),
+            action_timestamp_ms,
+        )?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn upsert_label(
         &self,
         connection: &Connection,
@@ -1808,6 +2510,22 @@ where
     ) -> CoreResult<AppStatePatchBundle> {
         let patch = build_label_edit_patch(label, action_timestamp_ms)?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn upsert_label_and_apply(
+        &self,
+        connection: &Connection,
+        label: LabelEditMutation,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_label_edit_patch(label, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1822,6 +2540,23 @@ where
         let patch =
             build_label_edit_patch(LabelEditMutation::delete(label_id), action_timestamp_ms)?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn delete_label_and_apply(
+        &self,
+        connection: &Connection,
+        label_id: &str,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch =
+            build_label_edit_patch(LabelEditMutation::delete(label_id), action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1842,6 +2577,25 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn set_chat_label_and_apply(
+        &self,
+        connection: &Connection,
+        chat_jid: &str,
+        label_id: &str,
+        labeled: bool,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch =
+            build_chat_label_association_patch(chat_jid, label_id, labeled, action_timestamp_ms)?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn set_message_label(
         &self,
         connection: &Connection,
@@ -1858,6 +2612,29 @@ where
             action_timestamp_ms,
         )?;
         self.upload_chat_mutation_patch(connection, patch, upload)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn set_message_label_and_apply(
+        &self,
+        connection: &Connection,
+        target: MessageLabelTarget<'_>,
+        labeled: bool,
+        action_timestamp_ms: u64,
+        upload: AppStateMutationUpload<'_>,
+    ) -> CoreResult<ChatMutationApplyOutcome>
+    where
+        S: Clone,
+    {
+        let patch = build_message_label_association_patch(
+            target.chat_jid,
+            target.label_id,
+            target.message_id,
+            labeled,
+            action_timestamp_ms,
+        )?;
+        self.upload_chat_mutation_patch_and_apply(connection, patch, upload)
             .await
     }
 
@@ -1981,6 +2758,72 @@ where
                     has_more_patches: false,
                     snapshot_pending: false,
                 });
+        }
+
+        Ok(outcome)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn recover_app_state_snapshots_with_store_keys<T, I>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        snapshots: I,
+        fallback_host: Option<&str>,
+    ) -> CoreResult<wa_core::AppStateSyncApplyOutcome>
+    where
+        T: wa_core::MediaTransport,
+        I: IntoIterator<Item = wa_core::AppStatePendingSnapshot>,
+    {
+        let mut outcome = wa_core::AppStateSyncApplyOutcome::default();
+
+        for pending in snapshots {
+            match wa_core::download_and_decode_app_state_snapshot_with_store_key(
+                &self.store,
+                transfer,
+                pending.collection,
+                &pending.reference,
+                fallback_host,
+            )
+            .await?
+            {
+                wa_core::AppStateStoreKeySnapshotDecode::Decoded(decoded) => {
+                    let batch =
+                        wa_core::apply_decoded_app_state_snapshot_to_store(&self.store, &decoded)
+                            .await?;
+                    wa_core::delete_app_state_blocked_collection(&self.store, decoded.collection)
+                        .await?;
+                    let emitted_batches = usize::from(!batch.is_empty());
+                    if !batch.is_empty() {
+                        self.events.emit_batch(batch.clone());
+                        outcome.batches.push(batch);
+                    }
+                    outcome
+                        .collections
+                        .push(wa_core::AppStateCollectionSyncOutcome {
+                            collection: decoded.collection,
+                            response_version: Some(decoded.version),
+                            final_version: decoded.version,
+                            applied_patches: 0,
+                            emitted_batches,
+                            has_more_patches: false,
+                            snapshot_pending: false,
+                        });
+                }
+                wa_core::AppStateStoreKeySnapshotDecode::Blocked(blocked) => {
+                    outcome
+                        .collections
+                        .push(wa_core::AppStateCollectionSyncOutcome {
+                            collection: blocked.collection,
+                            response_version: None,
+                            final_version: blocked.previous_version,
+                            applied_patches: 0,
+                            emitted_batches: 0,
+                            has_more_patches: false,
+                            snapshot_pending: true,
+                        });
+                    outcome.blocked.push(blocked);
+                }
+            }
         }
 
         Ok(outcome)
@@ -2187,6 +3030,138 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn sync_app_state_blocked_collections_with_store_keys(
+        &self,
+        connection: &Connection,
+        is_initial_sync: bool,
+        max_rounds: usize,
+    ) -> CoreResult<wa_core::AppStateSyncApplyOutcome> {
+        let blocked =
+            wa_core::load_app_state_blocked_collections_with_store_keys(&self.store).await?;
+        if blocked.is_empty() {
+            return Ok(wa_core::AppStateSyncApplyOutcome::default());
+        }
+        self.sync_and_apply_app_state_until_current_with_store_keys(
+            connection,
+            blocked.iter().map(|blocked| blocked.collection),
+            is_initial_sync,
+            max_rounds,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn sync_recover_app_state_blocked_collections_with_store_keys<T>(
+        &self,
+        connection: &Connection,
+        transfer: &wa_core::MediaTransfer<T>,
+        is_initial_sync: bool,
+        max_rounds: usize,
+        fallback_host: Option<&str>,
+    ) -> CoreResult<wa_core::AppStateSyncApplyOutcome>
+    where
+        T: wa_core::MediaTransport,
+    {
+        let blocked =
+            wa_core::load_app_state_blocked_collections_with_store_keys(&self.store).await?;
+        if blocked.is_empty() {
+            return Ok(wa_core::AppStateSyncApplyOutcome::default());
+        }
+        self.sync_recover_and_apply_app_state_until_current_with_store_keys(
+            connection,
+            transfer,
+            blocked.iter().map(|blocked| blocked.collection),
+            is_initial_sync,
+            max_rounds,
+            fallback_host,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_app_state_sync_key_share_events_with_snapshot_recovery<T>(
+        &self,
+        connection: &Connection,
+        transfer: &wa_core::MediaTransfer<T>,
+        events: &[Event],
+        is_initial_sync: bool,
+        max_rounds: usize,
+        fallback_host: Option<&str>,
+    ) -> CoreResult<wa_core::AppStateSyncApplyOutcome>
+    where
+        T: wa_core::MediaTransport,
+    {
+        if max_rounds == 0 {
+            return Err(wa_core::CoreError::Protocol(
+                "app-state key-share snapshot recovery requires at least one round".to_owned(),
+            ));
+        }
+
+        let keys = app_state_sync_key_share_items_from_events(events)?;
+        if keys.is_empty() {
+            return Ok(wa_core::AppStateSyncApplyOutcome::default());
+        }
+
+        let blocked = wa_core::save_app_state_sync_key_share(&self.store, keys).await?;
+        let mut pending = blocked
+            .iter()
+            .map(|blocked| blocked.collection)
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(wa_core::AppStateSyncApplyOutcome::default());
+        }
+
+        let mut combined = wa_core::AppStateSyncApplyOutcome::default();
+        for _ in 0..max_rounds {
+            let mut requests = Vec::with_capacity(pending.len());
+            for collection in &pending {
+                let state = self.load_app_state_patch_state(*collection).await?;
+                requests.push(AppStateCollectionRequest::new(*collection, state.version()));
+            }
+
+            let mut round = self
+                .sync_and_apply_app_state_with_store_keys(connection, requests, is_initial_sync)
+                .await?;
+            let snapshots = std::mem::take(&mut round.pending_snapshots);
+            let blocked = round
+                .blocked
+                .iter()
+                .map(|blocked| blocked.collection)
+                .collect::<Vec<_>>();
+            pending = round
+                .collections
+                .iter()
+                .filter(|collection| {
+                    collection.has_more_patches && !blocked.contains(&collection.collection)
+                })
+                .map(|collection| collection.collection)
+                .collect();
+            combined.append(round);
+
+            if !snapshots.is_empty() {
+                let recovered = self
+                    .recover_app_state_snapshots_with_store_keys(transfer, snapshots, fallback_host)
+                    .await?;
+                let recovered_blocked = recovered
+                    .blocked
+                    .iter()
+                    .map(|blocked| blocked.collection)
+                    .collect::<Vec<_>>();
+                pending.retain(|collection| !recovered_blocked.contains(collection));
+                combined.append(recovered);
+            }
+
+            if pending.is_empty() {
+                return Ok(combined);
+            }
+        }
+
+        Err(wa_core::CoreError::Protocol(format!(
+            "app-state key-share snapshot recovery exceeded {max_rounds} rounds"
+        )))
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn sync_recover_and_apply_app_state_until_current<T, I>(
         &self,
         connection: &Connection,
@@ -2254,6 +3229,81 @@ where
         Err(wa_core::CoreError::Protocol(format!(
             "app-state sync recovery exceeded {} rounds",
             options.max_rounds
+        )))
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn sync_recover_and_apply_app_state_until_current_with_store_keys<T, I>(
+        &self,
+        connection: &Connection,
+        transfer: &wa_core::MediaTransfer<T>,
+        collections: I,
+        is_initial_sync: bool,
+        max_rounds: usize,
+        fallback_host: Option<&str>,
+    ) -> CoreResult<wa_core::AppStateSyncApplyOutcome>
+    where
+        T: wa_core::MediaTransport,
+        I: IntoIterator<Item = AppStateCollection>,
+    {
+        if max_rounds == 0 {
+            return Err(wa_core::CoreError::Protocol(
+                "app-state store-key sync recovery requires at least one round".to_owned(),
+            ));
+        }
+
+        let mut pending = collections.into_iter().collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(wa_core::AppStateSyncApplyOutcome::default());
+        }
+
+        let mut combined = wa_core::AppStateSyncApplyOutcome::default();
+        for _ in 0..max_rounds {
+            let mut requests = Vec::with_capacity(pending.len());
+            for collection in &pending {
+                let state = self.load_app_state_patch_state(*collection).await?;
+                requests.push(AppStateCollectionRequest::new(*collection, state.version()));
+            }
+
+            let mut round = self
+                .sync_and_apply_app_state_with_store_keys(connection, requests, is_initial_sync)
+                .await?;
+            let snapshots = std::mem::take(&mut round.pending_snapshots);
+            let blocked = round
+                .blocked
+                .iter()
+                .map(|blocked| blocked.collection)
+                .collect::<Vec<_>>();
+            pending = round
+                .collections
+                .iter()
+                .filter(|collection| {
+                    collection.has_more_patches && !blocked.contains(&collection.collection)
+                })
+                .map(|collection| collection.collection)
+                .collect();
+            combined.append(round);
+
+            if !snapshots.is_empty() {
+                let recovered = self
+                    .recover_app_state_snapshots_with_store_keys(transfer, snapshots, fallback_host)
+                    .await?;
+                let recovered_blocked = recovered
+                    .blocked
+                    .iter()
+                    .map(|blocked| blocked.collection)
+                    .collect::<Vec<_>>();
+                pending.retain(|collection| !recovered_blocked.contains(collection));
+                combined.append(recovered);
+            }
+
+            if pending.is_empty() {
+                return Ok(combined);
+            }
+        }
+
+        Err(wa_core::CoreError::Protocol(format!(
+            "app-state store-key sync recovery exceeded {max_rounds} rounds"
         )))
     }
 
@@ -2397,10 +3447,10 @@ where
         &self,
         connection: &Connection,
         invite: &GroupInviteV4,
-    ) -> CoreResult<bool> {
+    ) -> CoreResult<Option<String>> {
         let node = build_group_accept_invite_v4_query(invite, self.queries.next_tag())?;
         let response = connection.query_node(node).await?;
-        parse_group_invite_v4_result(&response.node)
+        parse_group_invite_v4_accept_result(&response.node)
     }
 
     pub async fn accept_group_invite_v4_with_message_events(
@@ -2408,9 +3458,9 @@ where
         connection: &Connection,
         invite: &GroupInviteV4,
         invite_message_key: Option<wa_core::MessageEventKey>,
-    ) -> CoreResult<bool> {
+    ) -> CoreResult<Option<String>> {
         let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig::default());
-        let accepted = self
+        let accepted_jid = self
             .accept_group_invite_v4_with_buffered_message_events(
                 connection,
                 invite,
@@ -2419,7 +3469,7 @@ where
             )
             .await?;
         emit_buffered_events(&self.events, buffer.drain_events());
-        Ok(accepted)
+        Ok(accepted_jid)
     }
 
     pub async fn accept_group_invite_v4_with_buffered_message_events(
@@ -2428,9 +3478,9 @@ where
         invite: &GroupInviteV4,
         invite_message_key: Option<wa_core::MessageEventKey>,
         buffer: &mut wa_core::EventBuffer,
-    ) -> CoreResult<bool> {
-        let accepted = self.accept_group_invite_v4(connection, invite).await?;
-        if accepted {
+    ) -> CoreResult<Option<String>> {
+        let accepted_jid = self.accept_group_invite_v4(connection, invite).await?;
+        if accepted_jid.is_some() {
             self.buffer_invite_v4_accept_message_events(
                 invite,
                 invite_message_key,
@@ -2439,7 +3489,7 @@ where
             )
             .await?;
         }
-        Ok(accepted)
+        Ok(accepted_jid)
     }
 
     pub async fn fetch_group_invite_info(
@@ -2583,6 +3633,9 @@ where
             self.queries.next_tag(),
         )?;
         let response = connection.query_node(node).await?;
+        if let Some(jid) = parse_community_create_result_jid(&response.node)? {
+            return self.fetch_group_metadata(connection, &jid).await;
+        }
         parse_community_metadata(&response.node)
     }
 
@@ -2606,6 +3659,9 @@ where
             self.queries.next_tag(),
         )?;
         let response = connection.query_node(node).await?;
+        if let Some(jid) = parse_community_create_result_jid(&response.node)? {
+            return self.fetch_group_metadata(connection, &jid).await;
+        }
         parse_community_metadata(&response.node)
     }
 
@@ -2690,6 +3746,25 @@ where
         let node = build_community_linked_groups_query(community_jid, self.queries.next_tag())?;
         let response = connection.query_node(node).await?;
         parse_community_linked_groups(&response.node)
+    }
+
+    pub async fn fetch_community_linked_groups_resolved(
+        &self,
+        connection: &Connection,
+        jid: &str,
+    ) -> CoreResult<CommunityLinkedGroups> {
+        let metadata = self.fetch_group_metadata(connection, jid).await?;
+        let (community_jid, is_community) = metadata
+            .linked_parent
+            .clone()
+            .map_or((metadata.jid, true), |parent| (parent, false));
+        let node = build_community_linked_groups_query(&community_jid, self.queries.next_tag())?;
+        let response = connection.query_node(node).await?;
+        Ok(CommunityLinkedGroups {
+            community_jid,
+            is_community,
+            linked_groups: parse_community_linked_groups(&response.node)?,
+        })
     }
 
     pub async fn update_community_participants<I, T>(
@@ -2781,7 +3856,7 @@ where
     ) -> CoreResult<GroupMetadata> {
         let node = build_community_invite_info_query(code, self.queries.next_tag())?;
         let response = connection.query_node(node).await?;
-        parse_community_metadata(&response.node)
+        parse_community_invite_info_result(&response.node)
     }
 
     pub async fn revoke_community_invite_v4(
@@ -2803,10 +3878,10 @@ where
         &self,
         connection: &Connection,
         invite: &GroupInviteV4,
-    ) -> CoreResult<bool> {
+    ) -> CoreResult<Option<String>> {
         let node = build_community_accept_invite_v4_query(invite, self.queries.next_tag())?;
         let response = connection.query_node(node).await?;
-        parse_community_invite_v4_result(&response.node)
+        parse_community_invite_v4_accept_result(&response.node)
     }
 
     pub async fn accept_community_invite_v4_with_message_events(
@@ -2814,9 +3889,9 @@ where
         connection: &Connection,
         invite: &GroupInviteV4,
         invite_message_key: Option<wa_core::MessageEventKey>,
-    ) -> CoreResult<bool> {
+    ) -> CoreResult<Option<String>> {
         let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig::default());
-        let accepted = self
+        let accepted_jid = self
             .accept_community_invite_v4_with_buffered_message_events(
                 connection,
                 invite,
@@ -2825,7 +3900,7 @@ where
             )
             .await?;
         emit_buffered_events(&self.events, buffer.drain_events());
-        Ok(accepted)
+        Ok(accepted_jid)
     }
 
     pub async fn accept_community_invite_v4_with_buffered_message_events(
@@ -2834,9 +3909,9 @@ where
         invite: &GroupInviteV4,
         invite_message_key: Option<wa_core::MessageEventKey>,
         buffer: &mut wa_core::EventBuffer,
-    ) -> CoreResult<bool> {
-        let accepted = self.accept_community_invite_v4(connection, invite).await?;
-        if accepted {
+    ) -> CoreResult<Option<String>> {
+        let accepted_jid = self.accept_community_invite_v4(connection, invite).await?;
+        if accepted_jid.is_some() {
             self.buffer_invite_v4_accept_message_events(
                 invite,
                 invite_message_key,
@@ -2845,7 +3920,7 @@ where
             )
             .await?;
         }
-        Ok(accepted)
+        Ok(accepted_jid)
     }
 
     pub async fn set_community_ephemeral(
@@ -3098,6 +4173,322 @@ where
         Ok(relay)
     }
 
+    pub async fn relay_group_sender_key_message<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        content: MessageContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+    {
+        let message = content.into_proto()?;
+        self.relay_group_sender_key_proto_message(
+            connection, group_jid, message, encryptor, options,
+        )
+        .await
+    }
+
+    pub async fn relay_group_sender_key_proto_message<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        message: ProtoMessage,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+    {
+        #[cfg(feature = "noise")]
+        let retry_message = message.clone();
+        let options = self.message_relay_options_with_sender(options)?;
+        #[cfg(feature = "noise")]
+        let options = {
+            let options = Self::message_relay_options_with_generated_id(options)?;
+            Self::message_relay_options_with_reporting(group_jid, &message, options)?
+        };
+        let relay =
+            build_group_sender_key_message_relay(group_jid, message, encryptor, options).await?;
+        connection.send_node(&relay.node).await?;
+        #[cfg(feature = "noise")]
+        self.cache_recent_message_for_retry(
+            group_jid,
+            &relay.message_id,
+            retry_message,
+            current_unix_timestamp_ms(),
+        )?;
+        Ok(relay)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_group_sender_key_distribution_to_devices<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        recipients: &[MessageRelayRecipient],
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone,
+        E: MessageEncryptor,
+    {
+        let distribution = self
+            .signal_sender_key_provider()?
+            .load_or_create_sender_key_distribution(group_jid)
+            .await?;
+        let message = wa_core::build_sender_key_distribution_message(
+            wa_core::SenderKeyDistributionContent::new(group_jid, distribution.distribution_bytes),
+        )?;
+        self.relay_proto_message_to_devices(
+            connection, group_jid, message, recipients, encryptor, options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_group_sender_key_distribution_to_devices_with_signal_provider(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        recipients: &[MessageRelayRecipient],
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.relay_group_sender_key_distribution_to_devices(
+            connection, group_jid, recipients, &codec, options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_group_sender_key_message_with_distribution<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        content: MessageContent,
+        device_encryptor: &E,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+        E: MessageEncryptor,
+    {
+        let message = content.into_proto()?;
+        self.relay_group_sender_key_proto_message_with_distribution(
+            connection,
+            group_jid,
+            message,
+            device_encryptor,
+            distribution_options,
+            message_options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_group_sender_key_proto_message_with_distribution<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        message: ProtoMessage,
+        device_encryptor: &E,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+        E: MessageEncryptor,
+    {
+        let sender_key_codec = self.signal_message_codec()?;
+        self.relay_group_sender_key_proto_message_with_encryptors(
+            connection,
+            group_jid,
+            message,
+            device_encryptor,
+            &sender_key_codec,
+            (distribution_options, message_options),
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    async fn relay_group_sender_key_proto_message_with_encryptors<D, G>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        message: ProtoMessage,
+        device_encryptor: &D,
+        sender_key_encryptor: &G,
+        options: (MessageRelayOptions, MessageRelayOptions),
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+        D: MessageEncryptor,
+        G: MessageEncryptor,
+    {
+        let (distribution_options, message_options) = options;
+        let recipients = self
+            .group_sender_key_distribution_recipients(connection, group_jid)
+            .await?;
+        let recipient_jids = recipients
+            .iter()
+            .map(|recipient| recipient.jid.as_str())
+            .collect::<Vec<_>>();
+        self.assert_sessions(connection, recipient_jids, false)
+            .await?;
+        let distribution = self
+            .relay_group_sender_key_distribution_to_devices(
+                connection,
+                group_jid,
+                &recipients,
+                device_encryptor,
+                distribution_options,
+            )
+            .await?;
+        let message = self
+            .relay_group_sender_key_proto_message(
+                connection,
+                group_jid,
+                message,
+                sender_key_encryptor,
+                message_options,
+            )
+            .await?;
+        Ok(GroupSenderKeyMessageRelay {
+            distribution,
+            message,
+        })
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_group_sender_key_message_with_signal_provider(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        content: MessageContent,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        let message = content.into_proto()?;
+        self.relay_group_sender_key_proto_message_with_signal_provider(
+            connection,
+            group_jid,
+            message,
+            distribution_options,
+            message_options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_group_sender_key_proto_message_with_signal_provider(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        message: ProtoMessage,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.relay_group_sender_key_proto_message_with_distribution(
+            connection,
+            group_jid,
+            message,
+            &codec,
+            distribution_options,
+            message_options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    async fn group_sender_key_distribution_recipients(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+    ) -> CoreResult<Vec<MessageRelayRecipient>>
+    where
+        S: Clone,
+    {
+        let my_jid = self.credentials.account_jid.clone().ok_or_else(|| {
+            wa_core::CoreError::Protocol("group sender-key send requires account JID".to_owned())
+        })?;
+        let my_lid = self.credentials.account_lid.clone();
+        let metadata = self.fetch_group_metadata(connection, group_jid).await?;
+        let mut lookup_jids = Vec::with_capacity(metadata.participants.len() * 3 + 2);
+        for participant in &metadata.participants {
+            push_unique_normalized_account_jid(&mut lookup_jids, &participant.jid)?;
+            if let Some(phone_number) = participant.phone_number.as_deref() {
+                push_unique_normalized_account_jid(&mut lookup_jids, phone_number)?;
+            }
+            if let Some(lid) = participant.lid.as_deref() {
+                push_unique_normalized_account_jid(&mut lookup_jids, lid)?;
+            }
+        }
+        push_unique_jid(&mut lookup_jids, &my_jid);
+        if let Some(lid) = my_lid.as_deref() {
+            push_unique_jid(&mut lookup_jids, lid);
+        }
+        let devices = self
+            .fetch_device_jids(connection, &lookup_jids, false)
+            .await?;
+        let recipients = relay_recipients_from_device_jids(&devices, &my_jid, my_lid.as_deref())?;
+        if recipients.is_empty() {
+            return Err(wa_core::CoreError::Protocol(
+                "group sender-key distribution requires at least one recipient device".to_owned(),
+            ));
+        }
+        Ok(recipients)
+    }
+
+    #[cfg(feature = "noise")]
+    async fn status_message_recipients(
+        &self,
+        connection: &Connection,
+        status_jids: &[String],
+    ) -> CoreResult<Vec<MessageRelayRecipient>>
+    where
+        S: Clone,
+    {
+        let my_jid = self.credentials.account_jid.clone().ok_or_else(|| {
+            wa_core::CoreError::Protocol("status send requires account JID".to_owned())
+        })?;
+        let my_lid = self.credentials.account_lid.clone();
+        let mut lookup_jids = Vec::with_capacity(status_jids.len() + 2);
+        for jid in status_jids {
+            let jid = normalize_status_target_jid(jid)?;
+            push_unique_jid(&mut lookup_jids, &jid);
+        }
+        push_unique_jid(&mut lookup_jids, &my_jid);
+        if let Some(lid) = my_lid.as_deref() {
+            push_unique_jid(&mut lookup_jids, lid);
+        }
+        let devices = self
+            .fetch_device_jids(connection, &lookup_jids, false)
+            .await?;
+        let recipients = relay_recipients_from_device_jids(&devices, &my_jid, my_lid.as_deref())?;
+        if recipients.is_empty() {
+            return Err(wa_core::CoreError::Protocol(
+                "status send requires at least one recipient device".to_owned(),
+            ));
+        }
+        Ok(recipients)
+    }
+
     #[cfg(feature = "noise")]
     fn message_relay_options_with_sender(
         &self,
@@ -3146,6 +4537,142 @@ where
         .await
     }
 
+    pub async fn send_group_sender_key_message<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        content: impl Into<MessageContent>,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+    {
+        self.relay_group_sender_key_message(
+            connection,
+            group_jid,
+            content.into(),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    pub async fn send_group_sender_key_text<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        text: impl Into<String>,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+    {
+        self.relay_group_sender_key_message(
+            connection,
+            group_jid,
+            MessageContent::text_message(TextMessage::new(text)),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_group_sender_key_message_with_distribution<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        content: impl Into<MessageContent>,
+        device_encryptor: &E,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+        E: MessageEncryptor,
+    {
+        self.relay_group_sender_key_message_with_distribution(
+            connection,
+            group_jid,
+            content.into(),
+            device_encryptor,
+            distribution_options,
+            message_options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_group_sender_key_text_with_distribution<E>(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        text: impl Into<String>,
+        device_encryptor: &E,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+        E: MessageEncryptor,
+    {
+        self.relay_group_sender_key_message_with_distribution(
+            connection,
+            group_jid,
+            MessageContent::text_message(TextMessage::new(text)),
+            device_encryptor,
+            distribution_options,
+            message_options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_group_sender_key_message_with_signal_provider(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        content: impl Into<MessageContent>,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_group_sender_key_message_with_signal_provider(
+            connection,
+            group_jid,
+            content.into(),
+            distribution_options,
+            message_options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_group_sender_key_text_with_signal_provider(
+        &self,
+        connection: &Connection,
+        group_jid: &str,
+        text: impl Into<String>,
+        distribution_options: MessageRelayOptions,
+        message_options: MessageRelayOptions,
+    ) -> CoreResult<GroupSenderKeyMessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_group_sender_key_message_with_signal_provider(
+            connection,
+            group_jid,
+            MessageContent::text_message(TextMessage::new(text)),
+            distribution_options,
+            message_options,
+        )
+        .await
+    }
+
     #[cfg(feature = "noise")]
     pub async fn assert_sessions<I, T>(
         &self,
@@ -3159,17 +4686,49 @@ where
         T: AsRef<str>,
     {
         let repository = self.signal_repository();
+        let provider_state = self.signal_provider_state_store();
         let mut unique_jids = Vec::<String>::new();
         for jid in jids {
-            push_unique_jid(&mut unique_jids, jid.as_ref());
+            let jid = normalize_signal_session_jid(jid.as_ref())?;
+            push_unique_jid(&mut unique_jids, &jid);
         }
 
         let mut missing = Vec::new();
+        let mappings = LidPnMappingStore::new(self.store.clone());
         for jid in unique_jids {
             if !force_identity_refresh {
                 let validation = repository.validate_session(&jid).await?;
                 if validation.exists {
                     continue;
+                }
+                let provider_validation = provider_state.validate_session_record(&jid).await?;
+                if provider_validation.exists {
+                    continue;
+                }
+                let query_jid = self.session_query_jid(&mappings, &jid).await?;
+                if query_jid != jid {
+                    if let Some(info) = repository.get_session_info(&query_jid).await? {
+                        repository
+                            .inject_e2e_session(wa_core::SessionInjection {
+                                jid: jid.clone(),
+                                session: info.session,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    let provider_validation =
+                        provider_state.validate_session_record(&query_jid).await?;
+                    if provider_validation.exists
+                        && let (Some(session), Some(identity)) = (
+                            provider_state.load_session_record(&query_jid).await?,
+                            provider_state.load_identity_record(&query_jid).await?,
+                        )
+                    {
+                        provider_state
+                            .store_session_and_identity_records(&jid, &session, &identity)
+                            .await?;
+                        continue;
+                    }
                 }
             }
             missing.push(jid);
@@ -3179,7 +4738,15 @@ where
             return Ok(false);
         }
 
-        let query_jids = self.session_query_jids(&missing).await?;
+        let mut query_jids = Vec::with_capacity(missing.len());
+        let mut query_aliases = Vec::new();
+        for jid in &missing {
+            let query_jid = self.session_query_jid(&mappings, jid).await?;
+            if query_jid != *jid {
+                query_aliases.push((query_jid.clone(), jid.clone()));
+            }
+            push_unique_jid(&mut query_jids, &query_jid);
+        }
         let Some(query) =
             build_e2e_session_query(&query_jids, force_identity_refresh, self.queries.next_tag())?
         else {
@@ -3187,7 +4754,18 @@ where
         };
         let response = connection.query_node(query).await?;
         for injection in parse_e2e_sessions_node(&response.node)? {
-            repository.inject_e2e_session(injection).await?;
+            let alias_jids = query_aliases
+                .iter()
+                .filter_map(|(query_jid, original_jid)| {
+                    (query_jid == &injection.jid).then_some(original_jid.clone())
+                })
+                .collect::<Vec<_>>();
+            repository.inject_e2e_session(injection.clone()).await?;
+            for alias_jid in alias_jids {
+                let mut alias_injection = injection.clone();
+                alias_injection.jid = alias_jid;
+                repository.inject_e2e_session(alias_injection).await?;
+            }
         }
         Ok(true)
     }
@@ -3211,6 +4789,207 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn relay_message_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        content: MessageContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.relay_message(connection, remote_jid, content, &codec, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_message<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        content: impl Into<MessageContent>,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(connection, remote_jid, content.into(), encryptor, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_message_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        content: impl Into<MessageContent>,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(connection, remote_jid, content.into(), options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_status_message<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        content: MessageContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        let message = content.into_proto()?;
+        self.relay_status_proto_message(connection, status_jids, message, encryptor, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_status_proto_message<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        message: ProtoMessage,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        let status_jids = status_jids
+            .into_iter()
+            .map(|jid| jid.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        if status_jids.is_empty() {
+            return Err(wa_core::CoreError::Payload(
+                "status send requires at least one target JID".to_owned(),
+            ));
+        }
+        let recipients = self
+            .status_message_recipients(connection, &status_jids)
+            .await?;
+        let recipient_jids = recipients
+            .iter()
+            .map(|recipient| recipient.jid.as_str())
+            .collect::<Vec<_>>();
+        self.assert_sessions(connection, recipient_jids, false)
+            .await?;
+        let options = self.message_relay_options_with_sender(options)?;
+        let options = Self::message_relay_options_with_generated_id(options)?;
+        let options = Self::message_relay_options_with_reporting(
+            wa_core::STATUS_BROADCAST_JID,
+            &message,
+            options,
+        )?;
+        self.relay_proto_message_to_devices(
+            connection,
+            wa_core::STATUS_BROADCAST_JID,
+            message,
+            &recipients,
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_status_message_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        content: MessageContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        let message = content.into_proto()?;
+        self.relay_status_proto_message_with_signal_provider(
+            connection,
+            status_jids,
+            message,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_message<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        content: impl Into<MessageContent>,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(connection, status_jids, content.into(), encryptor, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_message_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        content: impl Into<MessageContent>,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            content.into(),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_status_proto_message_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        message: ProtoMessage,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        let codec = self.signal_message_codec()?;
+        self.relay_status_proto_message(connection, status_jids, message, &codec, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn relay_proto_message<E>(
         &self,
         connection: &Connection,
@@ -3223,12 +5002,13 @@ where
         E: MessageEncryptor,
         S: Clone + 'static,
     {
+        let remote_jid = normalize_account_jid(remote_jid)?;
         let my_jid = self.credentials.account_jid.clone().ok_or_else(|| {
             wa_core::CoreError::Protocol("message send requires account JID".to_owned())
         })?;
         let my_lid = self.credentials.account_lid.clone();
         let mut lookup_jids = Vec::with_capacity(3);
-        push_unique_jid(&mut lookup_jids, remote_jid);
+        push_unique_jid(&mut lookup_jids, &remote_jid);
         push_unique_jid(&mut lookup_jids, &my_jid);
         if let Some(lid) = my_lid.as_deref() {
             push_unique_jid(&mut lookup_jids, lid);
@@ -3238,6 +5018,11 @@ where
             .fetch_device_jids(connection, &lookup_jids, false)
             .await?;
         let recipients = relay_recipients_from_device_jids(&devices, &my_jid, my_lid.as_deref())?;
+        if recipients.is_empty() {
+            return Err(wa_core::CoreError::Protocol(
+                "message send requires at least one recipient device".to_owned(),
+            ));
+        }
         let recipient_jids = recipients
             .iter()
             .map(|recipient| recipient.jid.as_str())
@@ -3246,17 +5031,17 @@ where
             .await?;
         let options = self.message_relay_options_with_sender(options)?;
         let options = Self::message_relay_options_with_generated_id(options)?;
-        let options = Self::message_relay_options_with_reporting(remote_jid, &message, options)?;
+        let options = Self::message_relay_options_with_reporting(&remote_jid, &message, options)?;
         let options = self
-            .message_relay_options_with_tc_token(remote_jid, options)
+            .message_relay_options_with_tc_token(&remote_jid, options)
             .await?;
         let issue_plan = self
-            .tc_token_issue_after_send_plan(remote_jid, &message, &options)
+            .tc_token_issue_after_send_plan(&remote_jid, &message, &options)
             .await?;
         let relay = self
             .relay_proto_message_to_devices(
                 connection,
-                remote_jid,
+                &remote_jid,
                 message,
                 &recipients,
                 encryptor,
@@ -3267,6 +5052,22 @@ where
             self.spawn_tc_token_issue_after_send(connection, plan)?;
         }
         Ok(relay)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn relay_proto_message_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        message: ProtoMessage,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.relay_proto_message(connection, remote_jid, message, &codec, options)
+            .await
     }
 
     #[cfg(feature = "noise")]
@@ -3288,7 +5089,32 @@ where
             )
         })?;
         let remote_jid = normalize_account_jid(account_jid)?;
-        let keys = keys.into_iter().collect::<Vec<_>>();
+        let incoming_keys = keys;
+        let mut keys = Vec::<MessageKey>::new();
+        for key in incoming_keys {
+            let message_id = key
+                .id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    wa_core::CoreError::Payload(
+                        "placeholder resend message key missing id".to_owned(),
+                    )
+                })?
+                .to_owned();
+            if let Some(existing) = keys
+                .iter()
+                .find(|existing| existing.id.as_deref() == Some(message_id.as_str()))
+            {
+                if existing != &key {
+                    return Err(wa_core::CoreError::Payload(format!(
+                        "placeholder resend duplicate message id {message_id} has conflicting keys"
+                    )));
+                }
+                continue;
+            }
+            keys.push(key);
+        }
         let message = build_placeholder_resend_request_message(keys.clone())?;
         let now_ms = current_unix_timestamp_ms();
         let mut recorded_ids: Vec<String> = Vec::with_capacity(keys.len());
@@ -3330,6 +5156,22 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn request_placeholder_resend_with_signal_provider<I>(
+        &self,
+        connection: &Connection,
+        keys: I,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = MessageKey>,
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.request_placeholder_resend(connection, keys, &codec, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn request_placeholder_resend_for_web_message<E>(
         &self,
         connection: &Connection,
@@ -3368,6 +5210,30 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn request_placeholder_resend_for_web_message_with_signal_provider(
+        &self,
+        connection: &Connection,
+        message: &wa_core::WebMessageInfo,
+        category: Option<&str>,
+        unavailable_type: Option<&str>,
+        options: MessageRelayOptions,
+    ) -> CoreResult<Option<MessageRelay>>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.request_placeholder_resend_for_web_message(
+            connection,
+            message,
+            category,
+            unavailable_type,
+            &codec,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn execute_retry_resends<E>(
         &self,
         connection: &Connection,
@@ -3378,12 +5244,55 @@ where
         E: MessageEncryptor,
         S: Clone,
     {
+        self.execute_retry_resends_with_device_identity(
+            connection,
+            preparation,
+            encryptor,
+            None,
+            &[],
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn execute_retry_resends_with_signal_provider(
+        &self,
+        connection: &Connection,
+        preparation: &RetryResendPreparation,
+    ) -> CoreResult<Vec<MessageRelay>>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.execute_retry_resends(connection, preparation, &codec)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    async fn execute_retry_resends_with_device_identity<E>(
+        &self,
+        connection: &Connection,
+        preparation: &RetryResendPreparation,
+        encryptor: &E,
+        retry_device_identity: Option<&Bytes>,
+        cached_recipients: &[RetryRecipientCacheEntry],
+    ) -> CoreResult<Vec<MessageRelay>>
+    where
+        E: MessageEncryptor,
+        S: Clone,
+    {
         let mut relays = Vec::with_capacity(preparation.jobs.len());
         for job in &preparation.jobs {
-            let recipients = self.retry_resend_recipients(connection, job).await?;
-            let options = self
-                .retry_resend_options(&job.remote_jid, &job.message, &job.message_id)
-                .await?;
+            let target_key = retry_resend_target_key(&job.target);
+            let recipients = cached_recipients
+                .iter()
+                .find(|entry| entry.remote_jid == job.remote_jid && entry.target_key == target_key)
+                .map(|entry| entry.recipients.clone());
+            let recipients = match recipients {
+                Some(recipients) => recipients,
+                None => self.retry_resend_recipients(connection, job).await?,
+            };
+            let options = self.retry_resend_options(&job.message_id, retry_device_identity)?;
             let relay = self
                 .relay_proto_message_to_devices(
                     connection,
@@ -3422,7 +5331,7 @@ where
                 })?;
                 let my_lid = self.credentials.account_lid.clone();
                 let mut lookup_jids = Vec::with_capacity(3);
-                push_unique_jid(&mut lookup_jids, &job.remote_jid);
+                push_unique_normalized_account_jid(&mut lookup_jids, &job.requester_jid)?;
                 push_unique_jid(&mut lookup_jids, &my_jid);
                 if let Some(lid) = my_lid.as_deref() {
                     push_unique_jid(&mut lookup_jids, lid);
@@ -3433,6 +5342,11 @@ where
                     .await?;
                 let recipients =
                     relay_recipients_from_device_jids(&devices, &my_jid, my_lid.as_deref())?;
+                if recipients.is_empty() {
+                    return Err(wa_core::CoreError::Protocol(
+                        "retry resend requires at least one recipient device".to_owned(),
+                    ));
+                }
                 let recipient_jids = recipients
                     .iter()
                     .map(|recipient| recipient.jid.as_str())
@@ -3445,22 +5359,20 @@ where
     }
 
     #[cfg(feature = "noise")]
-    async fn retry_resend_options(
+    fn retry_resend_options(
         &self,
-        remote_jid: &str,
-        message: &ProtoMessage,
         message_id: &str,
+        retry_device_identity: Option<&Bytes>,
     ) -> CoreResult<MessageRelayOptions>
     where
         S: Clone,
     {
-        let options = self.message_relay_options_with_sender(
-            MessageRelayOptions::new().with_message_id(message_id.to_owned()),
-        )?;
-        let options = Self::message_relay_options_with_generated_id(options)?;
-        let options = Self::message_relay_options_with_reporting(remote_jid, message, options)?;
-        self.message_relay_options_with_tc_token(remote_jid, options)
-            .await
+        let mut options = MessageRelayOptions::new().with_message_id(message_id.to_owned());
+        if let Some(identity) = retry_device_identity {
+            options = retry_options_with_device_identity(options, identity)?;
+        }
+        let options = self.message_relay_options_with_sender(options)?;
+        Self::message_relay_options_with_generated_id(options)
     }
 
     #[cfg(feature = "noise")]
@@ -3529,12 +5441,13 @@ where
             return Ok(options);
         }
 
-        let mapping = LidPnMappingStore::new(self.store.clone());
-        let storage_jid = if let Some(lid_user) = mapping.lid_for_pn(remote_jid).await? {
-            format!("{lid_user}@lid")
-        } else {
-            remote_jid.to_owned()
-        };
+        if self.is_own_token_target_resolved(remote_jid).await? {
+            return Ok(options);
+        }
+        let storage_jid = self.tc_token_storage_jid(remote_jid).await?;
+        if !wa_core::is_regular_tc_token_jid(&storage_jid) {
+            return Ok(options);
+        }
         let Some(node) = wa_core::load_tc_token_node_for_send(
             &self.store,
             &storage_jid,
@@ -3558,9 +5471,14 @@ where
         S: Clone,
     {
         let normalized_target = normalize_account_jid(target_jid)?;
-        if has_child_node(&node, "tctoken")
-            || (skip_self && self.is_own_token_target(&normalized_target))
-            || !wa_core::is_regular_tc_token_jid(&normalized_target)
+        if has_child_node(&node, "tctoken") || !wa_core::is_regular_tc_token_jid(&normalized_target)
+        {
+            return Ok(node);
+        }
+        if skip_self
+            && self
+                .is_own_token_target_resolved(&normalized_target)
+                .await?
         {
             return Ok(node);
         }
@@ -3594,6 +5512,169 @@ where
     }
 
     #[cfg(feature = "noise")]
+    async fn is_own_token_target_resolved(&self, jid: &str) -> CoreResult<bool>
+    where
+        S: Clone,
+    {
+        let normalized = normalize_account_jid(jid)?;
+        if self.is_own_token_target(&normalized) {
+            return Ok(true);
+        }
+
+        let mapping = LidPnMappingStore::new(self.store.clone());
+        match account_jid_kind(&normalized)? {
+            AccountJidKind::PhoneNumber => {
+                if let Some(lid_user) = mapping.lid_for_pn(&normalized).await? {
+                    return Ok(self.is_own_token_target(&lid_user_jid(lid_user)?));
+                }
+            }
+            AccountJidKind::Lid => {
+                if let Some(pn_user) = mapping.pn_for_lid(&normalized).await? {
+                    return Ok(self.is_own_token_target(&pn_user_jid(pn_user)?));
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_privacy_token_notification(
+        &self,
+        node: &BinaryNode,
+    ) -> CoreResult<Option<PrivacyTokenNotificationOutcome>>
+    where
+        S: Clone,
+    {
+        let Ok(notification) = wa_core::parse_inbound_notification(node) else {
+            return Ok(None);
+        };
+        if notification.notification_type.as_deref() != Some("privacy_token")
+            || !has_child_node(node, "tokens")
+        {
+            return Ok(None);
+        }
+
+        let sender_lid = privacy_token_notification_sender_lid(node);
+        let storage_jid = match &sender_lid {
+            Some(sender_lid) => sender_lid.clone(),
+            None => {
+                let from = jid_normalized_user(&notification.from)
+                    .unwrap_or_else(|| notification.from.clone());
+                self.tc_token_storage_jid(&from).await?
+            }
+        };
+        if self.is_own_token_target_resolved(&storage_jid).await? {
+            return Ok(None);
+        }
+        let stored_tokens =
+            store_tc_tokens_from_privacy_token_notification(&self.store, node, Some(&storage_jid))
+                .await?;
+        Ok(Some(PrivacyTokenNotificationOutcome {
+            storage_jid,
+            sender_lid,
+            stored_tokens,
+        }))
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_ack_error_tc_token_recovery(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+    ) -> CoreResult<Option<AckErrorTcTokenRecoveryOutcome>>
+    where
+        S: Clone + 'static,
+    {
+        let Ok(ack) = wa_core::parse_inbound_ack(node) else {
+            return Ok(None);
+        };
+        if ack.class != "message" || ack.error_code != Some(wa_core::ACK_ERROR_ACCOUNT_RESTRICTED) {
+            return Ok(None);
+        }
+        let Some(plan) = self
+            .tc_token_ack_error_recovery_plan(&ack, current_unix_timestamp())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let scheduled = self.spawn_tc_token_issue(connection, plan.clone())?;
+        Ok(Some(AckErrorTcTokenRecoveryOutcome {
+            ack_id: ack.id,
+            remote_jid: ack.from.unwrap_or_default(),
+            storage_jid: plan.storage_jid,
+            issue_jid: plan.issue_jid,
+            timestamp_seconds: plan.timestamp_seconds,
+            scheduled,
+        }))
+    }
+
+    #[cfg(feature = "noise")]
+    async fn handle_incoming_node_side_effects(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+    ) -> CoreResult<()>
+    where
+        S: Clone + 'static,
+    {
+        for side_effect_node in incoming_side_effect_nodes(node) {
+            let _ = self
+                .handle_ack_error_tc_token_recovery(connection, side_effect_node)
+                .await?;
+            let _ = self
+                .handle_server_sync_notification(connection, side_effect_node)
+                .await?;
+            let _ = self
+                .handle_privacy_token_notification(side_effect_node)
+                .await?;
+            let _ = self
+                .handle_device_list_notification(side_effect_node)
+                .await?;
+            let _ = self
+                .handle_identity_change_notification(connection, side_effect_node)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "noise")]
+    async fn handle_incoming_node_side_effects_with_app_state_snapshot_recovery<T>(
+        &self,
+        connection: &Connection,
+        transfer: &wa_core::MediaTransfer<T>,
+        node: &BinaryNode,
+    ) -> CoreResult<()>
+    where
+        S: Clone + 'static,
+        T: wa_core::MediaTransport,
+    {
+        for side_effect_node in incoming_side_effect_nodes(node) {
+            let _ = self
+                .handle_ack_error_tc_token_recovery(connection, side_effect_node)
+                .await?;
+            let _ = self
+                .handle_server_sync_notification_with_snapshot_recovery(
+                    connection,
+                    transfer,
+                    side_effect_node,
+                    None,
+                )
+                .await?;
+            let _ = self
+                .handle_privacy_token_notification(side_effect_node)
+                .await?;
+            let _ = self
+                .handle_device_list_notification(side_effect_node)
+                .await?;
+            let _ = self
+                .handle_identity_change_notification(connection, side_effect_node)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn issue_tc_token(
         &self,
         connection: &Connection,
@@ -3617,6 +5698,9 @@ where
     where
         S: Clone,
     {
+        if self.is_own_token_target_resolved(jid).await? {
+            return Ok(None);
+        }
         let storage_jid = self.tc_token_storage_jid(jid).await?;
         let issue_jid = self.tc_token_issue_jid(jid, issue_to_lid).await?;
         self.issue_resolved_tc_token(connection, storage_jid, issue_jid, timestamp_seconds)
@@ -3746,6 +5830,9 @@ where
         {
             return Ok(None);
         }
+        if self.is_own_token_target_resolved(remote_jid).await? {
+            return Ok(None);
+        }
         let storage_jid = self.tc_token_storage_jid(remote_jid).await?;
         if !wa_core::is_regular_tc_token_jid(&storage_jid) {
             return Ok(None);
@@ -3768,6 +5855,38 @@ where
             storage_jid,
             issue_jid,
             timestamp_seconds: now,
+        }))
+    }
+
+    #[cfg(feature = "noise")]
+    async fn tc_token_ack_error_recovery_plan(
+        &self,
+        ack: &wa_core::InboundAck,
+        now_seconds: u64,
+    ) -> CoreResult<Option<TcTokenIssuePlan>>
+    where
+        S: Clone,
+    {
+        let Some(remote_jid) = ack.from.as_deref() else {
+            return Ok(None);
+        };
+        if self.is_own_token_target_resolved(remote_jid).await? {
+            return Ok(None);
+        }
+        let storage_jid = self.tc_token_storage_jid(remote_jid).await?;
+        if !wa_core::is_regular_tc_token_jid(&storage_jid) {
+            return Ok(None);
+        }
+        let issue_jid = self
+            .tc_token_issue_jid(remote_jid, self.config.lid_trusted_token_issue_to_lid)
+            .await?;
+        if !wa_core::is_regular_tc_token_jid(&issue_jid) {
+            return Ok(None);
+        }
+        Ok(Some(TcTokenIssuePlan {
+            storage_jid,
+            issue_jid,
+            timestamp_seconds: now_seconds,
         }))
     }
 
@@ -3892,6 +6011,98 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn handle_device_list_notification(
+        &self,
+        node: &BinaryNode,
+    ) -> CoreResult<Option<DeviceListNotificationOutcome>>
+    where
+        S: Clone,
+    {
+        let Ok(notification) = wa_core::parse_inbound_notification(node) else {
+            return Ok(None);
+        };
+        let Some(notification) = wa_core::device_list_notification_from_node(node, &notification)
+        else {
+            return Ok(None);
+        };
+        let device_jids = notification.device_jids();
+        let deleted_sessions = if notification.action == "remove" {
+            self.signal_repository()
+                .delete_sessions(&device_jids)
+                .await?;
+            device_jids.clone()
+        } else {
+            Vec::new()
+        };
+        Ok(Some(DeviceListNotificationOutcome {
+            notification,
+            device_jids,
+            deleted_sessions,
+        }))
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_server_sync_notification(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+    ) -> CoreResult<Option<ServerSyncNotificationOutcome>>
+    where
+        S: Clone,
+    {
+        let Ok(notification) = wa_core::parse_inbound_notification(node) else {
+            return Ok(None);
+        };
+        let collections =
+            wa_core::server_sync_collections_from_notification_node(node, &notification)?;
+        if collections.is_empty() {
+            return Ok(None);
+        }
+        let sync = self
+            .sync_and_apply_app_state_until_current_with_store_keys(
+                connection,
+                collections.iter().copied(),
+                false,
+                DEFAULT_APP_STATE_SERVER_SYNC_RESYNC_ROUNDS,
+            )
+            .await?;
+        Ok(Some(ServerSyncNotificationOutcome { collections, sync }))
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_server_sync_notification_with_snapshot_recovery<T>(
+        &self,
+        connection: &Connection,
+        transfer: &wa_core::MediaTransfer<T>,
+        node: &BinaryNode,
+        fallback_host: Option<&str>,
+    ) -> CoreResult<Option<ServerSyncNotificationOutcome>>
+    where
+        S: Clone,
+        T: wa_core::MediaTransport,
+    {
+        let Ok(notification) = wa_core::parse_inbound_notification(node) else {
+            return Ok(None);
+        };
+        let collections =
+            wa_core::server_sync_collections_from_notification_node(node, &notification)?;
+        if collections.is_empty() {
+            return Ok(None);
+        }
+        let sync = self
+            .sync_recover_and_apply_app_state_until_current_with_store_keys(
+                connection,
+                transfer,
+                collections.iter().copied(),
+                false,
+                DEFAULT_APP_STATE_SERVER_SYNC_RESYNC_ROUNDS,
+                fallback_host,
+            )
+            .await?;
+        Ok(Some(ServerSyncNotificationOutcome { collections, sync }))
+    }
+
+    #[cfg(feature = "noise")]
     async fn schedule_tc_token_reissue_after_identity_change(
         &self,
         connection: &Connection,
@@ -3918,6 +6129,9 @@ where
     where
         S: Clone,
     {
+        if self.is_own_token_target_resolved(jid).await? {
+            return Ok(None);
+        }
         let storage_jid = self.tc_token_storage_jid(jid).await?;
         if !wa_core::is_regular_tc_token_jid(&storage_jid) {
             return Ok(None);
@@ -4001,6 +6215,1467 @@ where
         .await
     }
 
+    #[cfg(feature = "noise")]
+    pub async fn send_text_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        text: impl Into<String>,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::text_message(TextMessage::new(text)),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_contact<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        contact: ContactContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::contact(contact),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_contact_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        contact: ContactContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::contact(contact),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_contacts<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        contacts: ContactsContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::contacts(contacts),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_contacts_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        contacts: ContactsContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::contacts(contacts),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_location<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        location: LocationContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::location(location),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_location_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        location: LocationContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::location(location),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_live_location<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        location: LiveLocationContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::live_location(location),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_live_location_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        location: LiveLocationContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::live_location(location),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_image<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        image: ImageContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::image(image),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_image_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        image: ImageContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::image(image),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_view_once_image<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut image: ImageContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        image.view_once = true;
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::view_once(MessageContent::image(image)),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_view_once_image_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut image: ImageContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        image.view_once = true;
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::view_once(MessageContent::image(image)),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_video<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        video: VideoContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::video(video),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_video_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        video: VideoContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::video(video),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_view_once_video<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut video: VideoContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        video.view_once = true;
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::view_once(MessageContent::video(video)),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_view_once_video_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut video: VideoContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        video.view_once = true;
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::view_once(MessageContent::video(video)),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_gif<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut video: VideoContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        video.gif_playback = true;
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::video(video),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_gif_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut video: VideoContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        video.gif_playback = true;
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::video(video),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_ptv<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        video: VideoContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::ptv(video),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_ptv_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        video: VideoContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::ptv(video),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_audio<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        audio: AudioContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::audio(audio),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_audio_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        audio: AudioContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::audio(audio),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_ptt<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut audio: AudioContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        audio.ptt = true;
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::audio(audio),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_ptt_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        mut audio: AudioContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        audio.ptt = true;
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::audio(audio),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_document<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        document: DocumentContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::document(document),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_document_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        document: DocumentContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::document(document),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_sticker<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        sticker: StickerContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::sticker(sticker),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_sticker_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        sticker: StickerContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::sticker(sticker),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_poll<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        poll: PollContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::poll(poll),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_poll_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        poll: PollContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::poll(poll),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_event<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        event: EventContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::event(event),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_event_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        event: EventContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::event(event),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_poll_update<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        update: PollUpdateContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::poll_update(update),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_poll_update_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        update: PollUpdateContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::poll_update(update),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_poll_vote<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        vote: PollVoteContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        let update = wa_core::build_encrypted_poll_update_content(vote)?;
+        self.send_poll_update(connection, remote_jid, update, encryptor, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_poll_vote_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        vote: PollVoteContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        let update = wa_core::build_encrypted_poll_update_content(vote)?;
+        self.send_poll_update_with_signal_provider(connection, remote_jid, update, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_event_response<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        response: EventResponseContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::event_response(response),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_event_response_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        response: EventResponseContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::event_response(response),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_event_response_payload<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        response: EventResponsePayload,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        let response = wa_core::build_encrypted_event_response_content(response)?;
+        self.send_event_response(connection, remote_jid, response, encryptor, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_event_response_payload_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        response: EventResponsePayload,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        let response = wa_core::build_encrypted_event_response_content(response)?;
+        self.send_event_response_with_signal_provider(connection, remote_jid, response, options)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_reaction<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        reaction: ReactionContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::reaction(reaction),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_reaction_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        reaction: ReactionContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::reaction(reaction),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_edit<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        edit: EditContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::edit(edit),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_edit_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        edit: EditContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::edit(edit),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_delete<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        delete: DeleteContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::delete(delete),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_delete_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        delete: DeleteContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::delete(delete),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_pin<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        pin: PinContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::pin(pin),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_pin_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        pin: PinContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::pin(pin),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_disappearing_mode<E>(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        content: DisappearingModeContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        S: Clone + 'static,
+    {
+        self.relay_message(
+            connection,
+            remote_jid,
+            MessageContent::disappearing_mode(content),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_disappearing_mode_with_signal_provider(
+        &self,
+        connection: &Connection,
+        remote_jid: &str,
+        content: DisappearingModeContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        S: Clone + 'static,
+    {
+        self.relay_message_with_signal_provider(
+            connection,
+            remote_jid,
+            MessageContent::disappearing_mode(content),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_text<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        text: impl Into<String>,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::text_message(TextMessage::new(text)),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_text_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        text: impl Into<String>,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::text_message(TextMessage::new(text)),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_poll<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        poll: PollContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::poll(poll),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_poll_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        poll: PollContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::poll(poll),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_image<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        image: ImageContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::image(image),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_image_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        image: ImageContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::image(image),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_video<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        video: VideoContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::video(video),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_video_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        video: VideoContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::video(video),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_document<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        document: DocumentContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::document(document),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_document_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        document: DocumentContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::document(document),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_audio<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        audio: AudioContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::audio(audio),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_audio_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        audio: AudioContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::audio(audio),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_sticker<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        sticker: StickerContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::sticker(sticker),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_sticker_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        sticker: StickerContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::sticker(sticker),
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_event<E, I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        event: EventContent,
+        encryptor: &E,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        E: MessageEncryptor,
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message(
+            connection,
+            status_jids,
+            MessageContent::event(event),
+            encryptor,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn send_status_event_with_signal_provider<I, T>(
+        &self,
+        connection: &Connection,
+        status_jids: I,
+        event: EventContent,
+        options: MessageRelayOptions,
+    ) -> CoreResult<MessageRelay>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+        S: Clone,
+    {
+        self.relay_status_message_with_signal_provider(
+            connection,
+            status_jids,
+            MessageContent::event(event),
+            options,
+        )
+        .await
+    }
+
     pub async fn send_receipt(
         &self,
         connection: &Connection,
@@ -4036,6 +7711,21 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn reject_call(
+        &self,
+        connection: &Connection,
+        call_id: &str,
+        call_from: &str,
+    ) -> CoreResult<BinaryNode> {
+        let from_jid = self.credentials.account_jid.as_deref().ok_or_else(|| {
+            wa_core::CoreError::Protocol("call reject requires account JID".to_owned())
+        })?;
+        let node = build_call_reject_node(from_jid, call_from, call_id)?;
+        let response = connection.query_node(node).await?;
+        Ok(response.node)
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn process_incoming_node<D>(
         &self,
         connection: &Connection,
@@ -4063,7 +7753,10 @@ where
         if let Some(response) = &result.response {
             connection.send_node(response).await?;
         }
-        let events = buffer.drain_events();
+        let mut events = buffer.drain_events();
+        enrich_poll_event_update_events_from_store(&self.store, &mut events).await?;
+        enrich_call_events_from_store(&self.store, &mut events).await?;
+        append_derived_message_events(&mut events)?;
         persist_receive_events(&self.store, &events).await?;
         resolve_placeholder_resend_events_in_batches(&self.placeholder_resend, &events)?;
         self.handle_app_state_sync_key_share_events(
@@ -4073,11 +7766,25 @@ where
             DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
         )
         .await?;
-        let _ = self
-            .handle_identity_change_notification(connection, node)
+        self.handle_incoming_node_side_effects(connection, node)
             .await?;
         emit_buffered_events(&self.events, events);
         Ok(result)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_incoming_node_with_signal_provider(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        buffer: &mut wa_core::EventBuffer,
+    ) -> CoreResult<wa_core::InboundNodeProcessing>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.process_incoming_node(connection, node, &codec, buffer)
+            .await
     }
 
     #[cfg(feature = "noise")]
@@ -4116,7 +7823,10 @@ where
         if let Some(response) = &result.response {
             connection.send_node(response).await?;
         }
-        let events = buffer.drain_events();
+        let mut events = buffer.drain_events();
+        enrich_poll_event_update_events_from_store(&self.store, &mut events).await?;
+        enrich_call_events_from_store(&self.store, &mut events).await?;
+        append_derived_message_events(&mut events)?;
         persist_receive_events(&self.store, &events).await?;
         resolve_placeholder_resend_events_in_batches(&self.placeholder_resend, &events)?;
         self.handle_app_state_sync_key_share_events(
@@ -4126,8 +7836,7 @@ where
             DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
         )
         .await?;
-        let _ = self
-            .handle_identity_change_notification(connection, node)
+        self.handle_incoming_node_side_effects(connection, node)
             .await?;
         emit_buffered_events(&self.events, events);
 
@@ -4149,6 +7858,21 @@ where
             inbound: result,
             placeholder_resend,
         })
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_incoming_node_with_placeholder_resend_with_signal_provider(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        buffer: &mut wa_core::EventBuffer,
+    ) -> CoreResult<IncomingPlaceholderResendProcessing>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.process_incoming_node_with_placeholder_resend(connection, node, &codec, &codec, buffer)
+            .await
     }
 
     #[cfg(feature = "noise")]
@@ -4189,6 +7913,21 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn process_incoming_node_with_retry_resend_with_signal_provider(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        buffer: &mut wa_core::EventBuffer,
+    ) -> CoreResult<IncomingRetryResendProcessing>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.process_incoming_node_with_retry_resend(connection, node, &codec, &codec, buffer)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
     pub async fn process_incoming_node_with_media_retry<D, T>(
         &self,
         connection: &Connection,
@@ -4219,7 +7958,10 @@ where
             connection.send_node(response).await?;
         }
 
-        let events = buffer.drain_events();
+        let mut events = buffer.drain_events();
+        enrich_poll_event_update_events_from_store(&self.store, &mut events).await?;
+        enrich_call_events_from_store(&self.store, &mut events).await?;
+        append_derived_message_events(&mut events)?;
         persist_receive_events(&self.store, &events).await?;
         resolve_placeholder_resend_events_in_batches(&self.placeholder_resend, &events)?;
         self.handle_app_state_sync_key_share_events(
@@ -4229,16 +7971,343 @@ where
             DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
         )
         .await?;
-        let _ = self
-            .handle_identity_change_notification(connection, node)
+        self.handle_incoming_node_side_effects_with_app_state_snapshot_recovery(
+            connection, transfer, node,
+        )
+        .await?;
+        let media_retry = self
+            .handle_persisted_media_retry_events(transfer, &events)
             .await?;
-        let media_retry = self.handle_media_retry_events(transfer, &events).await?;
         emit_buffered_events(&self.events, events);
 
         Ok(IncomingMediaRetryProcessing {
             inbound: result,
             media_retry,
         })
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_incoming_node_with_media_retry_with_signal_provider<T>(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        buffer: &mut wa_core::EventBuffer,
+        transfer: &wa_core::MediaTransfer<T>,
+    ) -> CoreResult<IncomingMediaRetryProcessing>
+    where
+        T: wa_core::MediaTransport,
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.process_incoming_node_with_media_retry(connection, node, &codec, buffer, transfer)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_incoming_node_with_placeholder_retry_and_media_retry<D, E, T>(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        decryptor: &D,
+        encryptor: &E,
+        buffer: &mut wa_core::EventBuffer,
+        transfer: &wa_core::MediaTransfer<T>,
+    ) -> CoreResult<IncomingPlaceholderRetryMediaProcessing>
+    where
+        D: wa_core::InboundMessageDecryptor,
+        E: MessageEncryptor,
+        T: wa_core::MediaTransport,
+        S: Clone + 'static,
+    {
+        let own_jid = self.credentials.account_jid.as_deref().ok_or_else(|| {
+            wa_core::CoreError::Protocol("incoming processing requires account JID".to_owned())
+        })?;
+        let placeholder = wa_core::placeholder_unavailable_message_from_node(
+            node,
+            own_jid,
+            self.credentials.account_lid.as_deref(),
+            current_unix_timestamp(),
+        )?;
+        let retry_receipt = parse_retry_receipt_with_bundle(node)?;
+        let result = wa_core::process_inbound_node(
+            node,
+            own_jid,
+            self.credentials.account_lid.as_deref(),
+            self.local_ack_jid(),
+            decryptor,
+            buffer,
+        )
+        .await?;
+
+        if let Some(response) = &result.response {
+            connection.send_node(response).await?;
+        }
+
+        let mut events = buffer.drain_events();
+        enrich_poll_event_update_events_from_store(&self.store, &mut events).await?;
+        enrich_call_events_from_store(&self.store, &mut events).await?;
+        append_derived_message_events(&mut events)?;
+        persist_receive_events(&self.store, &events).await?;
+        resolve_placeholder_resend_events_in_batches(&self.placeholder_resend, &events)?;
+        self.handle_app_state_sync_key_share_events(
+            connection,
+            &events,
+            false,
+            DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
+        )
+        .await?;
+        self.handle_incoming_node_side_effects_with_app_state_snapshot_recovery(
+            connection, transfer, node,
+        )
+        .await?;
+        let media_retry = self
+            .handle_persisted_media_retry_events(transfer, &events)
+            .await?;
+        emit_buffered_events(&self.events, events);
+
+        let placeholder_resend = if let Some(placeholder) = placeholder {
+            self.request_placeholder_resend_for_web_message(
+                connection,
+                &placeholder.web_message,
+                placeholder.category.as_deref(),
+                placeholder.unavailable_type.as_deref(),
+                encryptor,
+                MessageRelayOptions::new(),
+            )
+            .await?
+        } else {
+            None
+        };
+        let retry_resend = if let Some(parsed) = retry_receipt {
+            Some(
+                self.handle_retry_receipt_with_bundle(
+                    connection,
+                    &parsed.receipt,
+                    parsed.key_bundle,
+                    encryptor,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok(IncomingPlaceholderRetryMediaProcessing {
+            inbound: result,
+            placeholder_resend,
+            retry_resend,
+            media_retry,
+        })
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_incoming_node_with_placeholder_retry_and_media_retry_with_signal_provider<
+        T,
+    >(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        buffer: &mut wa_core::EventBuffer,
+        transfer: &wa_core::MediaTransfer<T>,
+    ) -> CoreResult<IncomingPlaceholderRetryMediaProcessing>
+    where
+        T: wa_core::MediaTransport,
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.process_incoming_node_with_placeholder_retry_and_media_retry(
+            connection, node, &codec, &codec, buffer, transfer,
+        )
+        .await
+    }
+
+    pub async fn process_offline_node<D>(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        decryptor: &D,
+        buffer: &mut wa_core::EventBuffer,
+    ) -> CoreResult<wa_core::OfflineNodeProcessing>
+    where
+        D: wa_core::InboundMessageDecryptor,
+        S: Clone + 'static,
+    {
+        let own_jid = self.credentials.account_jid.as_deref().ok_or_else(|| {
+            wa_core::CoreError::Protocol("incoming processing requires account JID".to_owned())
+        })?;
+        let result = wa_core::process_offline_node(
+            node,
+            own_jid,
+            self.credentials.account_lid.as_deref(),
+            self.local_ack_jid(),
+            decryptor,
+            buffer,
+            wa_core::DEFAULT_OFFLINE_NODE_YIELD_EVERY,
+        )
+        .await?;
+
+        for child in &result.results {
+            if let Some(response) = &child.response {
+                connection.send_node(response).await?;
+            }
+        }
+
+        let mut events = buffer.drain_events();
+        enrich_poll_event_update_events_from_store(&self.store, &mut events).await?;
+        enrich_call_events_from_store(&self.store, &mut events).await?;
+        append_derived_message_events(&mut events)?;
+        persist_receive_events(&self.store, &events).await?;
+        resolve_placeholder_resend_events_in_batches(&self.placeholder_resend, &events)?;
+        self.handle_app_state_sync_key_share_events(
+            connection,
+            &events,
+            false,
+            DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
+        )
+        .await?;
+        self.handle_incoming_node_side_effects(connection, node)
+            .await?;
+        emit_buffered_events(&self.events, events);
+        Ok(result)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_offline_node_with_signal_provider(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        buffer: &mut wa_core::EventBuffer,
+    ) -> CoreResult<wa_core::OfflineNodeProcessing>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.process_offline_node(connection, node, &codec, buffer)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_offline_node_with_placeholder_retry_and_media_retry<D, E, T>(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        decryptor: &D,
+        encryptor: &E,
+        buffer: &mut wa_core::EventBuffer,
+        transfer: &wa_core::MediaTransfer<T>,
+    ) -> CoreResult<IncomingOfflinePlaceholderRetryMediaProcessing>
+    where
+        D: wa_core::InboundMessageDecryptor,
+        E: MessageEncryptor,
+        T: wa_core::MediaTransport,
+        S: Clone + 'static,
+    {
+        let own_jid = self.credentials.account_jid.as_deref().ok_or_else(|| {
+            wa_core::CoreError::Protocol("incoming processing requires account JID".to_owned())
+        })?;
+        let placeholders = placeholder_unavailable_messages_from_raw_node(
+            node,
+            own_jid,
+            self.credentials.account_lid.as_deref(),
+            current_unix_timestamp(),
+        )?;
+        let retry_receipts = retry_receipts_from_raw_node(node)?;
+        let result = wa_core::process_offline_node(
+            node,
+            own_jid,
+            self.credentials.account_lid.as_deref(),
+            self.local_ack_jid(),
+            decryptor,
+            buffer,
+            wa_core::DEFAULT_OFFLINE_NODE_YIELD_EVERY,
+        )
+        .await?;
+
+        for child in &result.results {
+            if let Some(response) = &child.response {
+                connection.send_node(response).await?;
+            }
+        }
+
+        let mut events = buffer.drain_events();
+        enrich_poll_event_update_events_from_store(&self.store, &mut events).await?;
+        enrich_call_events_from_store(&self.store, &mut events).await?;
+        append_derived_message_events(&mut events)?;
+        persist_receive_events(&self.store, &events).await?;
+        resolve_placeholder_resend_events_in_batches(&self.placeholder_resend, &events)?;
+        self.handle_app_state_sync_key_share_events(
+            connection,
+            &events,
+            false,
+            DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
+        )
+        .await?;
+        self.handle_incoming_node_side_effects_with_app_state_snapshot_recovery(
+            connection, transfer, node,
+        )
+        .await?;
+        let media_retry = self
+            .handle_persisted_media_retry_events(transfer, &events)
+            .await?;
+        emit_buffered_events(&self.events, events);
+
+        let mut placeholder_resends = Vec::new();
+        for placeholder in placeholders {
+            if let Some(relay) = self
+                .request_placeholder_resend_for_web_message(
+                    connection,
+                    &placeholder.web_message,
+                    placeholder.category.as_deref(),
+                    placeholder.unavailable_type.as_deref(),
+                    encryptor,
+                    MessageRelayOptions::new(),
+                )
+                .await?
+            {
+                placeholder_resends.push(relay);
+            }
+        }
+
+        let mut retry_resends = Vec::new();
+        for parsed in retry_receipts {
+            retry_resends.push(
+                self.handle_retry_receipt_with_bundle(
+                    connection,
+                    &parsed.receipt,
+                    parsed.key_bundle,
+                    encryptor,
+                )
+                .await?,
+            );
+        }
+
+        Ok(IncomingOfflinePlaceholderRetryMediaProcessing {
+            offline: result,
+            placeholder_resends,
+            retry_resends,
+            media_retry,
+        })
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_offline_node_with_placeholder_retry_and_media_retry_with_signal_provider<
+        T,
+    >(
+        &self,
+        connection: &Connection,
+        node: &BinaryNode,
+        buffer: &mut wa_core::EventBuffer,
+        transfer: &wa_core::MediaTransfer<T>,
+    ) -> CoreResult<IncomingOfflinePlaceholderRetryMediaProcessing>
+    where
+        T: wa_core::MediaTransport,
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.process_offline_node_with_placeholder_retry_and_media_retry(
+            connection, node, &codec, &codec, buffer, transfer,
+        )
+        .await
     }
 
     #[cfg(feature = "noise")]
@@ -4268,21 +8337,14 @@ where
             loop {
                 match events.recv().await {
                     Ok(Event::RawNode(node)) => {
-                        if let Some(refresh) =
-                            refresh_groups_for_dirty_node_with_queries(&connection, &queries, &node)
-                                .await?
-                        {
-                            emit_group_dirty_refresh_events(&event_hub, &refresh);
-                            continue;
-                        }
-                        if let Some(refresh) = refresh_communities_for_dirty_node_with_queries(
+                        if let Some(refresh) = refresh_group_surfaces_for_dirty_node_with_queries(
                             &connection,
                             &queries,
                             &node,
                         )
                         .await?
                         {
-                            emit_community_dirty_refresh_events(&event_hub, &refresh);
+                            emit_group_surface_dirty_refresh_events(&event_hub, &refresh);
                             continue;
                         }
                         if node.tag == "offline" {
@@ -4315,7 +8377,10 @@ where
                                 connection.send_node(response).await?;
                             }
                         }
-                        let events = buffer.drain_events();
+                        let mut events = buffer.drain_events();
+                        enrich_poll_event_update_events_from_store(&store, &mut events).await?;
+                        enrich_call_events_from_store(&store, &mut events).await?;
+                        append_derived_message_events(&mut events)?;
                         persist_receive_events(&store, &events).await?;
                         resolve_placeholder_resend_events_in_batches(&placeholder_resend, &events)?;
                         handle_app_state_sync_key_share_events_with_store(
@@ -4328,8 +8393,8 @@ where
                             DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
                         )
                         .await?;
-                        let _ = client
-                            .handle_identity_change_notification(&connection, &node)
+                        client
+                            .handle_incoming_node_side_effects(&connection, &node)
                             .await?;
                         emit_buffered_events(&event_hub, events);
                     }
@@ -4348,6 +8413,19 @@ where
         Ok(IncomingProcessor {
             handle: Some(handle),
         })
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_signal_provider(
+        &self,
+        connection: Connection,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.spawn_incoming_processor(connection, codec, buffer_config)
     }
 
     #[cfg(feature = "noise")]
@@ -4379,21 +8457,14 @@ where
             loop {
                 match events.recv().await {
                     Ok(Event::RawNode(node)) => {
-                        if let Some(refresh) =
-                            refresh_groups_for_dirty_node_with_queries(&connection, &queries, &node)
-                                .await?
-                        {
-                            emit_group_dirty_refresh_events(&event_hub, &refresh);
-                            continue;
-                        }
-                        if let Some(refresh) = refresh_communities_for_dirty_node_with_queries(
+                        if let Some(refresh) = refresh_group_surfaces_for_dirty_node_with_queries(
                             &connection,
                             &queries,
                             &node,
                         )
                         .await?
                         {
-                            emit_community_dirty_refresh_events(&event_hub, &refresh);
+                            emit_group_surface_dirty_refresh_events(&event_hub, &refresh);
                             continue;
                         }
 
@@ -4433,7 +8504,10 @@ where
                             own_lid.as_deref(),
                             current_unix_timestamp(),
                         )?;
-                        let events = buffer.drain_events();
+                        let mut events = buffer.drain_events();
+                        enrich_poll_event_update_events_from_store(&store, &mut events).await?;
+                        enrich_call_events_from_store(&store, &mut events).await?;
+                        append_derived_message_events(&mut events)?;
                         persist_receive_events(&store, &events).await?;
                         resolve_placeholder_resend_events_in_batches(&placeholder_resend, &events)?;
                         handle_app_state_sync_key_share_events_with_store(
@@ -4446,8 +8520,8 @@ where
                             DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
                         )
                         .await?;
-                        let _ = client
-                            .handle_identity_change_notification(&connection, &node)
+                        client
+                            .handle_incoming_node_side_effects(&connection, &node)
                             .await?;
                         emit_buffered_events(&event_hub, events);
 
@@ -4482,6 +8556,24 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_placeholder_resend_with_signal_provider(
+        &self,
+        connection: Connection,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.spawn_incoming_processor_with_placeholder_resend(
+            connection,
+            codec.clone(),
+            codec,
+            buffer_config,
+        )
+    }
+
+    #[cfg(feature = "noise")]
     pub fn spawn_incoming_processor_with_retry_resend<D, E>(
         &self,
         connection: Connection,
@@ -4510,21 +8602,14 @@ where
             loop {
                 match events.recv().await {
                     Ok(Event::RawNode(node)) => {
-                        if let Some(refresh) =
-                            refresh_groups_for_dirty_node_with_queries(&connection, &queries, &node)
-                                .await?
-                        {
-                            emit_group_dirty_refresh_events(&event_hub, &refresh);
-                            continue;
-                        }
-                        if let Some(refresh) = refresh_communities_for_dirty_node_with_queries(
+                        if let Some(refresh) = refresh_group_surfaces_for_dirty_node_with_queries(
                             &connection,
                             &queries,
                             &node,
                         )
                         .await?
                         {
-                            emit_community_dirty_refresh_events(&event_hub, &refresh);
+                            emit_group_surface_dirty_refresh_events(&event_hub, &refresh);
                             continue;
                         }
 
@@ -4559,7 +8644,10 @@ where
                             }
                         }
                         let retry_receipts = retry_receipts_from_raw_node(&node)?;
-                        let events = buffer.drain_events();
+                        let mut events = buffer.drain_events();
+                        enrich_poll_event_update_events_from_store(&store, &mut events).await?;
+                        enrich_call_events_from_store(&store, &mut events).await?;
+                        append_derived_message_events(&mut events)?;
                         persist_receive_events(&store, &events).await?;
                         resolve_placeholder_resend_events_in_batches(&placeholder_resend, &events)?;
                         handle_app_state_sync_key_share_events_with_store(
@@ -4572,8 +8660,8 @@ where
                             DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
                         )
                         .await?;
-                        let _ = client
-                            .handle_identity_change_notification(&connection, &node)
+                        client
+                            .handle_incoming_node_side_effects(&connection, &node)
                             .await?;
                         emit_buffered_events(&event_hub, events);
 
@@ -4603,6 +8691,492 @@ where
         Ok(IncomingProcessor {
             handle: Some(handle),
         })
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_retry_resend_with_signal_provider(
+        &self,
+        connection: Connection,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.spawn_incoming_processor_with_retry_resend(
+            connection,
+            codec.clone(),
+            codec,
+            buffer_config,
+        )
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_placeholder_and_retry_resend<D, E>(
+        &self,
+        connection: Connection,
+        decryptor: D,
+        encryptor: E,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        D: wa_core::InboundMessageDecryptor + 'static,
+        E: MessageEncryptor + 'static,
+        S: Clone + 'static,
+    {
+        let own_jid = self.credentials.account_jid.clone().ok_or_else(|| {
+            wa_core::CoreError::Protocol("incoming processing requires account JID".to_owned())
+        })?;
+        let own_lid = self.credentials.account_lid.clone();
+        let local_ack_jid = self.local_ack_jid().map(ToOwned::to_owned);
+        let mut events = self.events.subscribe();
+        let event_hub = self.events.clone();
+        let queries = self.queries.clone();
+        let store = self.store.clone();
+        let placeholder_resend = self.placeholder_resend.clone();
+        let client = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut buffer = wa_core::EventBuffer::new(buffer_config);
+            loop {
+                match events.recv().await {
+                    Ok(Event::RawNode(node)) => {
+                        if let Some(refresh) = refresh_group_surfaces_for_dirty_node_with_queries(
+                            &connection,
+                            &queries,
+                            &node,
+                        )
+                        .await?
+                        {
+                            emit_group_surface_dirty_refresh_events(&event_hub, &refresh);
+                            continue;
+                        }
+
+                        if node.tag == "offline" {
+                            let result = wa_core::process_offline_node(
+                                &node,
+                                &own_jid,
+                                own_lid.as_deref(),
+                                local_ack_jid.as_deref(),
+                                &decryptor,
+                                &mut buffer,
+                                wa_core::DEFAULT_OFFLINE_NODE_YIELD_EVERY,
+                            )
+                            .await?;
+                            for child in &result.results {
+                                if let Some(response) = &child.response {
+                                    connection.send_node(response).await?;
+                                }
+                            }
+                        } else {
+                            let result = wa_core::process_inbound_node(
+                                &node,
+                                &own_jid,
+                                own_lid.as_deref(),
+                                local_ack_jid.as_deref(),
+                                &decryptor,
+                                &mut buffer,
+                            )
+                            .await?;
+                            if let Some(response) = &result.response {
+                                connection.send_node(response).await?;
+                            }
+                        }
+                        let placeholders = placeholder_unavailable_messages_from_raw_node(
+                            &node,
+                            &own_jid,
+                            own_lid.as_deref(),
+                            current_unix_timestamp(),
+                        )?;
+                        let retry_receipts = retry_receipts_from_raw_node(&node)?;
+                        let mut events = buffer.drain_events();
+                        enrich_poll_event_update_events_from_store(&store, &mut events).await?;
+                        enrich_call_events_from_store(&store, &mut events).await?;
+                        append_derived_message_events(&mut events)?;
+                        persist_receive_events(&store, &events).await?;
+                        resolve_placeholder_resend_events_in_batches(&placeholder_resend, &events)?;
+                        handle_app_state_sync_key_share_events_with_store(
+                            &store,
+                            &queries,
+                            &connection,
+                            Some(&event_hub),
+                            &events,
+                            false,
+                            DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
+                        )
+                        .await?;
+                        client
+                            .handle_incoming_node_side_effects(&connection, &node)
+                            .await?;
+                        emit_buffered_events(&event_hub, events);
+
+                        for placeholder in placeholders {
+                            client
+                                .request_placeholder_resend_for_web_message(
+                                    &connection,
+                                    &placeholder.web_message,
+                                    placeholder.category.as_deref(),
+                                    placeholder.unavailable_type.as_deref(),
+                                    &encryptor,
+                                    MessageRelayOptions::new(),
+                                )
+                                .await?;
+                        }
+                        for receipt in retry_receipts {
+                            client
+                                .handle_retry_receipt_with_bundle(
+                                    &connection,
+                                    &receipt.receipt,
+                                    receipt.key_bundle,
+                                    &encryptor,
+                                )
+                                .await?;
+                        }
+                    }
+                    Ok(Event::ConnectionUpdate(ConnectionState::Closed)) => return Ok(()),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        return Err(wa_core::CoreError::Protocol(format!(
+                            "incoming processor lagged by {skipped} events"
+                        )));
+                    }
+                }
+            }
+        });
+
+        Ok(IncomingProcessor {
+            handle: Some(handle),
+        })
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_placeholder_and_retry_resend_with_signal_provider(
+        &self,
+        connection: Connection,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.spawn_incoming_processor_with_placeholder_and_retry_resend(
+            connection,
+            codec.clone(),
+            codec,
+            buffer_config,
+        )
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_placeholder_retry_and_media_retry<D, E, T>(
+        &self,
+        connection: Connection,
+        decryptor: D,
+        encryptor: E,
+        transfer: wa_core::MediaTransfer<T>,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        D: wa_core::InboundMessageDecryptor + 'static,
+        E: MessageEncryptor + 'static,
+        T: wa_core::MediaTransport + 'static,
+        S: Clone + 'static,
+    {
+        let own_jid = self.credentials.account_jid.clone().ok_or_else(|| {
+            wa_core::CoreError::Protocol("incoming processing requires account JID".to_owned())
+        })?;
+        let own_lid = self.credentials.account_lid.clone();
+        let local_ack_jid = self.local_ack_jid().map(ToOwned::to_owned);
+        let mut events = self.events.subscribe();
+        let event_hub = self.events.clone();
+        let queries = self.queries.clone();
+        let store = self.store.clone();
+        let placeholder_resend = self.placeholder_resend.clone();
+        let client = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut buffer = wa_core::EventBuffer::new(buffer_config);
+            let startup_media_retry = client.handle_stored_media_retry_events(&transfer).await?;
+            if !startup_media_retry.is_empty() {
+                event_hub.emit(Event::MediaRetryProcessed(startup_media_retry));
+            }
+            loop {
+                match events.recv().await {
+                    Ok(Event::RawNode(node)) => {
+                        if let Some(refresh) = refresh_group_surfaces_for_dirty_node_with_queries(
+                            &connection,
+                            &queries,
+                            &node,
+                        )
+                        .await?
+                        {
+                            emit_group_surface_dirty_refresh_events(&event_hub, &refresh);
+                            continue;
+                        }
+
+                        if node.tag == "offline" {
+                            let result = wa_core::process_offline_node(
+                                &node,
+                                &own_jid,
+                                own_lid.as_deref(),
+                                local_ack_jid.as_deref(),
+                                &decryptor,
+                                &mut buffer,
+                                wa_core::DEFAULT_OFFLINE_NODE_YIELD_EVERY,
+                            )
+                            .await?;
+                            for child in &result.results {
+                                if let Some(response) = &child.response {
+                                    connection.send_node(response).await?;
+                                }
+                            }
+                        } else {
+                            let result = wa_core::process_inbound_node(
+                                &node,
+                                &own_jid,
+                                own_lid.as_deref(),
+                                local_ack_jid.as_deref(),
+                                &decryptor,
+                                &mut buffer,
+                            )
+                            .await?;
+                            if let Some(response) = &result.response {
+                                connection.send_node(response).await?;
+                            }
+                        }
+                        let placeholders = placeholder_unavailable_messages_from_raw_node(
+                            &node,
+                            &own_jid,
+                            own_lid.as_deref(),
+                            current_unix_timestamp(),
+                        )?;
+                        let retry_receipts = retry_receipts_from_raw_node(&node)?;
+                        let mut events = buffer.drain_events();
+                        enrich_poll_event_update_events_from_store(&store, &mut events).await?;
+                        enrich_call_events_from_store(&store, &mut events).await?;
+                        append_derived_message_events(&mut events)?;
+                        persist_receive_events(&store, &events).await?;
+                        resolve_placeholder_resend_events_in_batches(&placeholder_resend, &events)?;
+                        handle_app_state_sync_key_share_events_with_store(
+                            &store,
+                            &queries,
+                            &connection,
+                            Some(&event_hub),
+                            &events,
+                            false,
+                            DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
+                        )
+                        .await?;
+                        client
+                            .handle_incoming_node_side_effects_with_app_state_snapshot_recovery(
+                                &connection,
+                                &transfer,
+                                &node,
+                            )
+                            .await?;
+                        let media_retry = client
+                            .handle_persisted_media_retry_events(&transfer, &events)
+                            .await?;
+                        emit_buffered_events(&event_hub, events);
+                        if !media_retry.is_empty() {
+                            event_hub.emit(Event::MediaRetryProcessed(media_retry));
+                        }
+
+                        for placeholder in placeholders {
+                            client
+                                .request_placeholder_resend_for_web_message(
+                                    &connection,
+                                    &placeholder.web_message,
+                                    placeholder.category.as_deref(),
+                                    placeholder.unavailable_type.as_deref(),
+                                    &encryptor,
+                                    MessageRelayOptions::new(),
+                                )
+                                .await?;
+                        }
+                        for receipt in retry_receipts {
+                            client
+                                .handle_retry_receipt_with_bundle(
+                                    &connection,
+                                    &receipt.receipt,
+                                    receipt.key_bundle,
+                                    &encryptor,
+                                )
+                                .await?;
+                        }
+                    }
+                    Ok(Event::ConnectionUpdate(ConnectionState::Closed)) => return Ok(()),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        return Err(wa_core::CoreError::Protocol(format!(
+                            "incoming processor lagged by {skipped} events"
+                        )));
+                    }
+                }
+            }
+        });
+
+        Ok(IncomingProcessor {
+            handle: Some(handle),
+        })
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_placeholder_retry_and_media_retry_with_signal_provider<T>(
+        &self,
+        connection: Connection,
+        transfer: wa_core::MediaTransfer<T>,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        T: wa_core::MediaTransport + 'static,
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.spawn_incoming_processor_with_placeholder_retry_and_media_retry(
+            connection,
+            codec.clone(),
+            codec,
+            transfer,
+            buffer_config,
+        )
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_media_retry<D, T>(
+        &self,
+        connection: Connection,
+        decryptor: D,
+        transfer: wa_core::MediaTransfer<T>,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        D: wa_core::InboundMessageDecryptor + 'static,
+        T: wa_core::MediaTransport + 'static,
+        S: Clone + 'static,
+    {
+        let own_jid = self.credentials.account_jid.clone().ok_or_else(|| {
+            wa_core::CoreError::Protocol("incoming processing requires account JID".to_owned())
+        })?;
+        let own_lid = self.credentials.account_lid.clone();
+        let local_ack_jid = self.local_ack_jid().map(ToOwned::to_owned);
+        let mut events = self.events.subscribe();
+        let event_hub = self.events.clone();
+        let queries = self.queries.clone();
+        let store = self.store.clone();
+        let placeholder_resend = self.placeholder_resend.clone();
+        let client = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut buffer = wa_core::EventBuffer::new(buffer_config);
+            let startup_media_retry = client.handle_stored_media_retry_events(&transfer).await?;
+            if !startup_media_retry.is_empty() {
+                event_hub.emit(Event::MediaRetryProcessed(startup_media_retry));
+            }
+            loop {
+                match events.recv().await {
+                    Ok(Event::RawNode(node)) => {
+                        if let Some(refresh) = refresh_group_surfaces_for_dirty_node_with_queries(
+                            &connection,
+                            &queries,
+                            &node,
+                        )
+                        .await?
+                        {
+                            emit_group_surface_dirty_refresh_events(&event_hub, &refresh);
+                            continue;
+                        }
+
+                        if node.tag == "offline" {
+                            let result = wa_core::process_offline_node(
+                                &node,
+                                &own_jid,
+                                own_lid.as_deref(),
+                                local_ack_jid.as_deref(),
+                                &decryptor,
+                                &mut buffer,
+                                wa_core::DEFAULT_OFFLINE_NODE_YIELD_EVERY,
+                            )
+                            .await?;
+                            for child in &result.results {
+                                if let Some(response) = &child.response {
+                                    connection.send_node(response).await?;
+                                }
+                            }
+                        } else {
+                            let result = wa_core::process_inbound_node(
+                                &node,
+                                &own_jid,
+                                own_lid.as_deref(),
+                                local_ack_jid.as_deref(),
+                                &decryptor,
+                                &mut buffer,
+                            )
+                            .await?;
+                            if let Some(response) = &result.response {
+                                connection.send_node(response).await?;
+                            }
+                        }
+                        let mut events = buffer.drain_events();
+                        enrich_poll_event_update_events_from_store(&store, &mut events).await?;
+                        enrich_call_events_from_store(&store, &mut events).await?;
+                        append_derived_message_events(&mut events)?;
+                        persist_receive_events(&store, &events).await?;
+                        resolve_placeholder_resend_events_in_batches(&placeholder_resend, &events)?;
+                        handle_app_state_sync_key_share_events_with_store(
+                            &store,
+                            &queries,
+                            &connection,
+                            Some(&event_hub),
+                            &events,
+                            false,
+                            DEFAULT_APP_STATE_KEY_SHARE_RESYNC_ROUNDS,
+                        )
+                        .await?;
+                        client
+                            .handle_incoming_node_side_effects_with_app_state_snapshot_recovery(
+                                &connection,
+                                &transfer,
+                                &node,
+                            )
+                            .await?;
+                        let media_retry = client
+                            .handle_persisted_media_retry_events(&transfer, &events)
+                            .await?;
+                        emit_buffered_events(&event_hub, events);
+                        if !media_retry.is_empty() {
+                            event_hub.emit(Event::MediaRetryProcessed(media_retry));
+                        }
+                    }
+                    Ok(Event::ConnectionUpdate(ConnectionState::Closed)) => return Ok(()),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        return Err(wa_core::CoreError::Protocol(format!(
+                            "incoming processor lagged by {skipped} events"
+                        )));
+                    }
+                }
+            }
+        });
+
+        Ok(IncomingProcessor {
+            handle: Some(handle),
+        })
+    }
+
+    #[cfg(feature = "noise")]
+    pub fn spawn_incoming_processor_with_media_retry_with_signal_provider<T>(
+        &self,
+        connection: Connection,
+        transfer: wa_core::MediaTransfer<T>,
+        buffer_config: wa_core::EventBufferConfig,
+    ) -> CoreResult<IncomingProcessor>
+    where
+        T: wa_core::MediaTransport + 'static,
+        S: Clone + 'static,
+    {
+        let codec = self.signal_message_codec()?;
+        self.spawn_incoming_processor_with_media_retry(connection, codec, transfer, buffer_config)
     }
 
     pub async fn fetch_media_connection_info(
@@ -4668,6 +9242,72 @@ where
         C: wa_core::MediaUploadCache,
     {
         transfer.upload_file_cached(path, kind, cache).await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn upload_video_remote_thumbnail<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        parent_media: &wa_core::UploadedMedia,
+        jpeg_thumbnail: &[u8],
+    ) -> CoreResult<wa_core::RemoteMediaThumbnail>
+    where
+        T: wa_core::MediaTransport,
+    {
+        transfer
+            .upload_video_remote_thumbnail(parent_media, jpeg_thumbnail)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn upload_document_remote_thumbnail<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        parent_media: &wa_core::UploadedMedia,
+        jpeg_thumbnail: &[u8],
+        dimensions: Option<(u32, u32)>,
+    ) -> CoreResult<wa_core::RemoteMediaThumbnail>
+    where
+        T: wa_core::MediaTransport,
+    {
+        transfer
+            .upload_document_remote_thumbnail(parent_media, jpeg_thumbnail, dimensions)
+            .await
+    }
+
+    #[cfg(all(feature = "noise", feature = "image"))]
+    pub async fn upload_generated_video_remote_thumbnail_file<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        parent_media: &wa_core::UploadedMedia,
+        path: impl AsRef<std::path::Path>,
+        options: wa_core::VideoThumbnailOptions,
+    ) -> CoreResult<wa_core::GeneratedRemoteMediaThumbnailUpload>
+    where
+        T: wa_core::MediaTransport,
+    {
+        wa_core::upload_generated_video_remote_thumbnail_file(transfer, parent_media, path, options)
+            .await
+    }
+
+    #[cfg(all(feature = "noise", feature = "image"))]
+    pub async fn upload_generated_document_remote_thumbnail_file<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        parent_media: &wa_core::UploadedMedia,
+        path: impl AsRef<std::path::Path>,
+        options: wa_core::PdfThumbnailOptions,
+    ) -> CoreResult<wa_core::GeneratedRemoteMediaThumbnailUpload>
+    where
+        T: wa_core::MediaTransport,
+    {
+        wa_core::upload_generated_document_remote_thumbnail_file(
+            transfer,
+            parent_media,
+            path,
+            options,
+        )
+        .await
     }
 
     #[cfg(feature = "noise")]
@@ -4874,6 +9514,129 @@ where
         wa_core::business_cover_photo_upload_from_location(&upload.location)
     }
 
+    #[cfg(feature = "link-preview")]
+    pub async fn fetch_link_preview(
+        &self,
+        url: &str,
+        options: wa_core::LinkPreviewFetchOptions,
+    ) -> CoreResult<wa_core::FetchedLinkPreview> {
+        wa_core::fetch_link_preview(url, options).await
+    }
+
+    #[cfg(feature = "link-preview")]
+    pub async fn upload_link_preview_thumbnail_bytes<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        jpeg_thumbnail: &[u8],
+        dimensions: Option<(u32, u32)>,
+    ) -> CoreResult<wa_core::LinkPreviewThumbnail>
+    where
+        T: wa_core::MediaTransport,
+    {
+        wa_core::upload_link_preview_thumbnail(transfer, jpeg_thumbnail, dimensions).await
+    }
+
+    #[cfg(feature = "link-preview")]
+    pub async fn upload_link_preview_thumbnail_bytes_cached<T, C>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        jpeg_thumbnail: &[u8],
+        dimensions: Option<(u32, u32)>,
+        cache: &C,
+    ) -> CoreResult<wa_core::LinkPreviewThumbnail>
+    where
+        T: wa_core::MediaTransport,
+        C: wa_core::MediaUploadCache,
+    {
+        wa_core::upload_link_preview_thumbnail_cached(transfer, jpeg_thumbnail, dimensions, cache)
+            .await
+    }
+
+    #[cfg(feature = "link-preview")]
+    pub async fn upload_link_preview_thumbnail_file<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        path: impl AsRef<std::path::Path>,
+        dimensions: Option<(u32, u32)>,
+    ) -> CoreResult<wa_core::LinkPreviewThumbnail>
+    where
+        T: wa_core::MediaTransport,
+    {
+        wa_core::upload_link_preview_thumbnail_file(transfer, path, dimensions).await
+    }
+
+    #[cfg(feature = "link-preview")]
+    pub async fn upload_link_preview_thumbnail_file_cached<T, C>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        path: impl AsRef<std::path::Path>,
+        dimensions: Option<(u32, u32)>,
+        cache: &C,
+    ) -> CoreResult<wa_core::LinkPreviewThumbnail>
+    where
+        T: wa_core::MediaTransport,
+        C: wa_core::MediaUploadCache,
+    {
+        wa_core::upload_link_preview_thumbnail_file_cached(transfer, path, dimensions, cache).await
+    }
+
+    #[cfg(all(feature = "link-preview", feature = "image"))]
+    pub async fn upload_generated_link_preview_thumbnail<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        input: &[u8],
+        options: wa_core::LinkPreviewImageOptions,
+    ) -> CoreResult<wa_core::GeneratedLinkPreviewThumbnailUpload>
+    where
+        T: wa_core::MediaTransport,
+    {
+        wa_core::upload_generated_link_preview_thumbnail(transfer, input, options).await
+    }
+
+    #[cfg(all(feature = "link-preview", feature = "image"))]
+    pub async fn upload_generated_link_preview_thumbnail_cached<T, C>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        input: &[u8],
+        options: wa_core::LinkPreviewImageOptions,
+        cache: &C,
+    ) -> CoreResult<wa_core::GeneratedLinkPreviewThumbnailUpload>
+    where
+        T: wa_core::MediaTransport,
+        C: wa_core::MediaUploadCache,
+    {
+        wa_core::upload_generated_link_preview_thumbnail_cached(transfer, input, options, cache)
+            .await
+    }
+
+    #[cfg(all(feature = "link-preview", feature = "image"))]
+    pub async fn fetch_link_preview_with_thumbnail<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        url: &str,
+        options: wa_core::LinkPreviewThumbnailFetchOptions,
+    ) -> CoreResult<wa_core::FetchedLinkPreviewWithThumbnail>
+    where
+        T: wa_core::MediaTransport,
+    {
+        wa_core::fetch_link_preview_with_thumbnail(transfer, url, options).await
+    }
+
+    #[cfg(all(feature = "link-preview", feature = "image"))]
+    pub async fn fetch_link_preview_with_thumbnail_cached<T, C>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        url: &str,
+        options: wa_core::LinkPreviewThumbnailFetchOptions,
+        cache: &C,
+    ) -> CoreResult<wa_core::FetchedLinkPreviewWithThumbnail>
+    where
+        T: wa_core::MediaTransport,
+        C: wa_core::MediaUploadCache,
+    {
+        wa_core::fetch_link_preview_with_thumbnail_cached(transfer, url, options, cache).await
+    }
+
     #[cfg(feature = "noise")]
     pub async fn download_media_bytes<T>(
         &self,
@@ -4924,6 +9687,122 @@ where
     }
 
     #[cfg(feature = "noise")]
+    pub async fn register_pending_media_retry_persisted(
+        &self,
+        key: wa_core::MessageEventKey,
+        pending: wa_core::PendingMediaRetry,
+    ) -> CoreResult<()> {
+        let entry = wa_core::MediaRetryPendingEntry::new(key, pending);
+        let store_key = wa_core::pending_media_retry_store_key(&entry.key);
+        let encoded = wa_core::encode_stored_pending_media_retry(&entry)?;
+        self.store
+            .set(KeyNamespace::PendingMediaRetry, &store_key, &encoded)
+            .await?;
+        self.media_retry.register(entry.key, entry.pending)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn load_pending_media_retry_from_store(
+        &self,
+        key: &wa_core::MessageEventKey,
+    ) -> CoreResult<Option<wa_core::PendingMediaRetry>> {
+        let store_key = wa_core::pending_media_retry_store_key(key);
+        let Some(value) = self
+            .store
+            .get(KeyNamespace::PendingMediaRetry, &store_key)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let entry = wa_core::decode_stored_pending_media_retry(&value)?;
+        if entry.key != *key {
+            return Err(wa_core::CoreError::Protocol(
+                "stored pending media retry key mismatch".to_owned(),
+            ));
+        }
+        Ok(Some(entry.pending))
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn restore_pending_media_retries_from_store(&self) -> CoreResult<usize> {
+        let mut after = None;
+        let mut restored = 0;
+        loop {
+            let keys = self
+                .store
+                .list_keys(
+                    KeyNamespace::PendingMediaRetry,
+                    after.as_deref(),
+                    PENDING_MEDIA_RETRY_STORE_PAGE_SIZE,
+                )
+                .await?;
+            if keys.is_empty() {
+                break;
+            }
+
+            for key in &keys {
+                if let Some(value) = self.store.get(KeyNamespace::PendingMediaRetry, key).await? {
+                    let entry = wa_core::decode_stored_pending_media_retry(&value)?;
+                    if wa_core::pending_media_retry_store_key(&entry.key) != *key {
+                        return Err(wa_core::CoreError::Protocol(
+                            "stored pending media retry key mismatch".to_owned(),
+                        ));
+                    }
+                    self.media_retry.register(entry.key, entry.pending)?;
+                    restored += 1;
+                }
+            }
+
+            if keys.len() < PENDING_MEDIA_RETRY_STORE_PAGE_SIZE {
+                break;
+            }
+            after = keys.last().cloned();
+        }
+        Ok(restored)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn delete_pending_media_retry_from_store(
+        &self,
+        key: &wa_core::MessageEventKey,
+    ) -> CoreResult<()> {
+        let store_key = wa_core::pending_media_retry_store_key(key);
+        self.store
+            .delete(KeyNamespace::PendingMediaRetry, &store_key)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "noise")]
+    async fn load_media_retry_event_from_store_key(
+        &self,
+        store_key: &str,
+    ) -> CoreResult<Option<wa_core::MediaRetryEvent>> {
+        let Some(value) = self
+            .store
+            .get(KeyNamespace::MediaRetryEvent, store_key)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let retry = wa_core::decode_stored_media_retry_event(&value)?;
+        if wa_core::media_retry_event_store_key(&retry) != store_key {
+            return Err(wa_core::CoreError::Protocol(
+                "stored media retry event key mismatch".to_owned(),
+            ));
+        }
+        Ok(Some(retry))
+    }
+
+    #[cfg(feature = "noise")]
+    async fn delete_media_retry_event_from_store_key(&self, store_key: &str) -> CoreResult<()> {
+        self.store
+            .delete(KeyNamespace::MediaRetryEvent, store_key)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "noise")]
     pub fn register_pending_media_retry_with(
         &self,
         coordinator: &wa_core::MediaRetryCoordinator,
@@ -4943,6 +9822,30 @@ where
         T: wa_core::MediaTransport,
     {
         self.media_retry.download_after_retry(transfer, retry).await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn download_persisted_pending_media_after_retry<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        retry: &wa_core::MediaRetryEvent,
+    ) -> CoreResult<wa_core::MediaRetryDownload>
+    where
+        T: wa_core::MediaTransport,
+    {
+        if self.media_retry.pending(&retry.key)?.is_none()
+            && let Some(pending) = self.load_pending_media_retry_from_store(&retry.key).await?
+        {
+            self.media_retry.register(retry.key.clone(), pending)?;
+        }
+
+        let download = self
+            .media_retry
+            .download_after_retry(transfer, retry)
+            .await?;
+        self.delete_pending_media_retry_from_store(&retry.key)
+            .await?;
+        Ok(download)
     }
 
     #[cfg(feature = "noise")]
@@ -4971,7 +9874,194 @@ where
     }
 
     #[cfg(feature = "noise")]
-    async fn handle_media_retry_events<T>(
+    async fn handle_media_retry_slice<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        retries: &[wa_core::MediaRetryEvent],
+    ) -> CoreResult<wa_core::MediaRetryBatchOutcome>
+    where
+        T: wa_core::MediaTransport,
+    {
+        self.media_retry
+            .handle_retry_events(transfer, retries)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    async fn stage_persisted_media_retry_batch(
+        &self,
+        batch: &wa_core::EventBatch,
+    ) -> CoreResult<PersistedMediaRetryStage> {
+        let mut staged = Vec::new();
+        let mut malformed_stored_records = 0;
+        for retry in &batch.media_retry {
+            if self.media_retry.pending(&retry.key)?.is_none() {
+                match self.load_pending_media_retry_from_store(&retry.key).await {
+                    Ok(Some(pending)) => {
+                        self.media_retry.register(retry.key.clone(), pending)?;
+                    }
+                    Ok(None) => {}
+                    Err(err) if is_malformed_media_retry_store_record(&err) => {
+                        self.delete_pending_media_retry_from_store(&retry.key)
+                            .await?;
+                        malformed_stored_records += 1;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            if self.media_retry.pending(&retry.key)?.is_some() && !staged.contains(&retry.key) {
+                staged.push(retry.key.clone());
+            }
+        }
+        Ok(PersistedMediaRetryStage {
+            keys: staged,
+            malformed_stored_records,
+        })
+    }
+
+    #[cfg(feature = "noise")]
+    async fn delete_completed_persisted_media_retries(
+        &self,
+        keys: &[wa_core::MessageEventKey],
+    ) -> CoreResult<()> {
+        for key in keys {
+            if self.media_retry.pending(key)?.is_none() {
+                self.delete_pending_media_retry_from_store(key).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "noise")]
+    async fn delete_completed_persisted_media_retry_events(
+        &self,
+        records: &[(String, wa_core::MessageEventKey)],
+        staged: &[wa_core::MessageEventKey],
+    ) -> CoreResult<()> {
+        for (store_key, event_key) in records {
+            if staged.contains(event_key) && self.media_retry.pending(event_key)?.is_none() {
+                self.delete_media_retry_event_from_store_key(store_key)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_persisted_media_retry_batch<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        batch: &wa_core::EventBatch,
+    ) -> CoreResult<wa_core::MediaRetryBatchOutcome>
+    where
+        T: wa_core::MediaTransport,
+    {
+        let staged = self.stage_persisted_media_retry_batch(batch).await?;
+        let records = batch
+            .media_retry
+            .iter()
+            .map(|retry| {
+                (
+                    wa_core::media_retry_event_store_key(retry),
+                    retry.key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut outcome = self.handle_media_retry_batch(transfer, batch).await?;
+        outcome.malformed_stored_records += staged.malformed_stored_records;
+        self.delete_completed_persisted_media_retries(&staged.keys)
+            .await?;
+        self.delete_completed_persisted_media_retry_events(&records, &staged.keys)
+            .await?;
+        Ok(outcome)
+    }
+
+    #[cfg(feature = "noise")]
+    async fn handle_persisted_media_retry_slice<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        retries: &[wa_core::MediaRetryEvent],
+    ) -> CoreResult<wa_core::MediaRetryBatchOutcome>
+    where
+        T: wa_core::MediaTransport,
+    {
+        let batch = wa_core::EventBatch {
+            media_retry: retries.to_vec(),
+            ..wa_core::EventBatch::default()
+        };
+        self.handle_persisted_media_retry_batch(transfer, &batch)
+            .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_stored_media_retry_events<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+    ) -> CoreResult<wa_core::MediaRetryBatchOutcome>
+    where
+        T: wa_core::MediaTransport,
+    {
+        let mut after = None;
+        let mut merged = wa_core::MediaRetryBatchOutcome::default();
+        loop {
+            let store_keys = self
+                .store
+                .list_keys(
+                    KeyNamespace::MediaRetryEvent,
+                    after.as_deref(),
+                    MEDIA_RETRY_EVENT_STORE_PAGE_SIZE,
+                )
+                .await?;
+            if store_keys.is_empty() {
+                break;
+            }
+
+            let mut retries = Vec::new();
+            let mut records = Vec::new();
+            for store_key in &store_keys {
+                match self.load_media_retry_event_from_store_key(store_key).await {
+                    Ok(Some(retry)) => {
+                        records.push((store_key.clone(), retry.key.clone()));
+                        retries.push(retry);
+                    }
+                    Ok(None) => {}
+                    Err(err) if is_malformed_media_retry_store_record(&err) => {
+                        self.delete_media_retry_event_from_store_key(store_key)
+                            .await?;
+                        merged.malformed_stored_records += 1;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+
+            if !retries.is_empty() {
+                let batch = wa_core::EventBatch {
+                    media_retry: retries,
+                    ..wa_core::EventBatch::default()
+                };
+                let staged = self.stage_persisted_media_retry_batch(&batch).await?;
+                let outcome = self.handle_media_retry_batch(transfer, &batch).await?;
+                self.delete_completed_persisted_media_retries(&staged.keys)
+                    .await?;
+                self.delete_completed_persisted_media_retry_events(&records, &staged.keys)
+                    .await?;
+                merged.downloads.extend(outcome.downloads);
+                merged.errors.extend(outcome.errors);
+                merged.ignored_without_pending += outcome.ignored_without_pending;
+                merged.malformed_stored_records +=
+                    staged.malformed_stored_records + outcome.malformed_stored_records;
+            }
+
+            if store_keys.len() < MEDIA_RETRY_EVENT_STORE_PAGE_SIZE {
+                break;
+            }
+            after = store_keys.last().cloned();
+        }
+        Ok(merged)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_media_retry_events<T>(
         &self,
         transfer: &wa_core::MediaTransfer<T>,
         events: &[Event],
@@ -4981,13 +10071,47 @@ where
     {
         let mut merged = wa_core::MediaRetryBatchOutcome::default();
         for event in events {
-            let Event::Batch(batch) = event else {
-                continue;
+            let outcome = match event {
+                Event::Batch(batch) => self.handle_media_retry_batch(transfer, batch).await?,
+                Event::MediaRetry(retries) => {
+                    self.handle_media_retry_slice(transfer, retries).await?
+                }
+                _ => continue,
             };
-            let outcome = self.handle_media_retry_batch(transfer, batch).await?;
             merged.downloads.extend(outcome.downloads);
             merged.errors.extend(outcome.errors);
             merged.ignored_without_pending += outcome.ignored_without_pending;
+            merged.malformed_stored_records += outcome.malformed_stored_records;
+        }
+        Ok(merged)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn handle_persisted_media_retry_events<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        events: &[Event],
+    ) -> CoreResult<wa_core::MediaRetryBatchOutcome>
+    where
+        T: wa_core::MediaTransport,
+    {
+        let mut merged = wa_core::MediaRetryBatchOutcome::default();
+        for event in events {
+            let outcome = match event {
+                Event::Batch(batch) => {
+                    self.handle_persisted_media_retry_batch(transfer, batch)
+                        .await?
+                }
+                Event::MediaRetry(retries) => {
+                    self.handle_persisted_media_retry_slice(transfer, retries)
+                        .await?
+                }
+                _ => continue,
+            };
+            merged.downloads.extend(outcome.downloads);
+            merged.errors.extend(outcome.errors);
+            merged.ignored_without_pending += outcome.ignored_without_pending;
+            merged.malformed_stored_records += outcome.malformed_stored_records;
         }
         Ok(merged)
     }
@@ -5056,6 +10180,141 @@ where
             process_config,
         )
         .await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_inline_and_emit_history_sync(
+        &self,
+        notification: &wa_core::HistorySyncNotification,
+        decode_config: wa_core::HistorySyncDecodeConfig,
+        process_config: wa_core::HistorySyncProcessConfig,
+    ) -> CoreResult<Option<wa_core::ProcessedHistorySync>>
+    where
+        S: Clone + 'static,
+    {
+        let Some(processed) = wa_core::process_inline_history_sync_notification(
+            notification,
+            decode_config,
+            process_config,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.process_history_sync_result(processed).await.map(Some)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_history_sync_result(
+        &self,
+        processed: wa_core::ProcessedHistorySync,
+    ) -> CoreResult<wa_core::ProcessedHistorySync>
+    where
+        S: Clone + 'static,
+    {
+        let mut events = Vec::new();
+        if !processed.lid_pn_mappings.is_empty() {
+            events.push(Event::LidMappingUpdate(
+                processed
+                    .lid_pn_mappings
+                    .iter()
+                    .map(|mapping| {
+                        wa_core::LidMappingEvent::new(
+                            mapping.lid_jid.clone(),
+                            mapping.pn_jid.clone(),
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+        if !processed.batch.is_empty() {
+            events.push(Event::Batch(Box::new(processed.batch.clone())));
+        }
+        if let Some(mode) = processed.default_disappearing_mode.clone() {
+            events.push(Event::DefaultDisappearingModeUpdate(mode));
+        }
+
+        enrich_call_events_from_store(&self.store, &mut events).await?;
+        append_derived_message_events(&mut events)?;
+        persist_receive_events(&self.store, &events).await?;
+        emit_buffered_events(&self.events, events);
+        Ok(processed)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn download_process_and_emit_history_sync<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        notification: &wa_core::HistorySyncNotification,
+        fallback_host: Option<&str>,
+        decode_config: wa_core::HistorySyncDecodeConfig,
+        process_config: wa_core::HistorySyncProcessConfig,
+    ) -> CoreResult<wa_core::ProcessedHistorySync>
+    where
+        T: wa_core::MediaTransport,
+        S: Clone + 'static,
+    {
+        let processed = wa_core::download_and_process_history_sync(
+            transfer,
+            notification,
+            fallback_host,
+            decode_config,
+            process_config,
+        )
+        .await?;
+        self.process_history_sync_result(processed).await
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn process_inline_and_emit_history_sync_events(
+        &self,
+        events: &[Event],
+        decode_config: wa_core::HistorySyncDecodeConfig,
+        process_config: wa_core::HistorySyncProcessConfig,
+    ) -> CoreResult<Vec<wa_core::ProcessedHistorySync>>
+    where
+        S: Clone + 'static,
+    {
+        let notifications = history_sync_notifications_from_events(events)?;
+        let mut processed = Vec::new();
+        for notification in notifications {
+            if let Some(result) = self
+                .process_inline_and_emit_history_sync(&notification, decode_config, process_config)
+                .await?
+            {
+                processed.push(result);
+            }
+        }
+        Ok(processed)
+    }
+
+    #[cfg(feature = "noise")]
+    pub async fn download_process_and_emit_history_sync_events<T>(
+        &self,
+        transfer: &wa_core::MediaTransfer<T>,
+        events: &[Event],
+        fallback_host: Option<&str>,
+        decode_config: wa_core::HistorySyncDecodeConfig,
+        process_config: wa_core::HistorySyncProcessConfig,
+    ) -> CoreResult<Vec<wa_core::ProcessedHistorySync>>
+    where
+        T: wa_core::MediaTransport,
+        S: Clone + 'static,
+    {
+        let notifications = history_sync_notifications_from_events(events)?;
+        let mut processed = Vec::with_capacity(notifications.len());
+        for notification in notifications {
+            processed.push(
+                self.download_process_and_emit_history_sync(
+                    transfer,
+                    &notification,
+                    fallback_host,
+                    decode_config,
+                    process_config,
+                )
+                .await?,
+            );
+        }
+        Ok(processed)
     }
 
     pub async fn send_media_retry_request_with_payload(
@@ -5212,16 +10471,28 @@ where
         let mappings = LidPnMappingStore::new(self.store.clone());
         let mut out = Vec::with_capacity(jids.len());
         for jid in jids {
-            let query_jid = if is_lid_signal_jid(jid)? {
-                jid.clone()
-            } else if let Some(lid_user) = mappings.lid_for_pn(jid).await? {
-                mapped_lid_session_jid(jid, &lid_user)?
-            } else {
-                jid.clone()
-            };
+            let query_jid = self.session_query_jid(&mappings, jid).await?;
             push_unique_jid(&mut out, &query_jid);
         }
         Ok(out)
+    }
+
+    #[cfg(feature = "noise")]
+    async fn session_query_jid(
+        &self,
+        mappings: &LidPnMappingStore<S>,
+        jid: &str,
+    ) -> CoreResult<String>
+    where
+        S: Clone,
+    {
+        if is_lid_signal_jid(jid)? {
+            Ok(jid.to_owned())
+        } else if let Some(lid_user) = mappings.lid_for_pn(jid).await? {
+            mapped_lid_session_jid(jid, &lid_user)
+        } else {
+            Ok(jid.to_owned())
+        }
     }
 
     #[cfg(feature = "noise")]
@@ -5232,9 +10503,32 @@ where
     where
         S: Clone,
     {
+        let participant_jid = normalize_signal_session_jid(participant_jid)?;
         let mut jids = vec![participant_jid.to_owned()];
+        let mappings = LidPnMappingStore::new(self.store.clone());
+        if is_lid_signal_jid(&participant_jid)?
+            && let Some(pn_user) = mappings.pn_for_lid(&participant_jid).await?
+        {
+            let decoded = jid_decode(&participant_jid).ok_or_else(|| {
+                wa_core::CoreError::Protocol(format!(
+                    "invalid retry participant JID: {participant_jid}"
+                ))
+            })?;
+            let server = if decoded.server == JidServer::HostedLid {
+                JidServer::Hosted
+            } else {
+                JidServer::SWhatsAppNet
+            };
+            let pn_jid = jid_encode(
+                pn_user,
+                server,
+                decoded.device.filter(|device| *device != 0),
+                None,
+            );
+            push_unique_jid(&mut jids, &pn_jid);
+        }
         for query_jid in self
-            .session_query_jids(&[participant_jid.to_owned()])
+            .session_query_jids(std::slice::from_ref(&participant_jid))
             .await?
         {
             push_unique_jid(&mut jids, &query_jid);
@@ -5340,6 +10634,50 @@ where
         .transaction("persist-message-event-batch", move |tx| {
             for message in upserts {
                 let key = wa_core::message_event_store_key(&message.key);
+                let mut message = message;
+                if let Some(existing_update) = tx.get(KeyNamespace::MessageUpdate, &key)? {
+                    let update = decode_store_record(wa_core::decode_stored_message_update(
+                        &existing_update,
+                    ))?;
+                    #[cfg(feature = "noise")]
+                    let update = {
+                        let mut update = update;
+                        if let Some(secret) = decode_store_record(
+                            wa_core::poll_event_message_secret_from_event(&message),
+                        )? && let Some(update_event_key) = poll_event_update_source_key(&update)
+                        {
+                            let update_store_key =
+                                wa_core::message_event_store_key(&update_event_key);
+                            if let Some(existing_update_event) =
+                                tx.get(KeyNamespace::MessageEvent, &update_store_key)?
+                            {
+                                let update_event = decode_store_record(
+                                    wa_core::decode_stored_message_event(&existing_update_event),
+                                )?;
+                                let mut secrets = wa_core::PollEventMessageSecrets::new();
+                                secrets.insert(message.key.clone(), secret);
+                                if let Some(enriched) = decode_store_record(
+                                    message_updates_from_stored_event_with_poll_event_secrets(
+                                        &update_event,
+                                        &secrets,
+                                    ),
+                                )?
+                                .and_then(|updates| {
+                                    updates
+                                        .into_iter()
+                                        .find(|candidate| candidate.key == message.key)
+                                }) {
+                                    update.fields.extend(enriched.fields);
+                                    if enriched.timestamp.is_some() {
+                                        update.timestamp = enriched.timestamp;
+                                    }
+                                }
+                            }
+                        }
+                        update
+                    };
+                    merge_persisted_message_update(&mut message, update);
+                }
                 let encoded = encode_store_record(wa_core::encode_stored_message_event(&message))?;
                 tx.set(KeyNamespace::MessageEvent, &key, &encoded)?;
                 tx.delete(KeyNamespace::MessageUpdate, &key)?;
@@ -5375,6 +10713,198 @@ where
 }
 
 #[cfg(feature = "noise")]
+async fn enrich_poll_event_update_events_from_store<S>(
+    store: &S,
+    events: &mut [Event],
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    for event in events {
+        if let Event::Batch(batch) = event {
+            enrich_poll_event_update_batch_from_store(store, batch).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+async fn enrich_poll_event_update_batch_from_store<S>(
+    store: &S,
+    batch: &mut wa_core::EventBatch,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    if batch.messages_update.is_empty() || batch.messages_upsert.is_empty() {
+        return Ok(());
+    }
+
+    let mut secret_keys = Vec::new();
+    for update in &batch.messages_update {
+        if matches!(
+            update.fields.get("source").map(String::as_str),
+            Some("poll_update_message" | "enc_event_response_message")
+        ) {
+            secret_keys.push(update.key.clone());
+        }
+    }
+    if secret_keys.is_empty() {
+        return Ok(());
+    }
+
+    let mut secrets = wa_core::PollEventMessageSecrets::new();
+    for key in secret_keys {
+        if secrets.contains_key(&key) {
+            continue;
+        }
+        if let Some(secret) = load_poll_event_secret_from_store(store, &key).await? {
+            secrets.insert(key, secret);
+        }
+    }
+    if secrets.is_empty() {
+        return Ok(());
+    }
+
+    for event in &batch.messages_upsert {
+        let Some(enriched) =
+            message_updates_from_stored_event_with_poll_event_secrets(event, &secrets)?
+        else {
+            continue;
+        };
+        for enriched_update in enriched {
+            if let Some(update) = batch
+                .messages_update
+                .iter_mut()
+                .find(|update| update.key == enriched_update.key)
+            {
+                update.fields.extend(enriched_update.fields);
+                if enriched_update.timestamp.is_some() {
+                    update.timestamp = enriched_update.timestamp;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+async fn load_poll_event_secret_from_store<S>(
+    store: &S,
+    key: &wa_core::MessageEventKey,
+) -> CoreResult<Option<wa_core::PollEventMessageSecret>>
+where
+    S: AuthStore,
+{
+    let store_key = wa_core::message_event_store_key(key);
+    let Some(stored) = store.get(KeyNamespace::MessageEvent, &store_key).await? else {
+        return Ok(None);
+    };
+    let event = wa_core::decode_stored_message_event(&stored)?;
+    wa_core::poll_event_message_secret_from_event(&event)
+}
+
+#[cfg(feature = "noise")]
+fn message_updates_from_stored_event_with_poll_event_secrets(
+    event: &wa_core::MessageEvent,
+    secrets: &wa_core::PollEventMessageSecrets,
+) -> CoreResult<Option<Vec<wa_core::MessageUpdate>>> {
+    let Some(payload) = event.payload.as_ref() else {
+        return Ok(None);
+    };
+    let message = <wa_core::ProtoMessage as prost::Message>::decode(payload.as_ref())?;
+    let from_me = event
+        .fields
+        .get("from_me")
+        .is_some_and(|value| value == "true");
+    let author = event
+        .fields
+        .get("author")
+        .cloned()
+        .or_else(|| event.key.participant.clone())
+        .unwrap_or_else(|| event.key.remote_jid.clone());
+    let sender = event
+        .fields
+        .get("sender")
+        .cloned()
+        .unwrap_or_else(|| event.key.remote_jid.clone());
+    let decoded = wa_core::DecodedInboundMessage {
+        info: wa_core::InboundMessageInfo {
+            key: MessageKey {
+                remote_jid: Some(event.key.remote_jid.clone()),
+                from_me: Some(from_me),
+                id: Some(event.key.id.clone()),
+                participant: event.key.participant.clone(),
+            },
+            kind: inbound_message_kind_from_field(event.fields.get("kind").map(String::as_str)),
+            author,
+            sender,
+            category: event.fields.get("category").cloned(),
+            push_name: event.fields.get("push_name").cloned(),
+            timestamp: event.timestamp,
+            addressing: wa_core::AddressingContext {
+                mode: wa_core::AddressingMode::PhoneNumber,
+                sender_alt: None,
+                recipient_alt: None,
+            },
+        },
+        payloads: vec![wa_core::DecodedInboundPayload {
+            kind: wa_core::InboundPayloadKind::Plaintext,
+            message: message.clone(),
+            device_sent_unwrapped: event
+                .fields
+                .get("device_sent_unwrapped")
+                .is_some_and(|value| value == "true"),
+            sender_key_distribution_count: event
+                .fields
+                .get("sender_key_distribution_count")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+        }],
+    };
+    let updates = wa_core::message_updates_from_decoded_message_with_poll_event_secrets(
+        &decoded, &message, secrets,
+    )?
+    .into_iter()
+    .filter(|update| {
+        matches!(
+            update.fields.get("source").map(String::as_str),
+            Some("poll_update_message" | "enc_event_response_message")
+        )
+    })
+    .collect::<Vec<_>>();
+    Ok((!updates.is_empty()).then_some(updates))
+}
+
+#[cfg(feature = "noise")]
+fn inbound_message_kind_from_field(kind: Option<&str>) -> wa_core::InboundMessageKind {
+    match kind {
+        Some("group") => wa_core::InboundMessageKind::Group,
+        Some("peer_broadcast") => wa_core::InboundMessageKind::PeerBroadcast,
+        Some("other_broadcast") => wa_core::InboundMessageKind::OtherBroadcast,
+        Some("direct_peer_status") => wa_core::InboundMessageKind::DirectPeerStatus,
+        Some("other_status") => wa_core::InboundMessageKind::OtherStatus,
+        Some("newsletter") => wa_core::InboundMessageKind::Newsletter,
+        Some("chat") | None | Some(_) => wa_core::InboundMessageKind::Chat,
+    }
+}
+
+#[cfg(feature = "noise")]
+fn poll_event_update_source_key(
+    update: &wa_core::MessageUpdate,
+) -> Option<wa_core::MessageEventKey> {
+    let remote_jid = update.fields.get("update_message_remote_jid")?.to_owned();
+    let id = update.fields.get("update_message_id")?.to_owned();
+    let participant = update
+        .fields
+        .get("update_message_participant")
+        .filter(|participant| !participant.is_empty())
+        .cloned();
+    Some(wa_core::MessageEventKey::new(remote_jid, id, participant))
+}
+
+#[cfg(feature = "noise")]
 async fn persist_state_event_batch<S>(store: &S, batch: &wa_core::EventBatch) -> CoreResult<()>
 where
     S: AuthStore,
@@ -5393,6 +10923,7 @@ where
         && batch.contacts_update.is_empty()
         && batch.contacts_delete.is_empty()
         && batch.groups_update.is_empty()
+        && batch.business_notifications.is_empty()
     {
         return Ok(());
     }
@@ -5402,6 +10933,7 @@ where
     let contact_updates = batch.contacts_update.clone();
     let contact_deletes = batch.contacts_delete.clone();
     let group_updates = batch.groups_update.clone();
+    let business_notifications = batch.business_notifications.clone();
 
     store
         .transaction("persist-state-event-batch", move |tx| {
@@ -5460,6 +10992,25 @@ where
                 }
             }
 
+            for notification in business_notifications {
+                let key = wa_core::business_notification_event_store_key(&notification);
+                if let Some(existing) = tx.get(KeyNamespace::BusinessNotificationEvent, &key)? {
+                    let mut stored = decode_store_record(
+                        wa_core::decode_stored_business_notification_event(&existing),
+                    )?;
+                    merge_persisted_business_notification_event(&mut stored, notification);
+                    let encoded = encode_store_record(
+                        wa_core::encode_stored_business_notification_event(&stored),
+                    )?;
+                    tx.set(KeyNamespace::BusinessNotificationEvent, &key, &encoded)?;
+                } else {
+                    let encoded = encode_store_record(
+                        wa_core::encode_stored_business_notification_event(&notification),
+                    )?;
+                    tx.set(KeyNamespace::BusinessNotificationEvent, &key, &encoded)?;
+                }
+            }
+
             Ok(())
         })
         .await?;
@@ -5477,6 +11028,7 @@ where
     if batch.receipts_update.is_empty()
         && batch.reactions_update.is_empty()
         && batch.calls_update.is_empty()
+        && batch.presence_update.is_empty()
     {
         return Ok(());
     }
@@ -5484,6 +11036,7 @@ where
     let receipts = batch.receipts_update.clone();
     let reactions = batch.reactions_update.clone();
     let calls = batch.calls_update.clone();
+    let presence_updates = batch.presence_update.clone();
 
     store
         .transaction("persist-interaction-event-batch", move |tx| {
@@ -5504,12 +11057,205 @@ where
                 let key = wa_core::call_event_store_key(&call);
                 let encoded = encode_store_record(wa_core::encode_stored_call_event(&call))?;
                 tx.set(KeyNamespace::CallEvent, &key, &encoded)?;
+                if call.event_type == "offer"
+                    && let Some(cache_key) = call_offer_cache_key(&call)
+                {
+                    tx.set(KeyNamespace::CallEvent, &cache_key, &encoded)?;
+                }
+                if is_call_terminal_event(&call.event_type)
+                    && let Some(cache_key) = call_offer_cache_key(&call)
+                {
+                    tx.delete(KeyNamespace::CallEvent, &cache_key)?;
+                }
+            }
+
+            for presence in presence_updates {
+                let key = wa_core::presence_event_store_key(&presence);
+                let encoded =
+                    encode_store_record(wa_core::encode_stored_presence_event(&presence))?;
+                tx.set(KeyNamespace::PresenceEvent, &key, &encoded)?;
             }
 
             Ok(())
         })
         .await?;
     Ok(())
+}
+
+#[cfg(feature = "noise")]
+async fn enrich_call_events_from_store<S>(store: &S, events: &mut [Event]) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    let mut local_offers = HashMap::<String, wa_core::CallEvent>::new();
+    for event in events {
+        match event {
+            Event::Batch(batch) => {
+                enrich_call_event_list_from_store(
+                    store,
+                    &mut batch.calls_update,
+                    &mut local_offers,
+                )
+                .await?;
+            }
+            Event::CallsUpdate(calls) => {
+                enrich_call_event_list_from_store(store, calls, &mut local_offers).await?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+fn append_derived_message_events(events: &mut Vec<Event>) -> CoreResult<()> {
+    let mut existing_message_keys = HashSet::<String>::new();
+    for event in events.iter() {
+        match event {
+            Event::Batch(batch) => {
+                for message in &batch.messages_upsert {
+                    existing_message_keys.insert(wa_core::message_event_store_key(&message.key));
+                }
+            }
+            Event::MessagesUpsert(messages) => {
+                for message in messages {
+                    existing_message_keys.insert(wa_core::message_event_store_key(&message.key));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut messages = Vec::new();
+    let mut generated_message_indices = HashMap::<String, usize>::new();
+    for event in events.iter() {
+        let mut generated = match event {
+            Event::Batch(batch) => {
+                let mut generated =
+                    wa_core::call_message_events_from_call_events(&batch.calls_update)?;
+                generated.extend(wa_core::group_message_events_from_group_update_events(
+                    &batch.groups_update,
+                )?);
+                generated
+            }
+            Event::CallsUpdate(calls) => wa_core::call_message_events_from_call_events(calls)?,
+            Event::GroupsUpdate(groups) => {
+                wa_core::group_message_events_from_group_update_events(groups)?
+            }
+            _ => Vec::new(),
+        };
+        for message in generated.drain(..) {
+            let key = wa_core::message_event_store_key(&message.key);
+            if existing_message_keys.contains(&key) {
+                continue;
+            }
+            if let Some(index) = generated_message_indices.get(&key).copied() {
+                if should_replace_generated_message(&messages[index], &message) {
+                    messages[index] = message;
+                }
+            } else {
+                generated_message_indices.insert(key, messages.len());
+                messages.push(message);
+            }
+        }
+    }
+
+    if !messages.is_empty() {
+        events.push(Event::Batch(Box::new(wa_core::EventBatch {
+            messages_upsert: messages,
+            ..wa_core::EventBatch::default()
+        })));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+fn should_replace_generated_message(existing: &MessageEvent, candidate: &MessageEvent) -> bool {
+    if !matches!(
+        (
+            existing.fields.get("source").map(String::as_str),
+            candidate.fields.get("source").map(String::as_str),
+        ),
+        (Some("call_event"), Some("call_event"))
+    ) {
+        return false;
+    }
+
+    let existing_status = existing.fields.get("call_status").map(String::as_str);
+    let candidate_status = candidate.fields.get("call_status").map(String::as_str);
+    if candidate_status == Some("timeout") && existing_status != Some("timeout") {
+        return true;
+    }
+    if existing_status == Some("timeout") && candidate_status != Some("timeout") {
+        return false;
+    }
+
+    matches!(
+        (existing.timestamp, candidate.timestamp),
+        (Some(existing_timestamp), Some(candidate_timestamp))
+            if candidate_timestamp > existing_timestamp
+    )
+}
+
+#[cfg(feature = "noise")]
+async fn enrich_call_event_list_from_store<S>(
+    store: &S,
+    calls: &mut [wa_core::CallEvent],
+    local_offers: &mut HashMap<String, wa_core::CallEvent>,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    for call in calls {
+        let Some(cache_key) = call_offer_cache_key(call) else {
+            continue;
+        };
+        if call.event_type == "offer" {
+            local_offers.insert(cache_key, call.clone());
+            continue;
+        }
+
+        let offer = match local_offers.get(&cache_key) {
+            Some(offer) => Some(offer.clone()),
+            None => match store.get(KeyNamespace::CallEvent, &cache_key).await? {
+                Some(value) => {
+                    let offer = decode_store_record(wa_core::decode_stored_call_event(&value))?;
+                    local_offers.insert(cache_key.clone(), offer.clone());
+                    Some(offer)
+                }
+                None => None,
+            },
+        };
+        if let Some(offer) = offer {
+            inherit_call_offer_metadata(call, &offer);
+        }
+        if is_call_terminal_event(&call.event_type) {
+            local_offers.remove(&cache_key);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+fn inherit_call_offer_metadata(call: &mut wa_core::CallEvent, offer: &wa_core::CallEvent) {
+    for key in ["is_video", "is_group", "caller_pn"] {
+        if !call.fields.contains_key(key)
+            && let Some(value) = offer.fields.get(key).filter(|value| !value.is_empty())
+        {
+            call.fields.insert(key.to_owned(), value.clone());
+        }
+    }
+}
+
+#[cfg(feature = "noise")]
+fn call_offer_cache_key(call: &wa_core::CallEvent) -> Option<String> {
+    let call_id = call.call_id.as_deref().filter(|value| !value.is_empty())?;
+    Some(format!("offer-cache|{}|{}", call.from, call_id))
+}
+
+#[cfg(feature = "noise")]
+fn is_call_terminal_event(event_type: &str) -> bool {
+    matches!(event_type, "reject" | "accept" | "timeout" | "terminate")
 }
 
 #[cfg(feature = "noise")]
@@ -5603,11 +11349,277 @@ where
 }
 
 #[cfg(feature = "noise")]
+async fn persist_recent_sticker_event_batch<S>(
+    store: &S,
+    batch: &wa_core::EventBatch,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    if batch.recent_stickers.is_empty() {
+        return Ok(());
+    }
+
+    let stickers = batch.recent_stickers.clone();
+
+    store
+        .transaction("persist-recent-sticker-event-batch", move |tx| {
+            for sticker in stickers {
+                let key = wa_core::recent_sticker_event_store_key(&sticker);
+                if let Some(existing) = tx.get(KeyNamespace::RecentStickerEvent, &key)? {
+                    let mut stored = decode_store_record(
+                        wa_core::decode_stored_recent_sticker_event(&existing),
+                    )?;
+                    merge_persisted_recent_sticker_event(&mut stored, sticker);
+                    let encoded =
+                        encode_store_record(wa_core::encode_stored_recent_sticker_event(&stored))?;
+                    tx.set(KeyNamespace::RecentStickerEvent, &key, &encoded)?;
+                } else {
+                    let encoded =
+                        encode_store_record(wa_core::encode_stored_recent_sticker_event(&sticker))?;
+                    tx.set(KeyNamespace::RecentStickerEvent, &key, &encoded)?;
+                }
+            }
+
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+async fn persist_account_settings_event_batch<S>(
+    store: &S,
+    batch: &wa_core::EventBatch,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    if batch.account_settings.is_empty() {
+        return Ok(());
+    }
+
+    persist_account_settings_events(store, batch.account_settings.clone()).await
+}
+
+#[cfg(feature = "noise")]
+async fn persist_account_settings_events<S>(
+    store: &S,
+    settings: Vec<wa_core::AccountSettingsEvent>,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    if settings.is_empty() {
+        return Ok(());
+    }
+
+    store
+        .transaction("persist-account-settings-events", move |tx| {
+            for setting in settings {
+                let key = wa_core::account_settings_event_store_key(&setting);
+                if let Some(existing) = tx.get(KeyNamespace::AccountSettingsEvent, &key)? {
+                    let mut stored = decode_store_record(
+                        wa_core::decode_stored_account_settings_event(&existing),
+                    )?;
+                    merge_persisted_account_settings_event(&mut stored, setting);
+                    let encoded = encode_store_record(
+                        wa_core::encode_stored_account_settings_event(&stored),
+                    )?;
+                    tx.set(KeyNamespace::AccountSettingsEvent, &key, &encoded)?;
+                } else {
+                    let encoded = encode_store_record(
+                        wa_core::encode_stored_account_settings_event(&setting),
+                    )?;
+                    tx.set(KeyNamespace::AccountSettingsEvent, &key, &encoded)?;
+                }
+            }
+
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+async fn persist_newsletter_events<S>(store: &S, events: &[Event]) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    let mut reactions = Vec::new();
+    let mut views = Vec::new();
+    let mut participants = Vec::new();
+    let mut settings = Vec::new();
+
+    for event in events {
+        match event {
+            Event::NewsletterReactionUpdate(updates) => reactions.extend(updates.clone()),
+            Event::NewsletterViewUpdate(updates) => views.extend(updates.clone()),
+            Event::NewsletterParticipantsUpdate(updates) => participants.extend(updates.clone()),
+            Event::NewsletterSettingsUpdate(updates) => settings.extend(updates.clone()),
+            _ => {}
+        }
+    }
+
+    if reactions.is_empty() && views.is_empty() && participants.is_empty() && settings.is_empty() {
+        return Ok(());
+    }
+
+    store
+        .transaction("persist-newsletter-events", move |tx| {
+            for reaction in reactions {
+                let key = wa_core::newsletter_reaction_event_store_key(&reaction);
+                let encoded = encode_store_record(
+                    wa_core::encode_stored_newsletter_reaction_event(&reaction),
+                )?;
+                tx.set(KeyNamespace::NewsletterReactionEvent, &key, &encoded)?;
+            }
+            for view in views {
+                let key = wa_core::newsletter_view_event_store_key(&view);
+                let encoded =
+                    encode_store_record(wa_core::encode_stored_newsletter_view_event(&view))?;
+                tx.set(KeyNamespace::NewsletterViewEvent, &key, &encoded)?;
+            }
+            for participant in participants {
+                let key = wa_core::newsletter_participant_update_event_store_key(&participant);
+                let encoded = encode_store_record(
+                    wa_core::encode_stored_newsletter_participant_update_event(&participant),
+                )?;
+                tx.set(KeyNamespace::NewsletterParticipantEvent, &key, &encoded)?;
+            }
+            for settings_update in settings {
+                let key = wa_core::newsletter_settings_update_event_store_key(&settings_update);
+                if let Some(existing) = tx.get(KeyNamespace::NewsletterSettingsEvent, &key)? {
+                    let mut stored = decode_store_record(
+                        wa_core::decode_stored_newsletter_settings_update_event(&existing),
+                    )?;
+                    merge_persisted_newsletter_settings_event(&mut stored, settings_update);
+                    let encoded = encode_store_record(
+                        wa_core::encode_stored_newsletter_settings_update_event(&stored),
+                    )?;
+                    tx.set(KeyNamespace::NewsletterSettingsEvent, &key, &encoded)?;
+                } else {
+                    let encoded = encode_store_record(
+                        wa_core::encode_stored_newsletter_settings_update_event(&settings_update),
+                    )?;
+                    tx.set(KeyNamespace::NewsletterSettingsEvent, &key, &encoded)?;
+                }
+            }
+
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+async fn persist_reachout_timelock_state<S>(
+    store: &S,
+    state: &wa_core::ReachoutTimelockState,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    let encoded = wa_core::encode_stored_reachout_timelock_state(state)?;
+    store
+        .set(
+            KeyNamespace::AccountReachoutTimelock,
+            wa_core::reachout_timelock_store_key(),
+            &encoded,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn persist_message_capping_info<S>(
+    store: &S,
+    info: &wa_core::MessageCappingInfo,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    let encoded = wa_core::encode_stored_message_capping_info(info)?;
+    store
+        .set(
+            KeyNamespace::MessageCappingInfo,
+            wa_core::message_capping_info_store_key(),
+            &encoded,
+        )
+        .await?;
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+async fn persist_default_disappearing_mode<S>(
+    store: &S,
+    mode: &wa_core::DefaultDisappearingMode,
+) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    let encoded = wa_core::encode_stored_default_disappearing_mode(mode)?;
+    store
+        .set(
+            KeyNamespace::DefaultDisappearingMode,
+            wa_core::default_disappearing_mode_store_key(),
+            &encoded,
+        )
+        .await?;
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+async fn persist_account_state_events<S>(store: &S, events: &[Event]) -> CoreResult<()>
+where
+    S: AuthStore,
+{
+    let mut reachout = None;
+    let mut capping = None;
+    let mut default_disappearing_mode = None;
+    for event in events {
+        match event {
+            Event::ReachoutTimelockUpdate(state) => reachout = Some(state.clone()),
+            Event::MessageCappingUpdate(info) => capping = Some(info.clone()),
+            Event::DefaultDisappearingModeUpdate(mode) => {
+                default_disappearing_mode = Some(mode.clone());
+            }
+            _ => {}
+        }
+    }
+    if let Some(state) = reachout {
+        persist_reachout_timelock_state(store, &state).await?;
+    }
+    if let Some(info) = capping {
+        persist_message_capping_info(store, &info).await?;
+    }
+    if let Some(mode) = default_disappearing_mode {
+        persist_default_disappearing_mode(store, &mode).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
 async fn persist_receive_events<S>(store: &S, events: &[Event]) -> CoreResult<()>
 where
     S: AuthStore + Clone,
 {
+    let events = if events.iter().any(|event| match event {
+        Event::Batch(batch) => !batch.calls_update.is_empty() || !batch.groups_update.is_empty(),
+        Event::CallsUpdate(calls) => !calls.is_empty(),
+        Event::GroupsUpdate(groups) => !groups.is_empty(),
+        _ => false,
+    }) {
+        let mut enriched_events = events.to_vec();
+        enrich_call_events_from_store(store, &mut enriched_events).await?;
+        append_derived_message_events(&mut enriched_events)?;
+        Cow::Owned(enriched_events)
+    } else {
+        Cow::Borrowed(events)
+    };
+    let events = events.as_ref();
+
     persist_lid_mapping_events(store, events).await?;
+    persist_newsletter_events(store, events).await?;
+    persist_account_state_events(store, events).await?;
     for event in events {
         match event {
             Event::Batch(batch) => {
@@ -5616,6 +11628,8 @@ where
                 persist_interaction_event_batch(store, batch).await?;
                 persist_utility_event_batch(store, batch).await?;
                 persist_media_retry_event_batch(store, batch).await?;
+                persist_recent_sticker_event_batch(store, batch).await?;
+                persist_account_settings_event_batch(store, batch).await?;
             }
             Event::HistorySet(history) => {
                 let batch = wa_core::EventBatch {
@@ -5755,6 +11769,16 @@ where
                 )
                 .await?;
             }
+            Event::PresenceUpdate(updates) => {
+                persist_interaction_event_batch(
+                    store,
+                    &wa_core::EventBatch {
+                        presence_update: updates.clone(),
+                        ..wa_core::EventBatch::default()
+                    },
+                )
+                .await?;
+            }
             Event::LabelsEdit(labels) => {
                 persist_utility_event_batch(
                     store,
@@ -5790,6 +11814,19 @@ where
                     store,
                     &wa_core::EventBatch {
                         media_retry: retries.clone(),
+                        ..wa_core::EventBatch::default()
+                    },
+                )
+                .await?;
+            }
+            Event::AccountSettingsUpdate(settings) => {
+                persist_account_settings_events(store, settings.clone()).await?;
+            }
+            Event::BusinessNotificationUpdate(notifications) => {
+                persist_state_event_batch(
+                    store,
+                    &wa_core::EventBatch {
+                        business_notifications: notifications.clone(),
                         ..wa_core::EventBatch::default()
                     },
                 )
@@ -5831,12 +11868,51 @@ fn merge_persisted_contact_event(
 }
 
 #[cfg(feature = "noise")]
+fn merge_persisted_recent_sticker_event(
+    sticker: &mut wa_core::RecentStickerEvent,
+    update: wa_core::RecentStickerEvent,
+) {
+    for (key, value) in update.fields {
+        sticker.fields.insert(key, value);
+    }
+    if update.file_sha256.is_some() {
+        sticker.file_sha256 = update.file_sha256;
+    }
+    if update.file_enc_sha256.is_some() {
+        sticker.file_enc_sha256 = update.file_enc_sha256;
+    }
+    if update.media_key.is_some() {
+        sticker.media_key = update.media_key;
+    }
+}
+
+#[cfg(feature = "noise")]
+fn merge_persisted_account_settings_event(
+    settings: &mut wa_core::AccountSettingsEvent,
+    update: wa_core::AccountSettingsEvent,
+) {
+    for (key, value) in update.fields {
+        settings.fields.insert(key, value);
+    }
+}
+
+#[cfg(feature = "noise")]
 fn merge_persisted_group_event(
     group: &mut wa_core::GroupUpdateEvent,
     update: wa_core::GroupUpdateEvent,
 ) {
     for (key, value) in update.fields {
         group.fields.insert(key, value);
+    }
+}
+
+#[cfg(feature = "noise")]
+fn merge_persisted_business_notification_event(
+    notification: &mut wa_core::BusinessNotificationEvent,
+    update: wa_core::BusinessNotificationEvent,
+) {
+    for (key, value) in update.fields {
+        notification.fields.insert(key, value);
     }
 }
 
@@ -5857,6 +11933,16 @@ fn merge_persisted_quick_reply_event(
     }
 }
 
+#[cfg(feature = "noise")]
+fn merge_persisted_newsletter_settings_event(
+    settings: &mut wa_core::NewsletterSettingsUpdateEvent,
+    update: wa_core::NewsletterSettingsUpdateEvent,
+) {
+    for (key, value) in update.fields {
+        settings.fields.insert(key, value);
+    }
+}
+
 fn encode_store_record(value: CoreResult<Vec<u8>>) -> wa_store::StoreResult<Vec<u8>> {
     value.map_err(store_invalid_data)
 }
@@ -5867,6 +11953,14 @@ fn decode_store_record<T>(value: CoreResult<T>) -> wa_store::StoreResult<T> {
 
 fn store_invalid_data(error: wa_core::CoreError) -> StoreError {
     StoreError::InvalidData(error.to_string())
+}
+
+#[cfg(feature = "noise")]
+fn is_malformed_media_retry_store_record(error: &wa_core::CoreError) -> bool {
+    matches!(
+        error,
+        wa_core::CoreError::Protocol(_) | wa_core::CoreError::Payload(_)
+    )
 }
 
 fn expired_invite_v4_update(
@@ -5910,13 +12004,29 @@ async fn refresh_dirty_groups_with_queries(
     queries: &QueryManager,
     from_timestamp: Option<u64>,
 ) -> CoreResult<GroupDirtyRefresh> {
+    let groups = fetch_dirty_groups_with_queries(connection, queries).await?;
+    let clean = clean_group_dirty_bit_with_queries(connection, queries, from_timestamp).await?;
+    Ok(GroupDirtyRefresh { groups, clean })
+}
+
+async fn fetch_dirty_groups_with_queries(
+    connection: &Connection,
+    queries: &QueryManager,
+) -> CoreResult<Vec<GroupMetadata>> {
     let node = build_group_participating_query(queries.next_tag());
     let response = connection.query_node(node).await?;
-    let groups = parse_group_participating_result(&response.node)?;
+    parse_group_participating_result(&response.node)
+}
+
+async fn clean_group_dirty_bit_with_queries(
+    connection: &Connection,
+    queries: &QueryManager,
+    from_timestamp: Option<u64>,
+) -> CoreResult<BinaryNode> {
     let clean =
         build_clean_dirty_bits_node(DirtyBitType::Groups, from_timestamp, queries.next_tag())?;
     connection.send_node(&clean).await?;
-    Ok(GroupDirtyRefresh { groups, clean })
+    Ok(clean)
 }
 
 async fn refresh_groups_for_dirty_node_with_queries(
@@ -5924,15 +12034,91 @@ async fn refresh_groups_for_dirty_node_with_queries(
     queries: &QueryManager,
     node: &BinaryNode,
 ) -> CoreResult<Option<GroupDirtyRefresh>> {
-    let Some(dirty) = parse_dirty_notification_node(node)? else {
+    let dirties = parse_dirty_notification_nodes(node)?;
+    if dirties.is_empty() {
         return Ok(None);
     };
-    if dirty.dirty_type != "groups" {
+    let Some(timestamp) =
+        latest_dirty_timestamp_for(&dirties, |dirty| dirty.dirty_type == "groups")
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        refresh_dirty_groups_with_queries(connection, queries, timestamp).await?,
+    ))
+}
+
+#[cfg(feature = "noise")]
+async fn refresh_group_surfaces_for_dirty_node_with_queries(
+    connection: &Connection,
+    queries: &QueryManager,
+    node: &BinaryNode,
+) -> CoreResult<Option<GroupSurfaceDirtyRefresh>> {
+    let dirties = parse_dirty_notification_nodes(node)?;
+    if dirties.is_empty() {
+        return Ok(None);
+    };
+    let refresh_groups = dirties.iter().any(|dirty| dirty.dirty_type == "groups");
+    let refresh_communities = dirties
+        .iter()
+        .any(|dirty| dirty.dirty_type == "groups" || dirty.dirty_type == "communities");
+    if !refresh_groups && !refresh_communities {
         return Ok(None);
     }
-    Ok(Some(
-        refresh_dirty_groups_with_queries(connection, queries, dirty.timestamp).await?,
-    ))
+
+    let groups = if refresh_groups {
+        Some(fetch_dirty_groups_with_queries(connection, queries).await?)
+    } else {
+        None
+    };
+    let communities = if refresh_communities {
+        Some(fetch_dirty_communities_with_queries(connection, queries).await?)
+    } else {
+        None
+    };
+    let clean_timestamp = latest_dirty_timestamp_for(&dirties, |dirty| {
+        dirty.dirty_type == "groups" || dirty.dirty_type == "communities"
+    })
+    .flatten();
+    let clean = clean_group_dirty_bit_with_queries(connection, queries, clean_timestamp).await?;
+    Ok(Some(GroupSurfaceDirtyRefresh {
+        groups: groups.map(|groups| GroupDirtyRefresh {
+            groups,
+            clean: clean.clone(),
+        }),
+        communities: communities.map(|communities| CommunityDirtyRefresh { communities, clean }),
+    }))
+}
+
+fn latest_dirty_timestamp_for<F>(
+    dirties: &[wa_core::DirtyNotification],
+    mut predicate: F,
+) -> Option<Option<u64>>
+where
+    F: FnMut(&wa_core::DirtyNotification) -> bool,
+{
+    let mut found = false;
+    let mut timestamp = None;
+    for dirty in dirties {
+        if !predicate(dirty) {
+            continue;
+        }
+        found = true;
+        if let Some(value) = dirty.timestamp {
+            timestamp = Some(timestamp.map_or(value, |current: u64| current.max(value)));
+        }
+    }
+    found.then_some(timestamp)
+}
+
+#[cfg(feature = "noise")]
+fn emit_group_surface_dirty_refresh_events(events: &EventHub, refresh: &GroupSurfaceDirtyRefresh) {
+    if let Some(groups) = &refresh.groups {
+        emit_group_dirty_refresh_events(events, groups);
+    }
+    if let Some(communities) = &refresh.communities {
+        emit_community_dirty_refresh_events(events, communities);
+    }
 }
 
 fn emit_group_dirty_refresh_events(events: &EventHub, refresh: &GroupDirtyRefresh) {
@@ -5965,12 +12151,62 @@ fn group_metadata_update_event(metadata: &GroupMetadata) -> GroupUpdateEvent {
     if let Some(description_id) = &metadata.description_id {
         event = event.with_field("description_id", description_id.clone());
     }
+    if let Some(linked_parent) = &metadata.linked_parent {
+        event = event.with_field("linked_parent", linked_parent.clone());
+    }
     if let Some(size) = metadata.size {
         event = event.with_field("size", size.to_string());
     }
     if let Some(duration) = metadata.ephemeral_duration {
         event = event.with_field("ephemeral_duration", duration.to_string());
     }
+    add_group_participant_snapshot_fields(event, metadata)
+}
+
+fn add_group_participant_snapshot_fields(
+    mut event: GroupUpdateEvent,
+    metadata: &GroupMetadata,
+) -> GroupUpdateEvent {
+    if metadata.participants.is_empty() {
+        return event;
+    }
+
+    let participants = metadata
+        .participants
+        .iter()
+        .map(|participant| participant.jid.as_str())
+        .collect::<Vec<_>>();
+    event = event
+        .with_field("participants", participants.join(","))
+        .with_field("participants_count", participants.len().to_string());
+
+    let admins = metadata
+        .participants
+        .iter()
+        .filter(|participant| participant.role == GroupParticipantRole::Admin)
+        .map(|participant| participant.jid.as_str())
+        .collect::<Vec<_>>();
+    if !admins.is_empty() {
+        event = event
+            .with_field("participants_admins", admins.join(","))
+            .with_field("participants_admins_count", admins.len().to_string());
+    }
+
+    let superadmins = metadata
+        .participants
+        .iter()
+        .filter(|participant| participant.role == GroupParticipantRole::SuperAdmin)
+        .map(|participant| participant.jid.as_str())
+        .collect::<Vec<_>>();
+    if !superadmins.is_empty() {
+        event = event
+            .with_field("participants_superadmins", superadmins.join(","))
+            .with_field(
+                "participants_superadmins_count",
+                superadmins.len().to_string(),
+            );
+    }
+
     event
 }
 
@@ -5979,13 +12215,18 @@ async fn refresh_dirty_communities_with_queries(
     queries: &QueryManager,
     from_timestamp: Option<u64>,
 ) -> CoreResult<CommunityDirtyRefresh> {
+    let communities = fetch_dirty_communities_with_queries(connection, queries).await?;
+    let clean = clean_group_dirty_bit_with_queries(connection, queries, from_timestamp).await?;
+    Ok(CommunityDirtyRefresh { communities, clean })
+}
+
+async fn fetch_dirty_communities_with_queries(
+    connection: &Connection,
+    queries: &QueryManager,
+) -> CoreResult<Vec<GroupMetadata>> {
     let node = build_community_participating_query(queries.next_tag());
     let response = connection.query_node(node).await?;
-    let communities = parse_community_participating_result(&response.node)?;
-    let clean =
-        build_clean_dirty_bits_node(DirtyBitType::Groups, from_timestamp, queries.next_tag())?;
-    connection.send_node(&clean).await?;
-    Ok(CommunityDirtyRefresh { communities, clean })
+    parse_community_participating_result(&response.node)
 }
 
 async fn refresh_communities_for_dirty_node_with_queries(
@@ -5993,14 +12234,17 @@ async fn refresh_communities_for_dirty_node_with_queries(
     queries: &QueryManager,
     node: &BinaryNode,
 ) -> CoreResult<Option<CommunityDirtyRefresh>> {
-    let Some(dirty) = parse_dirty_notification_node(node)? else {
+    let dirties = parse_dirty_notification_nodes(node)?;
+    if dirties.is_empty() {
         return Ok(None);
     };
-    if dirty.dirty_type != "communities" {
+    let Some(timestamp) =
+        latest_dirty_timestamp_for(&dirties, |dirty| dirty.dirty_type == "communities")
+    else {
         return Ok(None);
-    }
+    };
     Ok(Some(
-        refresh_dirty_communities_with_queries(connection, queries, dirty.timestamp).await?,
+        refresh_dirty_communities_with_queries(connection, queries, timestamp).await?,
     ))
 }
 
@@ -6029,10 +12273,13 @@ fn community_metadata_update_event(metadata: &GroupMetadata) -> GroupUpdateEvent
     if let Some(description_id) = &metadata.description_id {
         event = event.with_field("description_id", description_id.clone());
     }
+    if let Some(linked_parent) = &metadata.linked_parent {
+        event = event.with_field("linked_parent", linked_parent.clone());
+    }
     if let Some(size) = metadata.size {
         event = event.with_field("size", size.to_string());
     }
-    event
+    add_group_participant_snapshot_fields(event, metadata)
 }
 
 #[cfg(feature = "noise")]
@@ -6040,6 +12287,107 @@ fn push_unique_jid(jids: &mut Vec<String>, jid: &str) {
     if !jids.iter().any(|existing| existing == jid) {
         jids.push(jid.to_owned());
     }
+}
+
+#[cfg(feature = "noise")]
+fn push_unique_normalized_account_jid(jids: &mut Vec<String>, jid: &str) -> CoreResult<()> {
+    let jid = normalize_account_jid(jid)?;
+    push_unique_jid(jids, &jid);
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+fn normalize_signal_session_jid(jid: &str) -> CoreResult<String> {
+    let decoded = jid_decode(jid).ok_or_else(|| {
+        wa_core::CoreError::Protocol(format!("invalid Signal session JID: {jid}"))
+    })?;
+    if decoded.user.is_empty() {
+        return Err(wa_core::CoreError::Protocol(format!(
+            "Signal session JID user must not be empty: {jid}"
+        )));
+    }
+    if decoded.server != JidServer::CUs {
+        return Ok(jid.to_owned());
+    }
+    Ok(jid_encode(
+        decoded.user,
+        JidServer::SWhatsAppNet,
+        decoded.device.filter(|device| *device != 0),
+        decoded.agent,
+    ))
+}
+
+#[cfg(feature = "noise")]
+fn normalize_retry_receipt_signal_jids(
+    receipt: &wa_core::RetryReceipt,
+) -> CoreResult<wa_core::RetryReceipt> {
+    let mut receipt = receipt.clone();
+    if let Some(jid) = receipt.from_jid.as_deref() {
+        receipt.from_jid = Some(normalize_signal_session_jid(jid)?);
+    }
+    if let Some(jid) = receipt.participant.as_deref() {
+        receipt.participant = Some(normalize_signal_session_jid(jid)?);
+    }
+    if let Some(jid) = receipt.to_jid.as_deref() {
+        receipt.to_jid = Some(normalize_signal_session_jid(jid)?);
+    }
+    if let Some(jid) = receipt.recipient.as_deref() {
+        receipt.recipient = Some(normalize_signal_session_jid(jid)?);
+    }
+    if let Some(jid) = receipt.chat_jid.as_deref() {
+        receipt.chat_jid = Some(normalize_signal_session_jid(jid)?);
+    }
+    Ok(receipt)
+}
+
+#[cfg(feature = "noise")]
+fn normalize_status_target_jid(jid: &str) -> CoreResult<String> {
+    let decoded = jid_decode(jid)
+        .ok_or_else(|| wa_core::CoreError::Payload(format!("invalid status target JID: {jid}")))?;
+    let has_device_suffix = jid
+        .split_once('@')
+        .is_some_and(|(user, _)| user.contains(':'));
+    let is_user_server = matches!(
+        decoded.server,
+        JidServer::CUs
+            | JidServer::SWhatsAppNet
+            | JidServer::Lid
+            | JidServer::Hosted
+            | JidServer::HostedLid
+    );
+    if decoded.user.is_empty() || has_device_suffix || !is_user_server {
+        return Err(wa_core::CoreError::Payload(format!(
+            "status target must be a user JID: {jid}"
+        )));
+    }
+    let server = match decoded.server {
+        JidServer::CUs => JidServer::SWhatsAppNet,
+        server => server,
+    };
+    Ok(jid_encode(decoded.user, server, None, None))
+}
+
+#[cfg(feature = "noise")]
+fn retry_resend_target_key(target: &RetryResendTarget) -> String {
+    match target {
+        RetryResendTarget::AllDevices => "all-devices".to_owned(),
+        RetryResendTarget::Participant { jid, count } => format!("participant:{jid}:{count}"),
+    }
+}
+
+#[cfg(feature = "noise")]
+fn retry_options_with_device_identity(
+    options: MessageRelayOptions,
+    identity: &Bytes,
+) -> CoreResult<MessageRelayOptions> {
+    if identity.is_empty() {
+        return Err(wa_core::CoreError::Protocol(
+            "retry key-bundle device identity must not be empty".to_owned(),
+        ));
+    }
+    Ok(options.with_device_identity_node(
+        BinaryNode::new("device-identity").with_content(identity.clone()),
+    ))
 }
 
 #[cfg(feature = "noise")]
@@ -6090,6 +12438,50 @@ fn app_state_sync_key_share_items_from_events(
         }
     }
     Ok(keys)
+}
+
+#[cfg(feature = "noise")]
+fn history_sync_notifications_from_events(
+    events: &[Event],
+) -> CoreResult<Vec<wa_core::HistorySyncNotification>> {
+    let mut notifications = Vec::new();
+    for event in events {
+        match event {
+            Event::MessagesUpsert(messages) => {
+                for message in messages {
+                    push_unique_history_sync_notifications(
+                        &mut notifications,
+                        wa_core::history_sync_notifications_from_message_event(message)?,
+                    );
+                }
+            }
+            Event::Batch(batch) => {
+                for message in &batch.messages_upsert {
+                    push_unique_history_sync_notifications(
+                        &mut notifications,
+                        wa_core::history_sync_notifications_from_message_event(message)?,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(notifications)
+}
+
+#[cfg(feature = "noise")]
+fn push_unique_history_sync_notifications(
+    notifications: &mut Vec<wa_core::HistorySyncNotification>,
+    incoming: Vec<wa_core::HistorySyncNotification>,
+) {
+    for notification in incoming {
+        if !notifications
+            .iter()
+            .any(|existing| existing == &notification)
+        {
+            notifications.push(notification);
+        }
+    }
 }
 
 #[cfg(feature = "noise")]
@@ -6225,11 +12617,22 @@ fn retry_receipts_from_raw_node(node: &BinaryNode) -> CoreResult<Vec<ParsedRetry
 }
 
 #[cfg(feature = "noise")]
+fn incoming_side_effect_nodes(node: &BinaryNode) -> Vec<&BinaryNode> {
+    if node.tag == "offline"
+        && let Some(BinaryNodeContent::Nodes(children)) = &node.content
+    {
+        return children.iter().collect();
+    }
+    vec![node]
+}
+
+#[cfg(feature = "noise")]
 fn parse_retry_receipt_with_bundle(node: &BinaryNode) -> CoreResult<Option<ParsedRetryReceipt>> {
     let Some(receipt) = wa_core::parse_retry_receipt(node)? else {
         return Ok(None);
     };
-    let key_bundle = retry_receipt_session_bundle(node, receipt.requester_jid()?)?;
+    let requester_jid = normalize_signal_session_jid(receipt.requester_jid()?)?;
+    let key_bundle = retry_receipt_session_bundle(node, &requester_jid)?;
     Ok(Some(ParsedRetryReceipt {
         receipt,
         key_bundle,
@@ -6310,6 +12713,8 @@ where
             tc_token_issuance: Arc::new(std::sync::Mutex::new(HashSet::new())),
             #[cfg(feature = "noise")]
             identity_change_debounce: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            #[cfg(feature = "noise")]
+            signal_mutation_locks: wa_core::SignalMutationLocks::default(),
         })
     }
 }
@@ -6317,11 +12722,14 @@ where
 pub mod prelude {
     #[cfg(feature = "noise")]
     pub use super::{
-        AppStateMutationUpload, AppStateSyncRecoveryOptions, IdentityChangeOutcome,
-        IncomingMediaRetryProcessing, IncomingPlaceholderResendProcessing, IncomingProcessor,
-        IncomingRetryResendProcessing, MessageLabelTarget, PlaceholderResendCleanup,
-        PostAuthMaintenance, RetryResendOutcome, RetrySessionActionOutcome,
-        TcTokenPruneMaintenance,
+        AckErrorTcTokenRecoveryOutcome, AppStateMutationUpload, AppStateSyncRecoveryOptions,
+        ChatMutationApplyOutcome, DeviceListNotificationOutcome, GroupSenderKeyMessageRelay,
+        IdentityChangeOutcome, IncomingMediaRetryProcessing,
+        IncomingOfflinePlaceholderRetryMediaProcessing, IncomingPlaceholderResendProcessing,
+        IncomingPlaceholderRetryMediaProcessing, IncomingProcessor, IncomingRetryResendProcessing,
+        MessageLabelTarget, PlaceholderResendCleanup, PostAuthMaintenance,
+        PrivacyTokenNotificationOutcome, RetryResendOutcome, RetrySessionActionOutcome,
+        ServerSyncNotificationOutcome, TcTokenPruneMaintenance,
     };
     pub use super::{Client, ClientBuilder, CommunityDirtyRefresh, GroupDirtyRefresh};
     pub use wa_core::{
@@ -6329,18 +12737,20 @@ pub mod prelude {
         AccountMutationKind, AddressingContext, AddressingMode, AlbumContent, AppStateCollection,
         AppStateCollectionRequest, AppStatePatchOperation, AppStateQueryKind,
         AppStateSyncCollection, AppStateSyncResponse, AudioContent, BinaryNode, BinaryNodeContent,
-        BlocklistAction, Browser, ButtonReplyContent, CatalogSnapshotContent, ChatEvent,
-        ChatMutationMessageRange, ChatMutationMessageRef, ChatMutationPatch, ClientConfig,
-        Connection, ConnectionState, ContactContent, ContactEvent, ContactSyncAction,
-        ContactsContent, DEFAULT_BASE_KEY_CAPACITY, DEFAULT_BASE_KEY_TTL_MS,
-        DEFAULT_MAX_HISTORY_CHATS, DEFAULT_MAX_HISTORY_CONTACTS,
-        DEFAULT_MAX_HISTORY_INFLATED_BYTES, DEFAULT_MAX_HISTORY_MESSAGES,
-        DEFAULT_MAX_MESSAGE_RETRY_COUNT, DEFAULT_MEDIA_HOST, DEFAULT_MEDIA_ORIGIN,
-        DEFAULT_PHONE_REQUEST_DELAY_MS, DEFAULT_RECENT_MESSAGE_CAPACITY,
+        BlocklistAction, BlocklistUpdateEvent, Browser, BusinessNotificationEvent,
+        ButtonReplyContent, CatalogSnapshotContent, ChatEvent, ChatMutationMessageRange,
+        ChatMutationMessageRef, ChatMutationPatch, ClientConfig, CommunityLinkedGroups, Connection,
+        ConnectionState, ContactContent, ContactEvent, ContactSyncAction, ContactsContent,
+        DEFAULT_BASE_KEY_CAPACITY, DEFAULT_BASE_KEY_TTL_MS, DEFAULT_MAX_HISTORY_CHATS,
+        DEFAULT_MAX_HISTORY_CONTACTS, DEFAULT_MAX_HISTORY_INFLATED_BYTES,
+        DEFAULT_MAX_HISTORY_MESSAGES, DEFAULT_MAX_MESSAGE_RETRY_COUNT, DEFAULT_MEDIA_HOST,
+        DEFAULT_MEDIA_ORIGIN, DEFAULT_PHONE_REQUEST_DELAY_MS, DEFAULT_RECENT_MESSAGE_CAPACITY,
         DEFAULT_RECENT_MESSAGE_TTL_MS, DEFAULT_RETRY_COUNTER_TTL_MS,
         DEFAULT_SESSION_RECREATE_TIMEOUT_MS, DecodedInboundMessage, DecodedInboundPayload,
-        DeleteContent, DirtyBitType, DirtyNotification, DisappearingModeContent, DocumentContent,
-        EditContent, Event, EventBatch, EventBuffer, EventBufferConfig, EventContent, EventHub,
+        DefaultDisappearingMode, DeleteContent, DeviceListNotification,
+        DeviceListNotificationDevice, DirtyBitType, DirtyNotification, DisappearingModeContent,
+        DocumentContent, EditContent, Event, EventBatch, EventBuffer, EventBufferConfig,
+        EventContent, EventHub, EventResponseContent, EventResponseKind, EventResponsePayload,
         ExternalBlobReference, FrameSink, FrameStream, GroupAddressingMode, GroupInviteContent,
         GroupInviteKind, GroupInviteV4, GroupJoinApprovalMode, GroupJoinRequest,
         GroupJoinRequestAction, GroupJoinRequestActionResult, GroupMemberAddMode, GroupMetadata,
@@ -6374,13 +12784,14 @@ pub mod prelude {
         NewsletterViewerRole, OnWhatsAppResult, PLACEHOLDER_EXCLUDED_UNAVAILABLE_TYPES,
         PLACEHOLDER_MAX_AGE_SECONDS, PLACEHOLDER_MISSING_KEYS_ERROR_TEXT,
         PLACEHOLDER_NO_MESSAGE_FOUND_ERROR_TEXT, PinAction, PinContent, PlaceholderResendRequest,
-        PlaceholderUnavailableMessage, PollContent, PresenceState, PrivacyCategory,
-        PrivacySettings, PrivacyValue, ProcessedHistorySync, ProductContent,
-        ProductSnapshotContent, ProfilePictureType, ProtoMessage, QueryManager, QuickReplyEvent,
-        QuickReplyMutation, QuotedMessage, ReactionContent, ReactionEvent, ReceiptEvent,
-        RecentMessage, RegistrationPayloadKeys, RequestPhoneNumberContent, RetryReason,
-        RetryReceipt, RetryReceiptPlan, RetryReceiptRetry, RetryResendJob, RetryResendPreparation,
-        RetryResendTarget, RetrySessionAction, RetrySessionSnapshot, RetryStatistics,
+        PlaceholderUnavailableMessage, PollContent, PollUpdateContent, PollVoteContent,
+        PresenceState, PrivacyCategory, PrivacySettings, PrivacyValue, ProcessedHistorySync,
+        ProductContent, ProductSnapshotContent, ProfilePictureType, ProtoMessage, QueryManager,
+        QuickReplyEvent, QuickReplyMutation, QuotedMessage, ReactionContent, ReactionEvent,
+        ReceiptEvent, RecentMessage, RegistrationPayloadKeys, RemoteMediaThumbnail,
+        RequestPhoneNumberContent, RetryReason, RetryReceipt, RetryReceiptPlan, RetryReceiptRetry,
+        RetryResendJob, RetryResendPreparation, RetryResendTarget, RetrySessionAction,
+        RetrySessionSnapshot, RetryStatistics, STATUS_BROADCAST_JID, SenderKeyDistributionContent,
         SessionRecreateDecision, StickerContent, SyncdMutations, SyncdSnapshot,
         TemplateButtonReplyContent, TextFont, TextMessage, USyncBotProfile, USyncBotProfileCommand,
         USyncDevice, USyncDeviceInfo, USyncDeviceJid, USyncDisappearingMode,
@@ -6392,12 +12803,13 @@ pub mod prelude {
         build_app_state_patch_query_from_patch, build_app_state_sync_query,
         build_archive_chat_patch, build_audio_message, build_blocklist_query,
         build_blocklist_update_query, build_bot_profile_query, build_button_reply_message,
-        build_chat_label_association_patch, build_chat_state_node, build_clean_dirty_bits_node,
-        build_contact_message, build_contact_patch, build_contacts_message,
-        build_default_disappearing_mode_query, build_delete_chat_patch, build_delete_message,
-        build_device_query, build_device_sent_message, build_direct_message_relay,
-        build_disappearing_mode_message, build_disappearing_mode_query, build_document_message,
-        build_edit_message, build_event_message, build_group_accept_invite_query,
+        build_call_reject_node, build_chat_label_association_patch, build_chat_state_node,
+        build_clean_dirty_bits_node, build_contact_message, build_contact_patch,
+        build_contacts_message, build_default_disappearing_mode_query, build_delete_chat_patch,
+        build_delete_message, build_device_query, build_device_sent_message,
+        build_direct_message_relay, build_disappearing_mode_message, build_disappearing_mode_query,
+        build_document_message, build_edit_message, build_event_message,
+        build_event_response_message, build_group_accept_invite_query,
         build_group_accept_invite_v4_query, build_group_create_query,
         build_group_description_query, build_group_ephemeral_query, build_group_invite_code_query,
         build_group_invite_info_query, build_group_invite_message,
@@ -6406,43 +12818,56 @@ pub mod prelude {
         build_group_member_add_mode_query, build_group_metadata_query,
         build_group_participants_query, build_group_participating_query,
         build_group_revoke_invite_query, build_group_revoke_invite_v4_query,
-        build_group_setting_query, build_group_subject_query, build_image_message,
-        build_label_edit_patch, build_lid_mapping_query, build_limit_sharing_message,
-        build_list_reply_message, build_live_location_message, build_location_message,
-        build_login_payload, build_mark_chat_read_patch, build_media_connection_query,
-        build_media_retry_request_node, build_message_key, build_message_label_association_patch,
-        build_mute_chat_patch, build_nack_node, build_newsletter_action_query,
-        build_newsletter_admin_count_query, build_newsletter_change_owner_query,
-        build_newsletter_create_query, build_newsletter_demote_query,
-        build_newsletter_live_updates_query, build_newsletter_message_updates_query,
-        build_newsletter_metadata_query, build_newsletter_metadata_update_query,
-        build_newsletter_reaction_node, build_newsletter_subscribers_query,
-        build_on_whatsapp_query, build_pin_chat_patch, build_pin_message,
-        build_placeholder_resend_request_message, build_poll_message,
-        build_presence_subscribe_node, build_presence_update_node, build_privacy_settings_query,
-        build_privacy_update_query, build_product_message, build_profile_picture_remove_query,
-        build_profile_picture_update_query, build_profile_picture_url_query,
-        build_profile_status_update_query, build_ptv_message, build_push_name_patch,
-        build_quick_reply_patch, build_reaction_message, build_receipt_node,
+        build_group_sender_key_message_relay, build_group_setting_query, build_group_subject_query,
+        build_image_message, build_label_edit_patch, build_lid_mapping_query,
+        build_limit_sharing_message, build_list_reply_message, build_live_location_message,
+        build_location_message, build_login_payload, build_mark_chat_read_patch,
+        build_media_connection_query, build_media_retry_request_node, build_message_key,
+        build_message_label_association_patch, build_mute_chat_patch, build_nack_node,
+        build_newsletter_action_query, build_newsletter_admin_count_query,
+        build_newsletter_change_owner_query, build_newsletter_create_query,
+        build_newsletter_demote_query, build_newsletter_live_updates_query,
+        build_newsletter_message_updates_query, build_newsletter_metadata_query,
+        build_newsletter_metadata_update_query, build_newsletter_reaction_node,
+        build_newsletter_subscribers_query, build_on_whatsapp_query, build_pin_chat_patch,
+        build_pin_message, build_placeholder_resend_request_message, build_poll_message,
+        build_poll_update_message, build_presence_subscribe_node, build_presence_update_node,
+        build_privacy_settings_query, build_privacy_update_query, build_product_message,
+        build_profile_picture_remove_query, build_profile_picture_update_query,
+        build_profile_picture_url_query, build_profile_status_update_query, build_ptv_message,
+        build_push_name_patch, build_quick_reply_patch, build_reaction_message, build_receipt_node,
         build_registration_payload, build_request_phone_number_message,
-        build_share_phone_number_message, build_star_message_patch, build_status_query,
-        build_sticker_message, build_sync_action_data, build_template_button_reply_message,
-        build_text_message, build_video_message, build_view_once_message,
-        decode_compressed_history_sync, decode_history_sync_bytes, decode_inbound_binary_node,
-        decode_inbound_message, decode_inbound_message_info, decode_inline_history_sync,
-        disappearing_modes_from_result, dispatch_binary_node, encode_app_state_patch,
-        encode_message, encode_sync_action_data, event_batch_from_group_notification_node,
-        extract_addressing_context, extract_device_jids, generate_message_id,
-        generate_message_id_v2, generate_message_id_v2_now, generate_participant_hash_v2,
-        group_update_event_from_notification_node,
+        build_sender_key_distribution_message, build_share_phone_number_message,
+        build_star_message_patch, build_status_query, build_sticker_message,
+        build_sync_action_data, build_template_button_reply_message, build_text_message,
+        build_video_message, build_view_once_message, business_notification_event_store_key,
+        business_notification_events_from_notification_node, decode_compressed_history_sync,
+        decode_history_sync_bytes, decode_inbound_binary_node, decode_inbound_message,
+        decode_inbound_message_info, decode_inline_history_sync,
+        decode_stored_business_notification_event, decode_stored_message_capping_info,
+        decode_stored_newsletter_participant_update_event, decode_stored_newsletter_reaction_event,
+        decode_stored_newsletter_settings_update_event, decode_stored_newsletter_view_event,
+        decode_stored_reachout_timelock_state, disappearing_modes_from_result,
+        dispatch_binary_node, encode_app_state_patch, encode_message,
+        encode_stored_business_notification_event, encode_stored_message_capping_info,
+        encode_stored_newsletter_participant_update_event, encode_stored_newsletter_reaction_event,
+        encode_stored_newsletter_settings_update_event, encode_stored_newsletter_view_event,
+        encode_stored_reachout_timelock_state, encode_sync_action_data,
+        event_batch_from_group_notification_node, extract_addressing_context, extract_device_jids,
+        generate_message_id, generate_message_id_v2, generate_message_id_v2_now,
+        generate_participant_hash_v2, group_update_event_from_notification_node,
         lid_mapping_events_from_newsletter_notification_node, lid_mappings_from_result,
-        lid_user_jid, media_download_url, media_url_from_direct_path, message_event_from_decoded,
+        lid_user_jid, media_download_url, media_url_from_direct_path,
+        message_capping_info_store_key, message_event_from_decoded,
         message_event_from_placeholder_unavailable, message_event_key_from_proto_key,
         message_info_fields, message_stanza_type, message_updates_from_ack,
         newsletter_mex_update_events_from_notification_node,
-        newsletter_update_events_from_notification_node, normalize_account_jid,
-        on_whatsapp_from_result, parse_account_mutation_result, parse_app_state_query_result,
-        parse_app_state_sync_response, parse_blocklist, parse_dirty_notification_node,
+        newsletter_participant_update_event_store_key, newsletter_reaction_event_store_key,
+        newsletter_settings_update_event_store_key,
+        newsletter_update_events_from_notification_node, newsletter_view_event_store_key,
+        normalize_account_jid, on_whatsapp_from_result, parse_account_mutation_result,
+        parse_app_state_query_result, parse_app_state_sync_response, parse_blocklist,
+        parse_dirty_notification_node, parse_dirty_notification_nodes,
         parse_group_accept_invite_result, parse_group_invite_code, parse_group_invite_v4_result,
         parse_group_join_request_action_result, parse_group_join_requests, parse_group_metadata,
         parse_group_mutation_result, parse_group_participant_action_result,
@@ -6458,10 +12883,12 @@ pub mod prelude {
         parse_profile_picture_mutation_result, parse_profile_picture_url, parse_retry_receipt,
         parse_usync_result, placeholder_resend_events_from_message,
         placeholder_resend_request_from_web_message, placeholder_unavailable_message_from_node,
-        pn_user_jid, process_history_sync, process_inbound_node, push_decoded_message_to_buffer,
-        receipt_events_from_inbound, relay_recipients_from_device_jids, response_tag,
-        statuses_from_result, unpad_random_max16, verify_media_ciphertext_hash,
-        verify_media_plaintext_hash,
+        pn_user_jid, privacy_token_notification_sender_lid, process_history_sync,
+        process_inbound_node, process_inline_history_sync_notification,
+        push_decoded_message_to_buffer, reachout_timelock_store_key, receipt_events_from_inbound,
+        relay_recipients_from_device_jids, response_tag,
+        server_sync_collections_from_notification_node, statuses_from_result, unpad_random_max16,
+        verify_media_ciphertext_hash, verify_media_plaintext_hash,
     };
     #[cfg(feature = "noise")]
     pub use wa_core::{
@@ -6473,50 +12900,97 @@ pub mod prelude {
         DEFAULT_MEDIA_UPLOAD_CACHE_CAPACITY, DEFAULT_MEDIA_UPLOAD_CACHE_TTL_MS,
         DecodedAppStateMutation, DecodedAppStatePatch, DecodedAppStateSnapshot,
         EncryptedAppStateMutation, EncryptedMedia, INITIAL_PRE_KEY_COUNT, LidPnMapping,
-        LidPnMappingStore, MIN_PRE_KEY_COUNT, MediaKind, MediaRetryApplication,
-        MediaRetryBatchError, MediaRetryBatchOutcome, MediaRetryCoordinator,
-        MediaRetryCoordinatorConfig, MediaRetryDownload, MediaRetryResult, MediaTransfer,
+        LidPnMappingStore, LinkCodeCompanionRegistration, LinkCodePairingFinishMaterial,
+        MIN_PRE_KEY_COUNT, MediaKind, MediaRetryApplication, MediaRetryBatchError,
+        MediaRetryBatchOutcome, MediaRetryCoordinator, MediaRetryCoordinatorConfig,
+        MediaRetryDownload, MediaRetryPendingEntry, MediaRetryResult, MediaTransfer,
         MediaTransferConfig, MediaTransport, MediaUploadCache, MediaUploadCacheKey,
-        MediaUploadRequest, MemoryMediaUploadCache, MemoryMediaUploadCacheConfig, NoiseFrameSink,
-        NoiseFrameStream, PairDeviceChallenge, PairSuccess, PairingCodeRequest, PairingKeyMaterial,
-        PendingMediaRetry, PreKeyUpload, SERVER_JID, SessionInjection, SharedNoiseHandshake,
-        SignalAddress, SignalCiphertext, SignalCiphertextType, SignalCryptoProvider,
-        SignalDecryptionRequest, SignalEncryptionRequest, SignalMessageCodec, SignalPreKey,
-        SignalRepository, SignalSenderKeyDistribution, SignalSession, SignalSessionInfo,
-        SignalSessionMigration, SignalSessionValidation, SignalSignedPreKey, SignedPreKey,
-        SignedPreKeyRotation, StoreSignalRepository, UploadedMediaUpload, ValidatedConnection,
-        ValidationPayload, XEdDsaNoiseCertificateVerifier, app_state_patch_key_id,
+        MediaUploadRequest, MediaUploadStreamRequest, MemoryMediaUploadCache,
+        MemoryMediaUploadCacheConfig, NoiseFrameSink, NoiseFrameStream, PairDeviceChallenge,
+        PairSuccess, PairingCodeRequest, PairingKeyMaterial, PendingMediaRetry,
+        PollEventMessageSecret, PollEventMessageSecrets, PreKeyUpload, SERVER_JID,
+        SessionInjection, SharedNoiseHandshake, SignalAddress, SignalCiphertext,
+        SignalCiphertextType, SignalCryptoProvider, SignalDecryptionRequest,
+        SignalEncryptionRequest, SignalLocalIdentity, SignalLocalKeyMaterial, SignalLocalPreKey,
+        SignalLocalSignedPreKey, SignalMessageChainKey, SignalMessageChainStep, SignalMessageCodec,
+        SignalMessageKeyMaterial, SignalMutationGuard, SignalMutationLocks, SignalPreKey,
+        SignalPreKeyBootstrap, SignalPreKeyWhisperMessage, SignalProviderPreKeySessionDecryption,
+        SignalProviderPreKeySessionEncryption, SignalProviderRecordKind,
+        SignalProviderSessionDecryption, SignalProviderSessionEncryption,
+        SignalProviderSessionRecord, SignalProviderStateStore, SignalRepository, SignalRootKey,
+        SignalRootRatchetStep, SignalSenderChainKey, SignalSenderChainStep,
+        SignalSenderKeyDecryption, SignalSenderKeyDistribution, SignalSenderKeyDistributionMessage,
+        SignalSenderKeyDistributionRecord, SignalSenderKeyEncryption, SignalSenderKeyMessage,
+        SignalSenderKeyRecord, SignalSenderKeyState, SignalSenderMessageKeyMaterial,
+        SignalSenderStoredMessageKey, SignalSession, SignalSessionInfo, SignalSessionMigration,
+        SignalSessionValidation, SignalSignedPreKey, SignalWhisperMessage, SignedPreKey,
+        SignedPreKeyRotation, StoreSignalRepository, StoreSignalSenderKeyProvider,
+        UploadedMediaUpload, ValidatedConnection, ValidationPayload,
+        XEdDsaNoiseCertificateVerifier, advance_signal_message_chain_key,
+        advance_signal_sender_chain_key, app_state_patch_key_id,
         app_state_sync_key_share_from_message, app_state_sync_key_share_from_message_event,
         app_state_sync_key_store_id, apply_app_state_sync_response_to_store,
         apply_app_state_sync_response_with_store_keys, apply_decoded_app_state_patch_to_store,
         apply_decoded_app_state_snapshot_to_store, apply_media_retry_event,
-        build_app_state_patch_bundle, build_e2e_session_query,
-        build_encrypted_media_retry_request_node, build_key_bundle_digest_query,
-        build_pairing_code_request, build_pairing_code_request_with_material,
-        build_pairing_qr_data, build_pre_key_count_query, build_signed_pre_key_rotation,
+        apply_signal_sender_key_distribution, build_app_state_patch_bundle,
+        build_e2e_session_query, build_encrypted_event_response_content,
+        build_encrypted_event_response_content_with_iv, build_encrypted_event_response_message,
+        build_encrypted_event_response_message_with_iv, build_encrypted_media_retry_request_node,
+        build_encrypted_poll_update_content, build_encrypted_poll_update_content_with_iv,
+        build_encrypted_poll_update_message, build_encrypted_poll_update_message_with_iv,
+        build_key_bundle_digest_query, build_pairing_code_request,
+        build_pairing_code_request_with_material, build_pairing_qr_data, build_pre_key_count_query,
+        build_signal_sender_key_distribution_message, build_signed_pre_key_rotation,
         bytes_to_crockford, companion_platform_display, companion_platform_id,
         confirm_pre_key_upload, create_initial_credentials, create_signed_pre_key,
-        credentials_with_rotated_signed_pre_key, current_pre_key_status, decode_app_state_patch,
-        decode_app_state_snapshot, decrypt_and_verify_media_bytes,
-        delete_app_state_blocked_collection, download_and_decode_app_state_snapshot,
-        download_and_process_history_sync, download_app_state_external_blob,
-        download_app_state_external_mutations, download_app_state_external_snapshot,
-        download_history_sync, download_history_sync_bytes, encrypt_chat_mutation_patch,
-        encrypt_chat_mutation_patch_with_iv, event_batch_from_decoded_app_state_mutations,
-        event_batch_from_decoded_app_state_patch, event_batch_from_decoded_app_state_snapshot,
-        generate_registration_id, handle_pair_device_challenge, handle_pair_success,
-        has_key_bundle_digest, is_lid_signal_jid, load_app_state_blocked_collection,
-        load_app_state_blocked_collections_for_keys, load_app_state_patch_state,
-        load_app_state_sync_key_data, load_credentials, load_or_init_credentials,
-        mapped_lid_session_jid, normalize_signal_public_key, parse_e2e_sessions_node,
-        parse_key_bundle_digest_response, parse_pre_key_count_response,
+        credentials_with_rotated_signed_pre_key, current_pre_key_status,
+        decipher_link_code_public_key, decode_app_state_patch, decode_app_state_snapshot,
+        decode_signal_pre_key_whisper_message, decode_signal_provider_session_record,
+        decode_signal_sender_key_distribution_message, decode_signal_sender_key_message,
+        decode_signal_sender_key_record, decode_signal_whisper_message,
+        decode_stored_pending_media_retry, decoded_app_state_mutation_from_chat_mutation_patch,
+        decrypt_and_verify_media_bytes, decrypt_event_response_message, decrypt_poll_vote_message,
+        decrypt_signal_inbound_pre_key_session_message, decrypt_signal_message_body,
+        decrypt_signal_provider_session_record_message, decrypt_signal_sender_key_record_message,
+        decrypt_signal_sender_message_body, delete_app_state_blocked_collection,
+        derive_signal_inbound_pre_key_root_chain_keys, derive_signal_message_key_seed,
+        derive_signal_message_keys, derive_signal_outbound_pre_key_root_chain_keys,
+        derive_signal_pre_key_root_chain_keys, derive_signal_root_chain_keys,
+        derive_signal_sender_message_key_seed, derive_signal_sender_message_keys,
+        derive_verified_signal_outbound_pre_key_root_chain_keys,
+        download_and_decode_app_state_snapshot, download_and_process_history_sync,
+        download_app_state_external_blob, download_app_state_external_mutations,
+        download_app_state_external_snapshot, download_history_sync, download_history_sync_bytes,
+        encode_signal_pre_key_whisper_message, encode_signal_provider_session_record,
+        encode_signal_sender_key_distribution_message, encode_signal_sender_key_message,
+        encode_signal_sender_key_record, encode_signal_whisper_message,
+        encode_stored_pending_media_retry, encrypt_chat_mutation_patch,
+        encrypt_chat_mutation_patch_with_iv, encrypt_signal_message_body,
+        encrypt_signal_outbound_pre_key_session_message,
+        encrypt_signal_provider_session_record_message, encrypt_signal_sender_key_record_message,
+        encrypt_signal_sender_message_body, event_batch_from_chat_mutation_patch,
+        event_batch_from_decoded_app_state_mutations, event_batch_from_decoded_app_state_patch,
+        event_batch_from_decoded_app_state_snapshot,
+        event_batch_from_decoded_message_with_poll_event_secrets, generate_registration_id,
+        handle_link_code_companion_reg_notification,
+        handle_link_code_companion_reg_notification_with_material, handle_pair_device_challenge,
+        handle_pair_success, has_key_bundle_digest, is_lid_signal_jid,
+        load_app_state_blocked_collection, load_app_state_blocked_collections_for_keys,
+        load_app_state_patch_state, load_app_state_sync_key_data, load_credentials,
+        load_or_init_credentials, mapped_lid_session_jid,
+        message_updates_from_decoded_message_with_poll_event_secrets, normalize_signal_public_key,
+        parse_e2e_sessions_node, parse_key_bundle_digest_response, parse_pre_key_count_response,
         parse_pre_key_upload_response, parse_signed_pre_key_rotation_response,
-        prepare_pre_key_upload, save_app_state_blocked_collection, save_app_state_patch_state,
+        pending_media_retry_store_key, prepare_pre_key_upload,
+        process_signal_sender_key_distribution_record, ratchet_signal_message_chain,
+        ratchet_signal_root_key, ratchet_signal_sender_chain, remote_thumbnail_from_encrypted,
+        save_app_state_blocked_collection, save_app_state_patch_state,
         save_app_state_sync_key_data, save_app_state_sync_key_share, save_credentials,
-        shared_noise_handshake, signal_protocol_address,
+        shared_noise_handshake, sign_signal_sender_key_message, signal_protocol_address,
         uploaded_media_from_app_state_external_blob, uploaded_media_from_encrypted,
         uploaded_media_from_history_sync_notification, validate_connection,
-        wrap_pairing_ephemeral_public_key,
+        verify_signal_sender_key_message, verify_signal_sender_key_message_bytes,
+        verify_signal_signed_pre_key, wrap_pairing_ephemeral_public_key,
     };
     pub use wa_core::{
         AccountUpdate, MessageCappingInfo, MessageCappingMultiVariationStatus,
@@ -6561,10 +13035,48 @@ pub mod prelude {
         build_community_revoke_invite_v4_query, build_community_setting_query,
         build_community_subject_query, build_community_unlink_group_query,
         parse_community_accept_invite_result, parse_community_invite_code,
-        parse_community_invite_v4_result, parse_community_join_request_action_result,
-        parse_community_join_requests, parse_community_linked_groups, parse_community_metadata,
-        parse_community_mutation_result, parse_community_participant_action_result,
-        parse_community_participating_result,
+        parse_community_invite_info_result, parse_community_invite_v4_result,
+        parse_community_join_request_action_result, parse_community_join_requests,
+        parse_community_linked_groups, parse_community_metadata, parse_community_mutation_result,
+        parse_community_participant_action_result, parse_community_participating_result,
+    };
+    #[cfg(feature = "image")]
+    pub use wa_core::{
+        DEFAULT_IMAGE_DECODE_MAX_ALLOC_BYTES, DEFAULT_LINK_PREVIEW_INLINE_THUMBNAIL_EDGE,
+        DEFAULT_LINK_PREVIEW_INLINE_THUMBNAIL_JPEG_QUALITY, DEFAULT_LINK_PREVIEW_THUMBNAIL_EDGE,
+        DEFAULT_LINK_PREVIEW_THUMBNAIL_JPEG_QUALITY, DEFAULT_MAX_IMAGE_DIMENSION,
+        DEFAULT_MAX_IMAGE_INPUT_BYTES, DEFAULT_MESSAGE_THUMBNAIL_EDGE,
+        DEFAULT_MESSAGE_THUMBNAIL_JPEG_QUALITY, DEFAULT_PDF_THUMBNAIL_COMMAND,
+        DEFAULT_PDF_THUMBNAIL_DPI, DEFAULT_PDF_THUMBNAIL_PAGE, DEFAULT_PROFILE_PICTURE_EDGE,
+        DEFAULT_PROFILE_PICTURE_JPEG_QUALITY, DEFAULT_PROFILE_PICTURE_PREVIEW_EDGE,
+        DEFAULT_VIDEO_THUMBNAIL_COMMAND, DEFAULT_VIDEO_THUMBNAIL_SEEK_TIME, GeneratedJpegThumbnail,
+        GeneratedLinkPreviewImages, GeneratedProfilePicture, ImageProcessingLimits,
+        JpegThumbnailOptions, LinkPreviewImageOptions, PdfThumbnailOptions, ProfilePictureOptions,
+        VideoThumbnailOptions, generate_jpeg_thumbnail, generate_link_preview_images,
+        generate_pdf_thumbnail_from_file, generate_profile_picture,
+        generate_video_thumbnail_from_file,
+    };
+    #[cfg(feature = "link-preview")]
+    pub use wa_core::{
+        DEFAULT_LINK_PREVIEW_FETCH_MAX_HTML_BYTES, DEFAULT_LINK_PREVIEW_FETCH_TIMEOUT_MS,
+        DEFAULT_LINK_PREVIEW_FETCH_USER_AGENT, DEFAULT_LINK_PREVIEW_IMAGE_FETCH_MAX_BYTES,
+        DEFAULT_LINK_PREVIEW_IMAGE_FETCH_TIMEOUT_MS, FetchedLinkPreview, LinkPreviewFetchOptions,
+        LinkPreviewImageFetchOptions, fetch_link_preview, fetch_link_preview_image,
+        link_preview_thumbnail_from_uploaded_media, upload_link_preview_thumbnail,
+        upload_link_preview_thumbnail_cached, upload_link_preview_thumbnail_file,
+        upload_link_preview_thumbnail_file_cached,
+    };
+    #[cfg(all(feature = "link-preview", feature = "image"))]
+    pub use wa_core::{
+        FetchedLinkPreviewWithThumbnail, GeneratedLinkPreviewThumbnailUpload,
+        LinkPreviewThumbnailFetchOptions, fetch_link_preview_with_thumbnail,
+        fetch_link_preview_with_thumbnail_cached, upload_generated_link_preview_thumbnail,
+        upload_generated_link_preview_thumbnail_cached,
+    };
+    #[cfg(all(feature = "noise", feature = "image"))]
+    pub use wa_core::{
+        GeneratedRemoteMediaThumbnailUpload, upload_generated_document_remote_thumbnail_file,
+        upload_generated_video_remote_thumbnail_file,
     };
     #[cfg(all(feature = "noise", feature = "http-media"))]
     pub use wa_core::{
@@ -6581,23 +13093,40 @@ pub mod prelude {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use super::*;
     use async_trait::async_trait;
     use bytes::Bytes;
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    use bytes::{BufMut, BytesMut};
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
     use flate2::{Compression, write::ZlibEncoder};
-    use prost::Message;
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    use prost::Message as _;
+    #[cfg(feature = "noise")]
     use std::collections::BTreeMap;
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
     use std::io::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::mpsc;
     use wa_binary::encode_binary_node;
-    use wa_core::{InboundFrame, ValidationPayload, decode_inbound_binary_node};
-    use wa_crypto::{generate_key_pair, hmac_sha256, sign_x25519};
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    use wa_core::ValidationPayload;
+    use wa_core::{FrameSink, FrameStream, InboundFrame, decode_inbound_binary_node};
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    use wa_crypto::{
+        SecretBytes, aes_256_ctr_apply, derive_pairing_code_key, generate_key_pair, hmac_sha256,
+        prefixed_signal_public_key, sign_x25519,
+    };
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
     use wa_proto::proto::{
         AdvDeviceIdentity, AdvEncryptionType, AdvSignedDeviceIdentity, AdvSignedDeviceIdentityHmac,
+        SenderKeyRecordStructure, SenderKeyStateStructure, sender_key_state_structure,
     };
+    #[cfg(feature = "memory-store")]
     use wa_store::KeyNamespace;
 
     struct RelayEncryptor {
@@ -6610,6 +13139,13 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 ciphertext_type: wa_core::MessageCiphertextType::PreKey,
+            }
+        }
+
+        fn sender_key() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                ciphertext_type: wa_core::MessageCiphertextType::SenderKey,
             }
         }
     }
@@ -6641,6 +13177,191 @@ mod tests {
         }
     }
 
+    struct FailingEncryptor {
+        error: &'static str,
+    }
+
+    impl FailingEncryptor {
+        fn new(error: &'static str) -> Self {
+            Self { error }
+        }
+    }
+
+    #[async_trait]
+    impl wa_core::MessageEncryptor for FailingEncryptor {
+        async fn encrypt_message(
+            &self,
+            _recipient_jid: &str,
+            _plaintext: Bytes,
+        ) -> CoreResult<wa_core::MessageEncryption> {
+            Err(wa_core::CoreError::Task(self.error.to_owned()))
+        }
+    }
+
+    struct FailingAfterEncryptor {
+        calls: Mutex<Vec<(String, Bytes)>>,
+        fail_at: usize,
+        error: &'static str,
+    }
+
+    impl FailingAfterEncryptor {
+        fn new(fail_at: usize, error: &'static str) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                fail_at,
+                error,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl wa_core::MessageEncryptor for FailingAfterEncryptor {
+        async fn encrypt_message(
+            &self,
+            recipient_jid: &str,
+            plaintext: Bytes,
+        ) -> CoreResult<wa_core::MessageEncryption> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((recipient_jid.to_owned(), plaintext.clone()));
+            if calls.len() == self.fail_at {
+                return Err(wa_core::CoreError::Task(self.error.to_owned()));
+            }
+            Ok(wa_core::MessageEncryption::new(
+                wa_core::MessageCiphertextType::Message,
+                plaintext,
+            ))
+        }
+    }
+
+    struct DeletingSessionsAfterEncryptor<S> {
+        calls: Mutex<Vec<(String, Bytes)>>,
+        repository: StoreSignalRepository<S>,
+        delete_after: usize,
+        delete_jids: Vec<String>,
+    }
+
+    impl<S> DeletingSessionsAfterEncryptor<S> {
+        fn new(
+            repository: StoreSignalRepository<S>,
+            delete_after: usize,
+            delete_jids: impl IntoIterator<Item = impl Into<String>>,
+        ) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                repository,
+                delete_after,
+                delete_jids: delete_jids.into_iter().map(Into::into).collect(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl<S> wa_core::MessageEncryptor for DeletingSessionsAfterEncryptor<S>
+    where
+        S: wa_store::SignalKeyStore,
+    {
+        async fn encrypt_message(
+            &self,
+            recipient_jid: &str,
+            plaintext: Bytes,
+        ) -> CoreResult<wa_core::MessageEncryption> {
+            let should_delete = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push((recipient_jid.to_owned(), plaintext.clone()));
+                calls.len() == self.delete_after
+            };
+            if should_delete {
+                self.repository.delete_sessions(&self.delete_jids).await?;
+            }
+            Ok(wa_core::MessageEncryption::new(
+                wa_core::MessageCiphertextType::Message,
+                plaintext,
+            ))
+        }
+    }
+
+    struct ClosingConnectionAtEncryptor {
+        calls: Mutex<Vec<(String, Bytes)>>,
+        connection: Connection,
+        close_at: usize,
+    }
+
+    impl ClosingConnectionAtEncryptor {
+        fn new(connection: Connection, close_at: usize) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                connection,
+                close_at,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl wa_core::MessageEncryptor for ClosingConnectionAtEncryptor {
+        async fn encrypt_message(
+            &self,
+            recipient_jid: &str,
+            plaintext: Bytes,
+        ) -> CoreResult<wa_core::MessageEncryption> {
+            let should_close = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push((recipient_jid.to_owned(), plaintext.clone()));
+                calls.len() == self.close_at
+            };
+            if should_close {
+                self.connection.close().await?;
+            }
+            Ok(wa_core::MessageEncryption::new(
+                wa_core::MessageCiphertextType::Message,
+                plaintext,
+            ))
+        }
+    }
+
+    struct ClosingAfterEncryptor<E> {
+        calls: Mutex<Vec<(String, Bytes)>>,
+        inner: E,
+        connection: Connection,
+        close_after: usize,
+    }
+
+    impl<E> ClosingAfterEncryptor<E> {
+        fn new(inner: E, connection: Connection, close_after: usize) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                inner,
+                connection,
+                close_after,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl<E> wa_core::MessageEncryptor for ClosingAfterEncryptor<E>
+    where
+        E: wa_core::MessageEncryptor,
+    {
+        async fn encrypt_message(
+            &self,
+            recipient_jid: &str,
+            plaintext: Bytes,
+        ) -> CoreResult<wa_core::MessageEncryption> {
+            let encrypted = self
+                .inner
+                .encrypt_message(recipient_jid, plaintext.clone())
+                .await?;
+            let should_close = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push((recipient_jid.to_owned(), plaintext));
+                calls.len() == self.close_after
+            };
+            if should_close {
+                self.connection.close().await?;
+            }
+            Ok(encrypted)
+        }
+    }
+
     #[cfg(all(feature = "memory-store", feature = "noise"))]
     struct IncomingDecryptor;
 
@@ -6655,8500 +13376,93 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn connect_wires_query_manager_timeout() {
-        let config = ClientConfig {
-            default_query_timeout: Some(Duration::from_millis(1)),
-            ..ClientConfig::default()
-        };
-
-        let client = Client::builder(wa_store::MemoryAuthStore::new())
-            .config(config)
-            .connect()
-            .await
-            .unwrap();
-
-        let waiter = client.query_manager().register("timeout").unwrap();
-        assert!(matches!(
-            waiter.wait().await,
-            Err(wa_core::CoreError::TimedOut)
-        ));
-    }
-
+    // Relocated from the test region so all feature-gated chunks can use it.
     #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn connect_initializes_credentials_once() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-
-        assert_eq!(client.credentials(), &stored);
-
-        let second = Client::builder(store.clone()).connect().await.unwrap();
-        assert_eq!(second.credentials(), &stored);
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn connection_validation_restores_registered_session() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("12345:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let validation = client.connection_validation().unwrap();
-
-        assert!(matches!(
-            validation.payload,
-            ValidationPayload::Login { user_jid } if user_jid == "12345:7@s.whatsapp.net"
-        ));
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn connection_validation_rejects_registered_session_without_account_jid() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-
-        assert!(client.connection_validation().is_err());
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn exposes_store_backed_signal_repository() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let repository = client.signal_repository();
-
-        let validation =
-            wa_core::SignalRepository::validate_session(&repository, "123@s.whatsapp.net")
-                .await
-                .unwrap();
-        assert!(!validation.exists);
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn execute_usync_query_sends_node_and_parses_result() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let query = USyncQuery::new()
-            .with_contact_protocol()
-            .with_user(wa_core::USyncUser::new().with_phone("+123"));
-        let query_fut = client.execute_usync_query(&connection, &query);
-        tokio::pin!(query_fut);
-
-        let sent_frame = tokio::select! {
-            result = &mut query_fut => panic!("USync query completed before mock response: {result:?}"),
-            sent = sink_rx.recv() => sent.unwrap(),
-        };
-        let sent = decode_inbound_binary_node(&sent_frame).unwrap().node;
-        assert_eq!(sent.attrs["xmlns"], "usync");
-        let tag = sent.attrs["id"].clone();
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(
-                    &BinaryNode::new("iq")
-                        .with_attr("id", tag)
-                        .with_attr("type", "result")
-                        .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                            BinaryNode::new("list").with_content(vec![
-                                BinaryNode::new("user")
-                                    .with_attr("jid", "123@s.whatsapp.net")
-                                    .with_content(vec![
-                                        BinaryNode::new("contact").with_attr("type", "in")
-                                    ]),
-                            ]),
-                        ])]),
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let result = query_fut.await.unwrap().unwrap();
-        assert_eq!(result.list[0].id, "123@s.whatsapp.net");
-        assert_eq!(result.list[0].contact, Some(true));
-
-        let failed_query_fut = client.execute_usync_query(&connection, &query);
-        tokio::pin!(failed_query_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                error_result_for(&node, "403", "not allowed")
-            },
-            &mut failed_query_fut,
-        )
-        .await;
-        let err = failed_query_fut.await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("USync query failed (403): not allowed")
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn on_whatsapp_sends_contact_query_and_maps_results() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let lookup_fut = client.on_whatsapp(&connection, ["+1 234-567"]);
-        tokio::pin!(lookup_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                                BinaryNode::new("user")
-                                    .with_attr("jid", "1234567@s.whatsapp.net")
-                                    .with_content(vec![
-                                        BinaryNode::new("contact").with_attr("type", "in"),
-                                    ]),
-                            ]),
-                    ])])
-            },
-            &mut lookup_fut,
-        )
-        .await;
-
+    fn single_recipient_status_usync_response(node: BinaryNode) -> BinaryNode {
+        assert_eq!(node.attrs["xmlns"], "usync");
+        assert_usync_query_protocol(&node, "devices");
         assert_eq!(
-            lookup_fut.await.unwrap(),
-            vec![OnWhatsAppResult {
-                jid: "1234567@s.whatsapp.net".to_owned(),
-                exists: true,
-            }]
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn send_text_to_devices_writes_relay_stanza() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-
-        let relay = client
-            .send_text_to_devices(
-                &connection,
-                "123@s.whatsapp.net",
-                "hello",
-                &[MessageRelayRecipient::new("123:1@s.whatsapp.net")],
-                &encryptor,
-                MessageRelayOptions::new().with_message_id("msg-1"),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(relay.message_id, "msg-1");
-        let sent_frame = sink_rx.recv().await.unwrap();
-        let sent = decode_inbound_binary_node(&sent_frame).unwrap().node;
-        assert_eq!(sent.tag, "message");
-        assert_eq!(sent.attrs["id"], "msg-1");
-        assert_eq!(sent.attrs["to"], "123@s.whatsapp.net");
-        assert_eq!(sent.attrs["type"], "text");
-        let Some(wa_binary::BinaryNodeContent::Nodes(content)) = &sent.content else {
-            panic!("message stanza has no children");
-        };
-        assert_eq!(content[0].tag, "participants");
-
-        let calls = encryptor.calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "123:1@s.whatsapp.net");
-        let plaintext = wa_proto::proto::Message::decode(calls[0].1.clone()).unwrap();
-        assert_eq!(
-            plaintext
-                .extended_text_message
-                .as_ref()
-                .unwrap()
-                .text
-                .as_deref(),
-            Some("hello")
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn send_text_to_devices_adds_stored_device_identity_for_pre_key_ciphertext() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        credentials.signed_device_identity = Some(Bytes::from_static(b"stored-identity"));
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::pre_key();
-
-        let relay = client
-            .send_text_to_devices(
-                &connection,
-                "123@s.whatsapp.net",
-                "hello",
-                &[MessageRelayRecipient::new("123:1@s.whatsapp.net")],
-                &encryptor,
-                MessageRelayOptions::new().with_message_id("msg-1"),
-            )
-            .await
-            .unwrap();
-
-        assert!(relay.should_include_device_identity);
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        let Some(wa_binary::BinaryNodeContent::Nodes(content)) = &sent.content else {
-            panic!("message stanza has no children");
-        };
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[1].tag, "device-identity");
-        assert_eq!(
-            content[1].content,
-            Some(wa_binary::BinaryNodeContent::Bytes(Bytes::from_static(
-                b"stored-identity"
-            )))
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn relay_reaction_to_devices_writes_reaction_stanza() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        let key =
-            wa_core::build_message_key("123@s.whatsapp.net", false, "target-1", None).unwrap();
-
-        let relay = client
-            .relay_message_to_devices(
-                &connection,
-                "123@s.whatsapp.net",
-                MessageContent::reaction(wa_core::ReactionContent::new(key.clone(), "")),
-                &[MessageRelayRecipient::new("123:1@s.whatsapp.net")],
-                &encryptor,
-                MessageRelayOptions::new().with_message_id("msg-1"),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(relay.message_id, "msg-1");
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.tag, "message");
-        assert_eq!(sent.attrs["type"], "reaction");
-
-        let calls = encryptor.calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
-        let plaintext = wa_proto::proto::Message::decode(calls[0].1.clone()).unwrap();
-        let reaction = plaintext.reaction_message.unwrap();
-        assert_eq!(reaction.key.unwrap(), key);
-        assert_eq!(reaction.text.as_deref(), Some(""));
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn send_text_discovers_devices_and_wraps_own_devices() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("ownlid@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new(
-                "123@s.whatsapp.net",
-                Bytes::from_static(b"trusted-contact-token"),
-            )
-            .unwrap()
-            .with_timestamp_seconds(current_unix_timestamp()),
-        )
-        .await
-        .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        let send_fut = client.send_text(
-            &connection,
-            "123@s.whatsapp.net",
-            "hello",
-            &encryptor,
-            MessageRelayOptions::new().with_message_id("msg-1"),
-        );
-        tokio::pin!(send_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "devices");
-                assert_eq!(
-                    usync_query_user_jids(&node),
-                    vec![
-                        "123@s.whatsapp.net".to_owned(),
-                        "999:7@s.whatsapp.net".to_owned(),
-                        "ownlid@lid".to_owned(),
-                    ]
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "123@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "0"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "1")
-                                            .with_attr("key-index", "10"),
-                                    ])],
-                                )]),
-                            BinaryNode::new("user")
-                                .with_attr("jid", "999@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "0"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "7")
-                                            .with_attr("key-index", "11"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "8")
-                                            .with_attr("key-index", "12"),
-                                    ])],
-                                )]),
-                            BinaryNode::new("user")
-                                .with_attr("jid", "ownlid@lid")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "7")
-                                            .with_attr("key-index", "13"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "9")
-                                            .with_attr("key-index", "14")
-                                            .with_attr("is_hosted", "true"),
-                                    ])],
-                                )]),
-                        ]),
-                    ])])
-            },
-            &mut send_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                assert_eq!(node.attrs["type"], "get");
-                assert_eq!(node.attrs["to"], wa_core::SERVER_JID);
-                assert_eq!(
-                    encrypt_key_query_user_attrs(&node)
-                        .into_iter()
-                        .map(|(jid, _)| jid)
-                        .collect::<Vec<_>>(),
-                    vec![
-                        "123@s.whatsapp.net".to_owned(),
-                        "123:1@s.whatsapp.net".to_owned(),
-                        "999@s.whatsapp.net".to_owned(),
-                        "999:8@s.whatsapp.net".to_owned(),
-                        "ownlid:9@hosted.lid".to_owned(),
-                    ]
-                );
-                session_response_for_query(&node)
-            },
-            &mut send_fut,
-        )
-        .await;
-
-        let relay = send_fut.await.unwrap();
-        assert_eq!(relay.message_id, "msg-1");
-        assert_eq!(relay.recipient_count, 5);
-
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.tag, "message");
-        assert_eq!(sent.attrs["id"], "msg-1");
-        assert_eq!(sent.attrs["to"], "123@s.whatsapp.net");
-        let Some(wa_binary::BinaryNodeContent::Nodes(content)) = &sent.content else {
-            panic!("message should contain child nodes");
-        };
-        assert!(content.iter().any(|node| {
-            node.tag == "tctoken"
-                && node.content
-                    == Some(wa_binary::BinaryNodeContent::Bytes(Bytes::from_static(
-                        b"trusted-contact-token",
-                    )))
-        }));
-
-        let calls = encryptor.calls.lock().unwrap().clone();
-        assert_eq!(
-            calls.iter().map(|call| call.0.as_str()).collect::<Vec<_>>(),
+            usync_query_user_jids(&node),
             vec![
-                "123@s.whatsapp.net",
-                "123:1@s.whatsapp.net",
-                "999@s.whatsapp.net",
-                "999:8@s.whatsapp.net",
-                "ownlid:9@hosted.lid",
+                "111@s.whatsapp.net".to_owned(),
+                "999:7@s.whatsapp.net".to_owned(),
             ]
         );
-        for call in calls.iter().take(2) {
-            let plaintext = wa_proto::proto::Message::decode(call.1.clone()).unwrap();
-            assert_eq!(
-                plaintext
-                    .extended_text_message
-                    .as_ref()
-                    .unwrap()
-                    .text
-                    .as_deref(),
-                Some("hello")
-            );
-            assert!(plaintext.device_sent_message.is_none());
-        }
-        for call in calls.iter().skip(2) {
-            let plaintext = wa_proto::proto::Message::decode(call.1.clone()).unwrap();
-            let device_sent = plaintext.device_sent_message.unwrap();
-            assert_eq!(
-                device_sent.destination_jid.as_deref(),
-                Some("123@s.whatsapp.net")
-            );
-            assert_eq!(
-                device_sent
-                    .message
-                    .unwrap()
-                    .extended_text_message
-                    .unwrap()
-                    .text
-                    .as_deref(),
-                Some("hello")
-            );
-        }
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn send_text_schedules_post_send_tc_token_issuance() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        let send_fut = client.send_text(
-            &connection,
-            "123@s.whatsapp.net",
-            "hello",
-            &encryptor,
-            MessageRelayOptions::new().with_message_id("msg-tc-issue"),
-        );
-        tokio::pin!(send_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "devices");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "123@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "0"),
-                                    ])],
-                                )]),
-                            BinaryNode::new("user")
-                                .with_attr("jid", "999@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "7"),
-                                    ])],
-                                )]),
-                        ]),
-                    ])])
-            },
-            &mut send_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                session_response_for_query(&node)
-            },
-            &mut send_fut,
-        )
-        .await;
-
-        let relay = send_fut.await.unwrap();
-        assert_eq!(relay.message_id, "msg-tc-issue");
-
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.tag, "message");
-        assert_eq!(sent.attrs["id"], "msg-tc-issue");
-
-        let privacy = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(privacy.attrs["xmlns"], "privacy");
-        let Some(wa_binary::BinaryNodeContent::Nodes(iq_children)) = &privacy.content else {
-            panic!("privacy query should have child nodes");
-        };
-        let tokens = iq_children
-            .iter()
-            .find(|child| child.tag == "tokens")
-            .unwrap();
-        let Some(wa_binary::BinaryNodeContent::Nodes(token_children)) = &tokens.content else {
-            panic!("tokens node should have token children");
-        };
-        assert_eq!(token_children.len(), 1);
-        assert_eq!(token_children[0].attrs["jid"], "123@s.whatsapp.net");
-        assert_eq!(token_children[0].attrs["type"], "trusted_contact");
-        let issue_timestamp = token_children[0].attrs["t"].parse::<u64>().unwrap();
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(
-                    &BinaryNode::new("iq")
-                        .with_attr("id", privacy.attrs["id"].clone())
-                        .with_attr("type", "result")
-                        .with_content(vec![BinaryNode::new("tokens").with_content(vec![
-                            BinaryNode::new("token")
-                                .with_attr("jid", "ignored@s.whatsapp.net")
-                                .with_attr("t", (issue_timestamp + 1).to_string())
-                                .with_attr("type", "trusted_contact")
-                                .with_content(Bytes::from_static(b"auto-peer-token")),
+        BinaryNode::new("iq")
+            .with_attr("id", node.attrs["id"].clone())
+            .with_attr("type", "result")
+            .with_content(vec![BinaryNode::new("usync").with_content(vec![
+                BinaryNode::new("list").with_content(vec![
+                    BinaryNode::new("user")
+                        .with_attr("jid", "111@s.whatsapp.net")
+                        .with_content(vec![BinaryNode::new("devices").with_content(vec![
+                            BinaryNode::new("device-list")
+                                .with_content(vec![BinaryNode::new("device").with_attr("id", "0")]),
                         ])]),
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let mut loaded = None;
-        for _ in 0..20 {
-            loaded = wa_core::load_tc_token(&store, "123@s.whatsapp.net")
-                .await
-                .unwrap();
-            if loaded
-                .as_ref()
-                .and_then(|record| record.sender_timestamp_seconds)
-                == Some(issue_timestamp)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let loaded = loaded.unwrap();
-        assert_eq!(loaded.token, Bytes::from_static(b"auto-peer-token"));
-        assert_eq!(loaded.timestamp_seconds, Some(issue_timestamp + 1));
-        assert_eq!(loaded.sender_timestamp_seconds, Some(issue_timestamp));
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn issue_tc_token_queries_privacy_and_marks_sender_timestamp() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        wa_core::LidPnMappingStore::new(store.clone())
-            .store_mappings(vec![wa_core::LidPnMapping {
-                pn: "123@s.whatsapp.net".to_owned(),
-                lid: "abc@lid".to_owned(),
-            }])
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let issue_fut = client.issue_tc_token_with_options(
-            &connection,
-            "123@s.whatsapp.net",
-            true,
-            1_700_000_000,
-        );
-        tokio::pin!(issue_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "privacy");
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(node.attrs["to"], wa_core::SERVER_JID);
-                let Some(wa_binary::BinaryNodeContent::Nodes(iq_children)) = &node.content else {
-                    panic!("privacy query should have child nodes");
-                };
-                let tokens = iq_children
-                    .iter()
-                    .find(|child| child.tag == "tokens")
-                    .unwrap();
-                let Some(wa_binary::BinaryNodeContent::Nodes(token_children)) = &tokens.content
-                else {
-                    panic!("tokens node should have token children");
-                };
-                assert_eq!(token_children.len(), 1);
-                assert_eq!(token_children[0].attrs["jid"], "abc@lid");
-                assert_eq!(token_children[0].attrs["t"], "1700000000");
-                assert_eq!(token_children[0].attrs["type"], "trusted_contact");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("tokens").with_content(vec![
-                        BinaryNode::new("token")
-                            .with_attr("jid", "ignored@s.whatsapp.net")
-                            .with_attr("t", "1700000001")
-                            .with_attr("type", "trusted_contact")
-                            .with_content(Bytes::from_static(b"peer-token")),
-                    ])])
-            },
-            &mut issue_fut,
-        )
-        .await;
-
-        let outcome = issue_fut.await.unwrap().unwrap();
-        assert_eq!(outcome.storage_jid, "abc@lid");
-        assert_eq!(outcome.issue_jid, "abc@lid");
-        assert_eq!(outcome.timestamp_seconds, 1_700_000_000);
-        assert_eq!(outcome.stored_tokens.len(), 1);
-        assert_eq!(
-            outcome.sender_record.token,
-            Bytes::from_static(b"peer-token")
-        );
-        assert_eq!(
-            outcome.sender_record.sender_timestamp_seconds,
-            Some(1_700_000_000)
-        );
-        let loaded = wa_core::load_tc_token(&store, "abc@lid")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded.token, Bytes::from_static(b"peer-token"));
-        assert_eq!(loaded.timestamp_seconds, Some(1_700_000_001));
-        assert_eq!(loaded.sender_timestamp_seconds, Some(1_700_000_000));
-        let node = wa_core::load_tc_token_node_for_send(&store, "abc@lid", 1_700_000_002)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(node.tag, "tctoken");
-        assert_eq!(
-            node.content,
-            Some(wa_binary::BinaryNodeContent::Bytes(Bytes::from_static(
-                b"peer-token"
-            )))
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn prune_expired_tc_tokens_facade_removes_stale_records() {
-        let store = wa_store::MemoryAuthStore::new();
-        let now = current_unix_timestamp();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("111@s.whatsapp.net", Bytes::from_static(b"valid"))
-                .unwrap()
-                .with_timestamp_seconds(now),
-        )
-        .await
-        .unwrap();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("222@s.whatsapp.net", Bytes::from_static(b"expired"))
-                .unwrap()
-                .with_timestamp_seconds(1),
-        )
-        .await
-        .unwrap();
-
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let outcome = client
-            .prune_expired_tc_tokens_with_batch_size(1)
-            .await
-            .unwrap();
-        assert_eq!(outcome.scanned, 2);
-        assert_eq!(outcome.retained, 1);
-        assert_eq!(outcome.deleted, 1);
-        assert!(
-            wa_core::load_tc_token(&store, "111@s.whatsapp.net")
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            wa_core::load_tc_token(&store, "222@s.whatsapp.net")
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn tc_token_prune_maintenance_runs_on_open_and_throttles() {
-        let store = wa_store::MemoryAuthStore::new();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("111@s.whatsapp.net", Bytes::from_static(b"expired"))
-                .unwrap()
-                .with_timestamp_seconds(1),
-        )
-        .await
-        .unwrap();
-
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut maintenance = client
-            .spawn_tc_token_prune_on_connection_open(Duration::from_secs(60), 1)
-            .unwrap();
-        let (first_connection, _sink_rx, _stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        for _ in 0..20 {
-            if wa_core::load_tc_token(&store, "111@s.whatsapp.net")
-                .await
-                .unwrap()
-                .is_none()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            wa_core::load_tc_token(&store, "111@s.whatsapp.net")
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("222@s.whatsapp.net", Bytes::from_static(b"expired"))
-                .unwrap()
-                .with_timestamp_seconds(1),
-        )
-        .await
-        .unwrap();
-        let (second_connection, _sink_rx, _stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            wa_core::load_tc_token(&store, "222@s.whatsapp.net")
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        first_connection.close().await.unwrap();
-        second_connection.close().await.unwrap();
-        maintenance.abort();
-
-        let invalid_interval =
-            match client.spawn_tc_token_prune_on_connection_open(Duration::ZERO, 1) {
-                Ok(_) => panic!("zero prune interval should be rejected"),
-                Err(err) => err,
-            };
-        assert!(
-            invalid_interval
-                .to_string()
-                .contains("tctoken prune interval must be non-zero")
-        );
-        let invalid_batch =
-            match client.spawn_tc_token_prune_on_connection_open(Duration::from_secs(1), 0) {
-                Ok(_) => panic!("zero prune batch should be rejected"),
-                Err(err) => err,
-            };
-        assert!(
-            invalid_batch
-                .to_string()
-                .contains("tctoken prune batch size must be non-zero")
-        );
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn high_level_relay_options_add_reporting_token_for_secret_messages() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let message = wa_core::build_poll_message(wa_core::PollContent::new(
-            "Lunch?",
-            ["Rice", "Noodles"],
-            1,
-            Bytes::from(vec![9u8; 32]),
-        ))
-        .unwrap();
-
-        let options = client
-            .message_relay_options_with_sender(MessageRelayOptions::new().with_message_id("msg-1"))
-            .unwrap();
-        let options =
-            Client::<wa_store::MemoryAuthStore>::message_relay_options_with_generated_id(options)
-                .unwrap();
-        let options = Client::<wa_store::MemoryAuthStore>::message_relay_options_with_reporting(
-            "123@s.whatsapp.net",
-            &message,
-            options,
-        )
-        .unwrap();
-
-        let reporting = options
-            .additional_nodes
-            .iter()
-            .find(|node| node.tag == "reporting")
-            .expect("reporting node should be attached");
-        let Some(wa_binary::BinaryNodeContent::Nodes(children)) = &reporting.content else {
-            panic!("reporting node should contain children");
-        };
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].tag, "reporting_token");
-        assert_eq!(children[0].attrs.get("v").map(String::as_str), Some("2"));
-        let Some(wa_binary::BinaryNodeContent::Bytes(token)) = &children[0].content else {
-            panic!("reporting token should contain bytes");
-        };
-        assert_eq!(token.len(), 16);
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn execute_retry_resends_replays_cached_message_to_requesting_device() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let repository = client.signal_repository();
-        repository
-            .inject_e2e_session(wa_core::SessionInjection {
-                jid: "123:1@s.whatsapp.net".to_owned(),
-                session: test_signal_session(),
-            })
-            .await
-            .unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        let message = wa_proto::proto::Message {
-            conversation: Some("cached".to_owned()),
-            ..wa_proto::proto::Message::default()
-        };
-
-        client
-            .relay_proto_message_to_devices(
-                &connection,
-                "123@s.whatsapp.net",
-                message.clone(),
-                &[MessageRelayRecipient::new("123:1@s.whatsapp.net")],
-                &encryptor,
-                MessageRelayOptions::new().with_message_id("m1"),
-            )
-            .await
-            .unwrap();
-        let first = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(first.attrs["id"], "m1");
-
-        let receipt = wa_core::RetryReceipt {
-            message_ids: vec!["m1".to_owned()],
-            from_jid: Some("123:1@s.whatsapp.net".to_owned()),
-            to_jid: None,
-            participant: None,
-            recipient: Some("123@s.whatsapp.net".to_owned()),
-            chat_jid: Some("123@s.whatsapp.net".to_owned()),
-            retry: wa_core::RetryReceiptRetry {
-                count: 1,
-                original_stanza_id: None,
-                timestamp: None,
-                version: None,
-                error: None,
-            },
-            registration_id: None,
-            has_key_bundle: false,
-        };
-        let plan = client
-            .plan_retry_resend(
-                &receipt,
-                wa_core::RetrySessionSnapshot {
-                    has_session: true,
-                    registration_id: Some(0x0102_0304),
-                    base_key: None,
-                    signal_address: None,
-                },
-                current_unix_timestamp_ms(),
-            )
-            .unwrap();
-        assert_eq!(
-            plan.resend_target,
-            wa_core::RetryResendTarget::Participant {
-                jid: "123:1@s.whatsapp.net".to_owned(),
-                count: 1,
-            }
-        );
-        let prepared = client
-            .prepare_retry_resends(&plan, current_unix_timestamp_ms())
-            .unwrap();
-        assert!(prepared.is_complete());
-        assert_eq!(prepared.jobs.len(), 1);
-
-        let relays = client
-            .execute_retry_resends(&connection, &prepared, &encryptor)
-            .await
-            .unwrap();
-
-        assert_eq!(relays.len(), 1);
-        assert_eq!(relays[0].message_id, "m1");
-        assert_eq!(relays[0].recipient_count, 1);
-        let resent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(resent.attrs["id"], "m1");
-        let calls = encryptor.calls.lock().unwrap().clone();
-        assert_eq!(
-            calls.iter().map(|call| call.0.as_str()).collect::<Vec<_>>(),
-            vec!["123:1@s.whatsapp.net", "123:1@s.whatsapp.net"]
-        );
-        for call in calls {
-            let decoded = wa_proto::proto::Message::decode(call.1).unwrap();
-            assert_eq!(decoded.conversation.as_deref(), Some("cached"));
-        }
-        let stats = client.message_retry_statistics().unwrap();
-        assert_eq!(stats.successful_retries, 1);
-        let prepared_after_success = client
-            .prepare_retry_resends(&plan, current_unix_timestamp_ms())
-            .unwrap();
-        assert!(prepared_after_success.jobs.is_empty());
-        assert_eq!(prepared_after_success.missing_message_ids, vec!["m1"]);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn process_incoming_node_with_retry_resend_refreshes_session_and_replays_cached_message()
-    {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let repository = client.signal_repository();
-        repository
-            .inject_e2e_session(wa_core::SessionInjection {
-                jid: "123:1@s.whatsapp.net".to_owned(),
-                session: test_signal_session(),
-            })
-            .await
-            .unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        let message = wa_proto::proto::Message {
-            conversation: Some("retry me".to_owned()),
-            ..wa_proto::proto::Message::default()
-        };
-        client
-            .cache_recent_message_for_retry(
-                "123@s.whatsapp.net",
-                "retry-live",
-                message,
-                current_unix_timestamp_ms(),
-            )
-            .unwrap();
-        let receipt = BinaryNode::new("receipt")
-            .with_attr("id", "retry-live")
-            .with_attr("from", "123:1@s.whatsapp.net")
-            .with_attr("recipient", "123@s.whatsapp.net")
-            .with_attr("type", "retry")
-            .with_content(vec![
-                BinaryNode::new("retry")
-                    .with_attr("count", "2")
-                    .with_attr("error", "7"),
-                BinaryNode::new("registration")
-                    .with_content(wa_core::encode_big_endian(0x0102_0305, 4).unwrap()),
-            ]);
-        let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig {
-            max_pending_items: 8,
-        });
-        let process_fut = client.process_incoming_node_with_retry_resend(
-            &connection,
-            &receipt,
-            &IncomingDecryptor,
-            &encryptor,
-            &mut buffer,
-        );
-        tokio::pin!(process_fut);
-
-        let ack_frame = tokio::select! {
-            result = &mut process_fut => panic!("retry processing completed before ACK: {result:?}"),
-            sent = sink_rx.recv() => sent.unwrap(),
-        };
-        let ack = decode_inbound_binary_node(&ack_frame).unwrap().node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "retry-live");
-        assert_eq!(ack.attrs["class"], "receipt");
-        assert_eq!(ack.attrs["to"], "123:1@s.whatsapp.net");
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                assert_eq!(encrypt_key_query_user_attrs(&node).len(), 1);
-                session_response_for_query(&node)
-            },
-            &mut process_fut,
-        )
-        .await;
-
-        let outcome = process_fut.await.unwrap();
-        assert_eq!(outcome.inbound.action, wa_core::InboundNodeAction::Receipt);
-        let retry = outcome.retry_resend.unwrap();
-        assert_eq!(retry.receipt.message_ids, vec!["retry-live"]);
-        assert_eq!(
-            retry.plan.session_action,
-            wa_core::RetrySessionAction::DeleteAndRefresh {
-                reason: "registration id mismatch: stored 16909060, received 16909061".to_owned(),
-            }
-        );
-        assert_eq!(
-            retry.session_action.deleted_sessions,
-            vec!["123:1@s.whatsapp.net"]
-        );
-        assert!(retry.session_action.refreshed_sessions);
-        assert!(retry.preparation.is_complete());
-        assert_eq!(retry.relays.len(), 1);
-        assert_eq!(retry.relays[0].message_id, "retry-live");
-
-        let resent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(resent.tag, "message");
-        assert_eq!(resent.attrs["id"], "retry-live");
-        assert_eq!(resent.attrs["to"], "123@s.whatsapp.net");
-        assert!(
-            repository
-                .validate_session("123:1@s.whatsapp.net")
-                .await
-                .unwrap()
-                .exists
-        );
-        assert_eq!(
-            client
-                .message_retry_statistics()
-                .unwrap()
-                .successful_retries,
-            1
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn process_incoming_node_with_retry_resend_injects_inline_key_bundle() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let repository = client.signal_repository();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        client
-            .cache_recent_message_for_retry(
-                "123@s.whatsapp.net",
-                "retry-bundle",
-                wa_proto::proto::Message {
-                    conversation: Some("bundle retry".to_owned()),
-                    ..wa_proto::proto::Message::default()
-                },
-                current_unix_timestamp_ms(),
-            )
-            .unwrap();
-        let receipt = BinaryNode::new("receipt")
-            .with_attr("id", "retry-bundle")
-            .with_attr("from", "123:1@s.whatsapp.net")
-            .with_attr("recipient", "123@s.whatsapp.net")
-            .with_attr("type", "retry")
-            .with_content(vec![
-                BinaryNode::new("retry").with_attr("count", "1"),
-                BinaryNode::new("registration")
-                    .with_content(wa_core::encode_big_endian(0x0102_0304, 4).unwrap()),
-                BinaryNode::new("keys").with_content(vec![
-                    BinaryNode::new("type")
-                        .with_content(Bytes::copy_from_slice(&wa_core::KEY_BUNDLE_TYPE)),
-                    BinaryNode::new("identity").with_content(Bytes::from(vec![1u8; 32])),
-                    BinaryNode::new("skey").with_content(vec![
-                        BinaryNode::new("id")
-                            .with_content(wa_core::encode_big_endian(7, 3).unwrap()),
-                        BinaryNode::new("value").with_content(Bytes::from(vec![2u8; 32])),
-                        BinaryNode::new("signature").with_content(Bytes::from(vec![3u8; 64])),
-                    ]),
-                    BinaryNode::new("key").with_content(vec![
-                        BinaryNode::new("id")
-                            .with_content(wa_core::encode_big_endian(9, 3).unwrap()),
-                        BinaryNode::new("value").with_content(Bytes::from(vec![4u8; 32])),
-                    ]),
-                    BinaryNode::new("device-identity")
-                        .with_content(Bytes::from_static(b"retry-device-identity")),
-                ]),
-            ]);
-        let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig {
-            max_pending_items: 8,
-        });
-        let outcome = client
-            .process_incoming_node_with_retry_resend(
-                &connection,
-                &receipt,
-                &IncomingDecryptor,
-                &encryptor,
-                &mut buffer,
-            )
-            .await
-            .unwrap();
-
-        let ack_frame = sink_rx.recv().await.unwrap();
-        let ack = decode_inbound_binary_node(&ack_frame).unwrap().node;
-        assert_eq!(ack.attrs["id"], "retry-bundle");
-        assert_eq!(ack.attrs["class"], "receipt");
-
-        let resent_frame = sink_rx.recv().await.unwrap();
-        let resent = decode_inbound_binary_node(&resent_frame).unwrap().node;
-        assert_eq!(resent.tag, "message");
-        assert_eq!(resent.attrs["id"], "retry-bundle");
-        assert_eq!(resent.attrs["to"], "123@s.whatsapp.net");
-
-        let retry = outcome.retry_resend.unwrap();
-        assert_eq!(
-            retry.plan.session_action,
-            wa_core::RetrySessionAction::InjectBundle
-        );
-        assert!(retry.session_action.injected_bundle);
-        let injected_bundle = retry.session_action.injected_key_bundle.as_ref().unwrap();
-        assert_eq!(injected_bundle.session.jid, "123:1@s.whatsapp.net");
-        assert_eq!(
-            injected_bundle.device_identity.as_deref(),
-            Some(&b"retry-device-identity"[..])
-        );
-        assert!(!retry.session_action.refreshed_sessions);
-        assert!(retry.session_action.deleted_sessions.is_empty());
-        assert!(
-            repository
-                .validate_session("123:1@s.whatsapp.net")
-                .await
-                .unwrap()
-                .exists
-        );
-        assert!(matches!(
-            sink_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn process_incoming_node_with_retry_resend_clears_group_sender_key_memory() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        store
-            .set(KeyNamespace::SenderKeyMemory, "555@g.us", b"sender-memory")
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        client
-            .cache_recent_message_for_retry(
-                "555@g.us",
-                "group-retry",
-                wa_proto::proto::Message {
-                    conversation: Some("group retry".to_owned()),
-                    ..wa_proto::proto::Message::default()
-                },
-                current_unix_timestamp_ms(),
-            )
-            .unwrap();
-        let receipt = BinaryNode::new("receipt")
-            .with_attr("id", "group-retry")
-            .with_attr("from", "123:1@s.whatsapp.net")
-            .with_attr("recipient", "555@g.us")
-            .with_attr("type", "retry")
-            .with_content(vec![
-                BinaryNode::new("retry").with_attr("count", "1"),
-                BinaryNode::new("registration")
-                    .with_content(wa_core::encode_big_endian(0x0102_0304, 4).unwrap()),
-                BinaryNode::new("keys").with_content(vec![
-                    BinaryNode::new("type")
-                        .with_content(Bytes::copy_from_slice(&wa_core::KEY_BUNDLE_TYPE)),
-                    BinaryNode::new("identity").with_content(Bytes::from(vec![1u8; 32])),
-                    BinaryNode::new("skey").with_content(vec![
-                        BinaryNode::new("id")
-                            .with_content(wa_core::encode_big_endian(7, 3).unwrap()),
-                        BinaryNode::new("value").with_content(Bytes::from(vec![2u8; 32])),
-                        BinaryNode::new("signature").with_content(Bytes::from(vec![3u8; 64])),
-                    ]),
-                    BinaryNode::new("key").with_content(vec![
-                        BinaryNode::new("id")
-                            .with_content(wa_core::encode_big_endian(9, 3).unwrap()),
-                        BinaryNode::new("value").with_content(Bytes::from(vec![4u8; 32])),
-                    ]),
-                ]),
-            ]);
-        let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig {
-            max_pending_items: 8,
-        });
-
-        let outcome = client
-            .process_incoming_node_with_retry_resend(
-                &connection,
-                &receipt,
-                &IncomingDecryptor,
-                &encryptor,
-                &mut buffer,
-            )
-            .await
-            .unwrap();
-
-        assert!(
-            outcome
-                .retry_resend
-                .as_ref()
-                .unwrap()
-                .plan
-                .should_clear_group_sender_key
-        );
-        assert!(
-            outcome
-                .retry_resend
-                .as_ref()
-                .unwrap()
-                .cleared_group_sender_key_memory
-        );
-        assert!(
-            store
-                .get(KeyNamespace::SenderKeyMemory, "555@g.us")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.attrs["id"], "group-retry");
-        assert_eq!(ack.attrs["class"], "receipt");
-        let resent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(resent.tag, "message");
-        assert_eq!(resent.attrs["id"], "group-retry");
-        assert_eq!(resent.attrs["to"], "555@g.us");
-        assert!(matches!(
-            sink_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_with_retry_resend_replays_raw_retry_receipt() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let repository = client.signal_repository();
-        repository
-            .inject_e2e_session(wa_core::SessionInjection {
-                jid: "123:1@s.whatsapp.net".to_owned(),
-                session: test_signal_session(),
-            })
-            .await
-            .unwrap();
-        client
-            .cache_recent_message_for_retry(
-                "123@s.whatsapp.net",
-                "retry-spawn",
-                wa_proto::proto::Message {
-                    conversation: Some("spawn retry".to_owned()),
-                    ..wa_proto::proto::Message::default()
-                },
-                current_unix_timestamp_ms(),
-            )
-            .unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor_with_retry_resend(
-                connection.clone(),
-                IncomingDecryptor,
-                RelayEncryptor::default(),
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let receipt = BinaryNode::new("receipt")
-            .with_attr("id", "retry-spawn")
-            .with_attr("from", "123:1@s.whatsapp.net")
-            .with_attr("recipient", "123@s.whatsapp.net")
-            .with_attr("type", "retry")
-            .with_content(vec![
-                BinaryNode::new("retry")
-                    .with_attr("count", "2")
-                    .with_attr("error", "7"),
-                BinaryNode::new("registration")
-                    .with_content(wa_core::encode_big_endian(0x0102_0305, 4).unwrap()),
-            ]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&receipt).unwrap()))
-            .await
-            .unwrap();
-
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "retry-spawn");
-        assert_eq!(ack.attrs["class"], "receipt");
-        assert_eq!(ack.attrs["to"], "123:1@s.whatsapp.net");
-
-        let refresh_query = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(refresh_query.attrs["xmlns"], "encrypt");
-        assert_eq!(encrypt_key_query_user_attrs(&refresh_query).len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&session_response_for_query(&refresh_query)).unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let resent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(resent.tag, "message");
-        assert_eq!(resent.attrs["id"], "retry-spawn");
-        assert_eq!(resent.attrs["to"], "123@s.whatsapp.net");
-        assert_eq!(
-            client
-                .message_retry_statistics()
-                .unwrap()
-                .successful_retries,
-            1
-        );
-        assert!(
-            repository
-                .validate_session("123:1@s.whatsapp.net")
-                .await
-                .unwrap()
-                .exists
-        );
-        processor.abort();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_with_retry_resend_injects_inline_key_bundle() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let repository = client.signal_repository();
-        client
-            .cache_recent_message_for_retry(
-                "123@s.whatsapp.net",
-                "retry-spawn-bundle",
-                wa_proto::proto::Message {
-                    conversation: Some("spawn bundle retry".to_owned()),
-                    ..wa_proto::proto::Message::default()
-                },
-                current_unix_timestamp_ms(),
-            )
-            .unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor_with_retry_resend(
-                connection.clone(),
-                IncomingDecryptor,
-                RelayEncryptor::default(),
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let receipt = BinaryNode::new("receipt")
-            .with_attr("id", "retry-spawn-bundle")
-            .with_attr("from", "123:1@s.whatsapp.net")
-            .with_attr("recipient", "123@s.whatsapp.net")
-            .with_attr("type", "retry")
-            .with_content(vec![
-                BinaryNode::new("retry").with_attr("count", "1"),
-                BinaryNode::new("registration")
-                    .with_content(wa_core::encode_big_endian(0x0102_0304, 4).unwrap()),
-                BinaryNode::new("keys").with_content(vec![
-                    BinaryNode::new("type")
-                        .with_content(Bytes::copy_from_slice(&wa_core::KEY_BUNDLE_TYPE)),
-                    BinaryNode::new("identity").with_content(Bytes::from(vec![1u8; 32])),
-                    BinaryNode::new("skey").with_content(vec![
-                        BinaryNode::new("id")
-                            .with_content(wa_core::encode_big_endian(7, 3).unwrap()),
-                        BinaryNode::new("value").with_content(Bytes::from(vec![2u8; 32])),
-                        BinaryNode::new("signature").with_content(Bytes::from(vec![3u8; 64])),
-                    ]),
-                    BinaryNode::new("key").with_content(vec![
-                        BinaryNode::new("id")
-                            .with_content(wa_core::encode_big_endian(9, 3).unwrap()),
-                        BinaryNode::new("value").with_content(Bytes::from(vec![4u8; 32])),
-                    ]),
-                ]),
-            ]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&receipt).unwrap()))
-            .await
-            .unwrap();
-
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.attrs["id"], "retry-spawn-bundle");
-        assert_eq!(ack.attrs["class"], "receipt");
-
-        let resent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(resent.tag, "message");
-        assert_eq!(resent.attrs["id"], "retry-spawn-bundle");
-        assert_eq!(resent.attrs["to"], "123@s.whatsapp.net");
-        assert!(
-            repository
-                .validate_session("123:1@s.whatsapp.net")
-                .await
-                .unwrap()
-                .exists
-        );
-        assert_eq!(
-            client
-                .message_retry_statistics()
-                .unwrap()
-                .successful_retries,
-            1
-        );
-        assert!(matches!(
-            sink_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-        processor.abort();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn request_placeholder_resend_sends_peer_data_operation_message() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        let missing_key =
-            wa_core::build_message_key("123@s.whatsapp.net", false, "missing-1", None).unwrap();
-        let request_fut = client.request_placeholder_resend(
-            &connection,
-            [missing_key.clone()],
-            &encryptor,
-            MessageRelayOptions::new().with_message_id("pdo-1"),
-        );
-        tokio::pin!(request_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "devices");
-                assert_eq!(
-                    usync_query_user_jids(&node),
-                    vec![
-                        "999@s.whatsapp.net".to_owned(),
-                        "999:7@s.whatsapp.net".to_owned(),
-                    ]
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "999@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "0"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "7")
-                                            .with_attr("key-index", "11"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "8")
-                                            .with_attr("key-index", "12"),
-                                    ])],
-                                )]),
-                        ]),
-                    ])])
-            },
-            &mut request_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                assert_eq!(node.attrs["type"], "get");
-                assert_eq!(
-                    encrypt_key_query_user_attrs(&node)
-                        .into_iter()
-                        .map(|(jid, _)| jid)
-                        .collect::<Vec<_>>(),
-                    vec![
-                        "999@s.whatsapp.net".to_owned(),
-                        "999:8@s.whatsapp.net".to_owned(),
-                    ]
-                );
-                session_response_for_query(&node)
-            },
-            &mut request_fut,
-        )
-        .await;
-
-        let relay = request_fut.await.unwrap();
-        assert_eq!(relay.message_id, "pdo-1");
-        assert_eq!(relay.recipient_count, 2);
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.attrs["id"], "pdo-1");
-        assert_eq!(sent.attrs["to"], "999@s.whatsapp.net");
-        assert_eq!(sent.attrs["category"], "peer");
-        assert_eq!(sent.attrs["push_priority"], "high_force");
-        let Some(wa_binary::BinaryNodeContent::Nodes(children)) = &sent.content else {
-            panic!("placeholder resend stanza should have children");
-        };
-        assert!(children.iter().any(|node| {
-            node.tag == "meta" && node.attrs.get("appdata").map(String::as_str) == Some("default")
-        }));
-
-        let calls = encryptor.calls.lock().unwrap().clone();
-        assert_eq!(
-            calls.iter().map(|call| call.0.as_str()).collect::<Vec<_>>(),
-            vec!["999@s.whatsapp.net", "999:8@s.whatsapp.net"]
-        );
-        for call in calls {
-            let plaintext = wa_proto::proto::Message::decode(call.1).unwrap();
-            let device_sent = plaintext.device_sent_message.unwrap();
-            assert_eq!(
-                device_sent.destination_jid.as_deref(),
-                Some("999@s.whatsapp.net")
-            );
-            let protocol = device_sent.message.unwrap().protocol_message.unwrap();
-            assert_eq!(
-                protocol.r#type,
-                Some(
-                    wa_proto::proto::message::protocol_message::Type::PeerDataOperationRequestMessage
-                        as i32
-                )
-            );
-            let request = protocol.peer_data_operation_request_message.unwrap();
-            assert_eq!(
-                request.peer_data_operation_request_type,
-                Some(
-                    wa_proto::proto::message::PeerDataOperationRequestType::PlaceholderMessageResend
-                        as i32,
-                )
-            );
-            assert_eq!(request.placeholder_message_resend_request.len(), 1);
-            assert_eq!(
-                request.placeholder_message_resend_request[0].message_key,
-                Some(missing_key.clone())
-            );
-        }
-        assert!(
-            client
-                .placeholder_resend_tracker()
-                .contains("missing-1", current_unix_timestamp_ms())
-                .unwrap()
-        );
-
-        let duplicate = client
-            .request_placeholder_resend(
-                &connection,
-                [missing_key],
-                &encryptor,
-                MessageRelayOptions::new().with_message_id("pdo-duplicate"),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            duplicate
-                .to_string()
-                .contains("placeholder resend already pending for message id missing-1")
-        );
-        assert!(
-            client
-                .placeholder_resend_tracker()
-                .contains("missing-1", current_unix_timestamp_ms())
-                .unwrap()
-        );
-
-        let events = vec![
-            MessageEvent::new(wa_core::MessageEventKey::new(
-                "123@s.whatsapp.net",
-                "missing-1",
-                None,
-            ))
-            .with_field("kind", "placeholder_resend"),
-            MessageEvent::new(wa_core::MessageEventKey::new(
-                "123@s.whatsapp.net",
-                "other",
-                None,
-            ))
-            .with_field("kind", "message"),
-        ];
-        assert_eq!(
-            client.resolve_placeholder_resend_events(&events).unwrap(),
-            1
-        );
-        assert!(
-            !client
-                .placeholder_resend_tracker()
-                .contains("missing-1", current_unix_timestamp_ms())
-                .unwrap()
-        );
-        assert_eq!(
-            client.resolve_placeholder_resend_events(&events).unwrap(),
-            0
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn request_placeholder_resend_for_web_message_requests_eligible_unavailable_stub() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let encryptor = RelayEncryptor::default();
-        let missing_key =
-            wa_core::build_message_key("123@s.whatsapp.net", false, "missing-auto", None).unwrap();
-        let web_message = wa_core::WebMessageInfo {
-            key: Some(missing_key),
-            message_timestamp: Some(current_unix_timestamp()),
-            message_stub_type: Some(wa_proto::proto::web_message_info::StubType::Ciphertext as i32),
-            message_stub_parameters: vec![
-                wa_core::PLACEHOLDER_NO_MESSAGE_FOUND_ERROR_TEXT.to_owned(),
-            ],
-            ..wa_core::WebMessageInfo::default()
-        };
-        let request_fut = client.request_placeholder_resend_for_web_message(
-            &connection,
-            &web_message,
-            None,
-            Some("temporary_unavailable"),
-            &encryptor,
-            MessageRelayOptions::new().with_message_id("pdo-auto"),
-        );
-        tokio::pin!(request_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "devices");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "999@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "0"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "7")
-                                            .with_attr("key-index", "11"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "8")
-                                            .with_attr("key-index", "12"),
-                                    ])],
-                                )]),
-                        ]),
-                    ])])
-            },
-            &mut request_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                session_response_for_query(&node)
-            },
-            &mut request_fut,
-        )
-        .await;
-
-        let relay = request_fut.await.unwrap().unwrap();
-        assert_eq!(relay.message_id, "pdo-auto");
-        assert_eq!(relay.recipient_count, 2);
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.attrs["id"], "pdo-auto");
-        assert_eq!(sent.attrs["category"], "peer");
-        assert!(
-            client
-                .placeholder_resend_tracker()
-                .contains("missing-auto", current_unix_timestamp_ms())
-                .unwrap()
-        );
-
-        let duplicate = client
-            .request_placeholder_resend_for_web_message(
-                &connection,
-                &web_message,
-                None,
-                Some("temporary_unavailable"),
-                &encryptor,
-                MessageRelayOptions::new().with_message_id("pdo-auto-duplicate"),
-            )
-            .await
-            .unwrap();
-        assert!(duplicate.is_none());
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn placeholder_resend_cleanup_purges_expired_requests() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let tracker = client.placeholder_resend_tracker();
-        let now = current_unix_timestamp_ms();
-
-        tracker.begin_request("fresh-manual", now).unwrap();
-        tracker.begin_request("expired-manual", 0).unwrap();
-        assert_eq!(client.purge_expired_placeholder_resends().unwrap(), 1);
-        assert!(tracker.resolve("expired-manual").unwrap().is_none());
-        assert!(tracker.resolve("fresh-manual").unwrap().is_some());
-
-        tracker.begin_request("expired-background", 0).unwrap();
-        let mut cleanup = client
-            .spawn_placeholder_resend_cleanup(Duration::from_millis(5))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(tracker.resolve("expired-background").unwrap().is_none());
-        cleanup.abort();
-
-        let invalid = match client.spawn_placeholder_resend_cleanup(Duration::ZERO) {
-            Ok(_) => panic!("zero cleanup interval should be rejected"),
-            Err(err) => err,
-        };
-        assert!(
-            invalid
-                .to_string()
-                .contains("placeholder resend cleanup interval must be non-zero")
-        );
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn assert_sessions_fetches_missing_sessions_and_persists_them() {
-        let store = wa_store::MemoryAuthStore::new();
-        wa_core::LidPnMappingStore::new(store.clone())
-            .store_mappings(vec![wa_core::LidPnMapping {
-                pn: "123@s.whatsapp.net".to_owned(),
-                lid: "lid123@lid".to_owned(),
-            }])
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let repository = client.signal_repository();
-        repository
-            .inject_e2e_session(wa_core::SessionInjection {
-                jid: "existing:2@s.whatsapp.net".to_owned(),
-                session: test_signal_session(),
-            })
-            .await
-            .unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let assert_fut = client.assert_sessions(
-            &connection,
-            [
-                "123:1@s.whatsapp.net",
-                "existing:2@s.whatsapp.net",
-                "lidtarget:3@lid",
-                "123:1@s.whatsapp.net",
-            ],
-            false,
-        );
-        tokio::pin!(assert_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                assert_eq!(
-                    encrypt_key_query_user_attrs(&node),
-                    vec![
-                        ("lid123:1@lid".to_owned(), None),
-                        ("lidtarget:3@lid".to_owned(), None),
-                    ]
-                );
-                session_response_for_query(&node)
-            },
-            &mut assert_fut,
-        )
-        .await;
-
-        assert!(assert_fut.await.unwrap());
-        assert!(
-            repository
-                .validate_session("lid123:1@lid")
-                .await
-                .unwrap()
-                .exists
-        );
-        assert!(
-            repository
-                .validate_session("lidtarget:3@lid")
-                .await
-                .unwrap()
-                .exists
-        );
-
-        let force_fut = client.assert_sessions(&connection, ["existing:2@s.whatsapp.net"], true);
-        tokio::pin!(force_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(
-                    encrypt_key_query_user_attrs(&node),
-                    vec![(
-                        "existing:2@s.whatsapp.net".to_owned(),
-                        Some("identity".to_owned()),
-                    )]
-                );
-                session_response_for_query(&node)
-            },
-            &mut force_fut,
-        )
-        .await;
-
-        assert!(force_fut.await.unwrap());
-
-        let failed_fut = client.assert_sessions(&connection, ["failed:3@s.whatsapp.net"], false);
-        tokio::pin!(failed_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                assert_eq!(
-                    encrypt_key_query_user_attrs(&node),
-                    vec![("failed:3@s.whatsapp.net".to_owned(), None)]
-                );
-                error_result_for(&node, "401", "session denied")
-            },
-            &mut failed_fut,
-        )
-        .await;
-
-        let err = failed_fut.await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("E2E session query failed (401): session denied")
-        );
-        assert!(
-            !repository
-                .validate_session("failed:3@s.whatsapp.net")
-                .await
-                .unwrap()
-                .exists
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn identity_change_refresh_schedules_tc_token_reissue() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let sender_timestamp = current_unix_timestamp().saturating_sub(60);
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new(
-                "123@s.whatsapp.net",
-                Bytes::from_static(b"old-peer-token"),
-            )
-            .unwrap()
-            .with_timestamp_seconds(sender_timestamp)
-            .with_sender_timestamp_seconds(sender_timestamp),
-        )
-        .await
-        .unwrap();
-
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let repository = client.signal_repository();
-        repository
-            .inject_e2e_session(wa_core::SessionInjection {
-                jid: "123@s.whatsapp.net".to_owned(),
-                session: test_signal_session(),
-            })
-            .await
-            .unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let notification = BinaryNode::new("notification")
-            .with_attr("id", "identity-1")
-            .with_attr("from", "123@s.whatsapp.net")
-            .with_attr("type", "encrypt")
-            .with_content(vec![
-                BinaryNode::new("identity").with_content(Bytes::from_static(b"changed")),
-            ]);
-
-        let handler_client = client.clone();
-        let handler_connection = connection.clone();
-        let handle_task = tokio::spawn(async move {
-            handler_client
-                .handle_identity_change_notification(&handler_connection, &notification)
-                .await
-        });
-
-        let mut saw_privacy = false;
-        let mut saw_encrypt = false;
-        for _ in 0..2 {
-            let frame = tokio::time::timeout(Duration::from_secs(1), sink_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            let node = decode_inbound_binary_node(&frame).unwrap().node;
-            match node.attrs.get("xmlns").map(String::as_str) {
-                Some("privacy") => {
-                    saw_privacy = true;
-                    let Some(wa_binary::BinaryNodeContent::Nodes(iq_children)) = &node.content
-                    else {
-                        panic!("privacy query should have child nodes");
-                    };
-                    let tokens = iq_children
-                        .iter()
-                        .find(|child| child.tag == "tokens")
-                        .unwrap();
-                    let Some(wa_binary::BinaryNodeContent::Nodes(token_children)) = &tokens.content
-                    else {
-                        panic!("tokens node should have token children");
-                    };
-                    assert_eq!(token_children.len(), 1);
-                    assert_eq!(token_children[0].attrs["jid"], "123@s.whatsapp.net");
-                    assert_eq!(token_children[0].attrs["type"], "trusted_contact");
-                    assert_eq!(
-                        token_children[0].attrs["t"].parse::<u64>().unwrap(),
-                        sender_timestamp
-                    );
-                    stream_tx
-                        .send(InboundFrame::new(
-                            encode_binary_node(
-                                &BinaryNode::new("iq")
-                                    .with_attr("id", node.attrs["id"].clone())
-                                    .with_attr("type", "result")
-                                    .with_content(vec![BinaryNode::new("tokens").with_content(
-                                        vec![
-                                            BinaryNode::new("token")
-                                                .with_attr("jid", "ignored@s.whatsapp.net")
-                                                .with_attr(
-                                                    "t",
-                                                    (sender_timestamp + 1).to_string(),
-                                                )
-                                                .with_attr("type", "trusted_contact")
-                                                .with_content(Bytes::from_static(
-                                                    b"identity-peer-token",
-                                                )),
-                                        ],
-                                    )]),
-                            )
-                            .unwrap(),
-                        ))
-                        .await
-                        .unwrap();
-                }
-                Some("encrypt") => {
-                    saw_encrypt = true;
-                    assert_eq!(
-                        encrypt_key_query_user_attrs(&node),
-                        vec![("123@s.whatsapp.net".to_owned(), Some("identity".to_owned()))]
-                    );
-                    stream_tx
-                        .send(InboundFrame::new(
-                            encode_binary_node(&session_response_for_query(&node)).unwrap(),
-                        ))
-                        .await
-                        .unwrap();
-                }
-                other => panic!("unexpected query xmlns: {other:?}"),
-            }
-        }
-
-        let outcome = handle_task.await.unwrap().unwrap();
-        assert_eq!(
-            outcome,
-            IdentityChangeOutcome::SessionRefreshed {
-                token_reissue_scheduled: true
-            }
-        );
-        assert!(saw_privacy);
-        assert!(saw_encrypt);
-
-        let mut loaded = None;
-        for _ in 0..20 {
-            loaded = wa_core::load_tc_token(&store, "123@s.whatsapp.net")
-                .await
-                .unwrap();
-            if loaded
-                .as_ref()
-                .is_some_and(|record| record.token == Bytes::from_static(b"identity-peer-token"))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let loaded = loaded.unwrap();
-        assert_eq!(loaded.token, Bytes::from_static(b"identity-peer-token"));
-        assert_eq!(loaded.timestamp_seconds, Some(sender_timestamp + 1));
-        assert_eq!(loaded.sender_timestamp_seconds, Some(sender_timestamp));
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn send_receipts_groups_message_keys_and_writes_nodes() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let keys = vec![
-            MessageKey {
-                remote_jid: Some("123@s.whatsapp.net".to_owned()),
-                from_me: Some(false),
-                id: Some("m1".to_owned()),
-                participant: Some("456@s.whatsapp.net".to_owned()),
-            },
-            MessageKey {
-                remote_jid: Some("123@s.whatsapp.net".to_owned()),
-                from_me: Some(false),
-                id: Some("m2".to_owned()),
-                participant: Some("456@s.whatsapp.net".to_owned()),
-            },
-            MessageKey {
-                remote_jid: Some("999@s.whatsapp.net".to_owned()),
-                from_me: Some(true),
-                id: Some("own".to_owned()),
-                participant: None,
-            },
-        ];
-
-        let receipts = client
-            .send_receipts(&connection, &keys, MessageReceiptType::Read, Some(10))
-            .await
-            .unwrap();
-
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].message_ids, vec!["m1", "m2"]);
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.tag, "receipt");
-        assert_eq!(sent.attrs["id"], "m1");
-        assert_eq!(sent.attrs["to"], "123@s.whatsapp.net");
-        assert_eq!(sent.attrs["participant"], "456@s.whatsapp.net");
-        assert_eq!(sent.attrs["type"], "read");
-        assert_eq!(sent.attrs["t"], "10");
-        let Some(wa_binary::BinaryNodeContent::Nodes(content)) = &sent.content else {
-            panic!("receipt should contain list");
-        };
-        let Some(wa_binary::BinaryNodeContent::Nodes(items)) = &content[0].content else {
-            panic!("receipt list should contain item nodes");
-        };
-        assert_eq!(items[0].attrs["id"], "m2");
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn send_ack_and_nack_write_ack_nodes() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let received = BinaryNode::new("message")
-            .with_attr("id", "msg-1")
-            .with_attr("from", "123:1@s.whatsapp.net")
-            .with_attr("participant", "456@s.whatsapp.net")
-            .with_attr("type", "text");
-
-        let ack = client.send_ack(&connection, &received, None).await.unwrap();
-        assert_eq!(ack.attrs["class"], "message");
-        assert_eq!(ack.attrs["from"], "999:2@s.whatsapp.net");
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent, ack);
-
-        let nack = client
-            .send_nack(&connection, &received, wa_core::NackReason::ParsingError)
-            .await
-            .unwrap();
-        assert_eq!(nack.attrs["error"], "487");
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent, nack);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn process_incoming_node_sends_ack_and_emits_message_event() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("own@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let text = wa_proto::proto::Message {
-            conversation: Some("hello".to_owned()),
-            ..wa_proto::proto::Message::default()
-        };
-        let incoming = BinaryNode::new("message")
-            .with_attr("id", "msg-1")
-            .with_attr("from", "123@s.whatsapp.net")
-            .with_attr("type", "text")
-            .with_content(vec![
-                BinaryNode::new("plaintext").with_content(Bytes::from(text.encode_to_vec())),
-            ]);
-        let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig {
-            max_pending_items: 8,
-        });
-
-        let result = client
-            .process_incoming_node(&connection, &incoming, &IncomingDecryptor, &mut buffer)
-            .await
-            .unwrap();
-
-        assert_eq!(result.action, wa_core::InboundNodeAction::Message);
-        assert_eq!(result.event_count, 1);
-        assert!(result.error.is_none());
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "msg-1");
-        assert_eq!(ack.attrs["class"], "message");
-        assert_eq!(ack.attrs["to"], "123@s.whatsapp.net");
-        assert_eq!(ack.attrs["from"], "999:2@s.whatsapp.net");
-
-        let Event::Batch(batch) = events.recv().await.unwrap() else {
-            panic!("expected typed event batch");
-        };
-        assert_eq!(batch.messages_upsert.len(), 1);
-        assert_eq!(
-            batch.messages_upsert[0].key.remote_jid,
-            "123@s.whatsapp.net"
-        );
-        assert_eq!(batch.messages_upsert[0].key.id, "msg-1");
-        let payload = batch.messages_upsert[0].payload.clone().unwrap();
-        let decoded = wa_proto::proto::Message::decode(payload).unwrap();
-        assert_eq!(decoded.conversation.as_deref(), Some("hello"));
-        let stored_key = wa_core::message_event_store_key(&batch.messages_upsert[0].key);
-        let stored = store
-            .get(KeyNamespace::MessageEvent, &stored_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_message_event(&stored).unwrap();
-        assert_eq!(stored, batch.messages_upsert[0]);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn process_incoming_node_with_placeholder_resend_requests_unavailable_stub() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let incoming = BinaryNode::new("message")
-            .with_attr("id", "missing-live")
-            .with_attr("from", "123@s.whatsapp.net")
-            .with_attr("t", current_unix_timestamp().to_string())
-            .with_content(vec![
-                BinaryNode::new("unavailable").with_attr("type", "temporary_unavailable"),
-            ]);
-        let encryptor = RelayEncryptor::default();
-        let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig {
-            max_pending_items: 8,
-        });
-        let process_fut = client.process_incoming_node_with_placeholder_resend(
-            &connection,
-            &incoming,
-            &IncomingDecryptor,
-            &encryptor,
-            &mut buffer,
-        );
-        tokio::pin!(process_fut);
-
-        let ack_frame = tokio::select! {
-            result = &mut process_fut => panic!("processing completed before ACK: {result:?}"),
-            sent = sink_rx.recv() => sent.unwrap(),
-        };
-        let ack = decode_inbound_binary_node(&ack_frame).unwrap().node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "missing-live");
-        assert_eq!(ack.attrs["class"], "message");
-        assert_eq!(ack.attrs["to"], "123@s.whatsapp.net");
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "devices");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "999@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(
-                                    vec![BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "0"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "7")
-                                            .with_attr("key-index", "11"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "8")
-                                            .with_attr("key-index", "12"),
-                                    ])],
-                                )]),
-                        ]),
-                    ])])
-            },
-            &mut process_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                session_response_for_query(&node)
-            },
-            &mut process_fut,
-        )
-        .await;
-
-        let outcome = process_fut.await.unwrap();
-        assert_eq!(outcome.inbound.action, wa_core::InboundNodeAction::Message);
-        assert_eq!(outcome.inbound.event_count, 1);
-        assert!(outcome.inbound.error.is_none());
-        let relay = outcome.placeholder_resend.unwrap();
-        assert_eq!(relay.recipient_count, 2);
-
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.attrs["to"], "999@s.whatsapp.net");
-        assert_eq!(sent.attrs["category"], "peer");
-        assert_eq!(sent.attrs["push_priority"], "high_force");
-        assert!(
-            client
-                .placeholder_resend_tracker()
-                .contains("missing-live", current_unix_timestamp_ms())
-                .unwrap()
-        );
-
-        let batch = recv_batch_event(&mut events).await;
-        assert_eq!(batch.messages_upsert.len(), 1);
-        assert_eq!(batch.messages_upsert[0].key.id, "missing-live");
-        assert_eq!(
-            batch.messages_upsert[0].fields["kind"],
-            "placeholder_unavailable"
-        );
-        assert_eq!(
-            batch.messages_upsert[0].fields["unavailable_type"],
-            "temporary_unavailable"
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn process_incoming_node_persists_linked_profile_mappings() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("own@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let incoming = BinaryNode::new("notification")
-            .with_attr("id", "n-linked")
-            .with_attr("from", "server@s.whatsapp.net")
-            .with_attr("type", "mex")
-            .with_content(vec![BinaryNode::new("update")
-                .with_attr("op_name", "NotificationLinkedProfilesUpdates")
-                .with_content(
-                    br#"{"data":{"xwa2_notify_linked_profiles":{"jid":"abc@lid","added_profiles":[{"pn":"123@s.whatsapp.net"}]}}}"#.to_vec(),
-                )]);
-        let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig {
-            max_pending_items: 8,
-        });
-
-        let result = client
-            .process_incoming_node(&connection, &incoming, &IncomingDecryptor, &mut buffer)
-            .await
-            .unwrap();
-
-        assert_eq!(result.action, wa_core::InboundNodeAction::Notification);
-        assert_eq!(result.event_count, 2);
-        assert!(result.error.is_none());
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "n-linked");
-        assert_eq!(ack.attrs["class"], "notification");
-        assert_eq!(ack.attrs["to"], "server@s.whatsapp.net");
-
-        let Event::Node(node) = events.recv().await.unwrap() else {
-            panic!("expected raw notification event");
-        };
-        assert_eq!(node, incoming);
-        let Event::LidMappingUpdate(mappings) = events.recv().await.unwrap() else {
-            panic!("expected LID mapping event");
-        };
-        assert_eq!(
-            mappings,
-            vec![wa_core::LidMappingEvent::new(
-                "abc@lid",
-                "123@s.whatsapp.net"
-            )]
-        );
-
-        let mapping_store = wa_core::LidPnMappingStore::new(store);
-        assert_eq!(
-            mapping_store
-                .lid_for_pn("123@s.whatsapp.net")
-                .await
-                .unwrap(),
-            Some("abc".to_owned())
-        );
-        assert_eq!(
-            mapping_store.pn_for_lid("abc@lid").await.unwrap(),
-            Some("123".to_owned())
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn process_incoming_node_with_media_retry_downloads_pending_media() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("own@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let key = wa_core::MessageEventKey::new(
-            "123@s.whatsapp.net",
-            "msg-1",
-            Some("456@s.whatsapp.net".to_owned()),
-        );
-        let media_key = [8u8; 32];
-        let encrypted = wa_crypto::encrypt_media_bytes_with_key(
-            b"live retried media",
-            wa_core::MediaKind::Image,
-            &media_key,
-        )
-        .unwrap();
-        let media = wa_core::uploaded_media_from_encrypted(
-            &encrypted,
-            wa_core::UploadedMediaLocation::new().with_direct_path("/live/old"),
-        )
-        .unwrap();
-        client
-            .register_pending_media_retry(
-                key.clone(),
-                wa_core::PendingMediaRetry::new(media, wa_core::MediaKind::Image)
-                    .with_fallback_host("media.test"),
-            )
-            .unwrap();
-        let notification = wa_proto::proto::MediaRetryNotification {
-            stanza_id: Some(key.id.clone()),
-            direct_path: Some("/live/new".to_owned()),
-            result: Some(wa_proto::proto::media_retry_notification::ResultType::Success as i32),
-            message_secret: None,
-        };
-        let payload = wa_crypto::encrypt_media_retry_notification_with_iv(
-            &notification,
-            &media_key,
-            &key.id,
-            &[6u8; 12],
-        )
-        .unwrap();
-        let incoming = BinaryNode::new("receipt")
-            .with_attr("id", &key.id)
-            .with_attr("from", "999@s.whatsapp.net")
-            .with_attr("type", "server-error")
-            .with_content(vec![
-                BinaryNode::new("rmr")
-                    .with_attr("jid", &key.remote_jid)
-                    .with_attr("from_me", "false")
-                    .with_attr("participant", key.participant.as_deref().unwrap()),
-                BinaryNode::new("encrypt").with_content(vec![
-                    BinaryNode::new("enc_p").with_content(payload.ciphertext),
-                    BinaryNode::new("enc_iv").with_content(payload.iv),
-                ]),
-            ]);
-        let transport = ClientMediaUploadTransport::default();
-        transport.downloads.lock().unwrap().insert(
-            "https://media.test/live/new".to_owned(),
-            encrypted.ciphertext_with_mac.clone(),
-        );
-        let transfer = wa_core::MediaTransfer::new(transport);
-        let mut buffer = wa_core::EventBuffer::new(wa_core::EventBufferConfig {
-            max_pending_items: 8,
-        });
-
-        let result = client
-            .process_incoming_node_with_media_retry(
-                &connection,
-                &incoming,
-                &IncomingDecryptor,
-                &mut buffer,
-                &transfer,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.inbound.action, wa_core::InboundNodeAction::Receipt);
-        assert_eq!(result.inbound.event_count, 2);
-        assert_eq!(result.media_retry.downloads.len(), 1);
-        assert_eq!(
-            result.media_retry.downloads[0].plaintext,
-            b"live retried media"
-        );
-        assert!(result.media_retry.errors.is_empty());
-        assert!(
-            client
-                .media_retry_coordinator()
-                .pending(&key)
-                .unwrap()
-                .is_none()
-        );
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "msg-1");
-        assert_eq!(ack.attrs["class"], "receipt");
-        assert_eq!(ack.attrs["to"], "999@s.whatsapp.net");
-        assert!(!ack.attrs.contains_key("from"));
-
-        let Event::Batch(batch) = events.recv().await.unwrap() else {
-            panic!("expected typed event batch");
-        };
-        assert_eq!(batch.receipts_update.len(), 1);
-        assert_eq!(batch.media_retry.len(), 1);
-        assert_eq!(batch.media_retry[0].key, key);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_handles_raw_message_nodes() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("own@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor(
-                connection.clone(),
-                IncomingDecryptor,
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let mut events = client.subscribe();
-        let text = wa_proto::proto::Message {
-            conversation: Some("automatic".to_owned()),
-            ..wa_proto::proto::Message::default()
-        };
-        let incoming = BinaryNode::new("message")
-            .with_attr("id", "auto-1")
-            .with_attr("from", "123@s.whatsapp.net")
-            .with_attr("type", "text")
-            .with_content(vec![
-                BinaryNode::new("plaintext").with_content(Bytes::from(text.encode_to_vec())),
-            ]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&incoming).unwrap()))
-            .await
-            .unwrap();
-
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "auto-1");
-        assert_eq!(ack.attrs["class"], "message");
-        assert_eq!(ack.attrs["from"], "999:2@s.whatsapp.net");
-
-        let batch = recv_batch_event(&mut events).await;
-        assert_eq!(batch.messages_upsert.len(), 1);
-        assert_eq!(batch.messages_upsert[0].key.id, "auto-1");
-        let payload = batch.messages_upsert[0].payload.clone().unwrap();
-        let decoded = wa_proto::proto::Message::decode(payload).unwrap();
-        assert_eq!(decoded.conversation.as_deref(), Some("automatic"));
-        let stored_key = wa_core::message_event_store_key(&batch.messages_upsert[0].key);
-        let stored = store
-            .get(KeyNamespace::MessageEvent, &stored_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_message_event(&stored).unwrap();
-        assert_eq!(stored, batch.messages_upsert[0]);
-        processor.abort();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_with_placeholder_resend_requests_unavailable_stub() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor_with_placeholder_resend(
-                connection.clone(),
-                IncomingDecryptor,
-                RelayEncryptor::default(),
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let mut events = client.subscribe();
-        let incoming = BinaryNode::new("message")
-            .with_attr("id", "missing-spawn")
-            .with_attr("from", "123@s.whatsapp.net")
-            .with_attr("t", current_unix_timestamp().to_string())
-            .with_content(vec![
-                BinaryNode::new("unavailable").with_attr("type", "temporary_unavailable"),
-            ]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&incoming).unwrap()))
-            .await
-            .unwrap();
-
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "missing-spawn");
-        assert_eq!(ack.attrs["class"], "message");
-        assert_eq!(ack.attrs["to"], "123@s.whatsapp.net");
-
-        let batch = recv_batch_event(&mut events).await;
-        assert_eq!(batch.messages_upsert.len(), 1);
-        assert_eq!(batch.messages_upsert[0].key.id, "missing-spawn");
-        assert_eq!(
-            batch.messages_upsert[0].fields["kind"],
-            "placeholder_unavailable"
-        );
-        assert_eq!(
-            batch.messages_upsert[0].fields["unavailable_type"],
-            "temporary_unavailable"
-        );
-
-        let usync_query = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(usync_query.attrs["xmlns"], "usync");
-        assert_usync_query_protocol(&usync_query, "devices");
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(
-                    &BinaryNode::new("iq")
-                        .with_attr("id", usync_query.attrs["id"].clone())
-                        .with_attr("type", "result")
-                        .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                            BinaryNode::new("list").with_content(vec![
-                                BinaryNode::new("user")
-                                    .with_attr("jid", "999@s.whatsapp.net")
-                                    .with_content(vec![BinaryNode::new("devices").with_content(
-                                        vec![BinaryNode::new("device-list").with_content(vec![
-                                            BinaryNode::new("device").with_attr("id", "0"),
-                                            BinaryNode::new("device")
-                                                .with_attr("id", "7")
-                                                .with_attr("key-index", "11"),
-                                            BinaryNode::new("device")
-                                                .with_attr("id", "8")
-                                                .with_attr("key-index", "12"),
-                                        ])],
-                                    )]),
-                            ]),
+                    BinaryNode::new("user")
+                        .with_attr("jid", "999@s.whatsapp.net")
+                        .with_content(vec![BinaryNode::new("devices").with_content(vec![
+                            BinaryNode::new("device-list")
+                                .with_content(vec![BinaryNode::new("device").with_attr("id", "7")]),
                         ])]),
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let encrypt_query = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(encrypt_query.attrs["xmlns"], "encrypt");
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&session_response_for_query(&encrypt_query)).unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.tag, "message");
-        assert_eq!(sent.attrs["to"], "999@s.whatsapp.net");
-        assert_eq!(sent.attrs["category"], "peer");
-        assert_eq!(sent.attrs["push_priority"], "high_force");
-        assert!(
-            client
-                .placeholder_resend_tracker()
-                .contains("missing-spawn", current_unix_timestamp_ms())
-                .unwrap()
-        );
-
-        processor.abort();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_persists_linked_profile_mappings() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("own@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor(
-                connection.clone(),
-                IncomingDecryptor,
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let mut events = client.subscribe();
-        let incoming = BinaryNode::new("notification")
-            .with_attr("id", "auto-linked")
-            .with_attr("from", "server@s.whatsapp.net")
-            .with_attr("type", "mex")
-            .with_content(vec![BinaryNode::new("update")
-                .with_attr("op_name", "NotificationLinkedProfilesUpdates")
-                .with_content(
-                    br#"{"data":{"xwa2_notify_linked_profiles":{"jid":"abc@lid","added_profiles":["123@c.us"]}}}"#.to_vec(),
-                )]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&incoming).unwrap()))
-            .await
-            .unwrap();
-
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "auto-linked");
-        assert_eq!(ack.attrs["class"], "notification");
-        assert_eq!(ack.attrs["to"], "server@s.whatsapp.net");
-
-        let mappings = recv_lid_mapping_event(&mut events).await;
-        assert_eq!(
-            mappings,
-            vec![wa_core::LidMappingEvent::new(
-                "abc@lid",
-                "123@s.whatsapp.net"
-            )]
-        );
-        let mapping_store = wa_core::LidPnMappingStore::new(store);
-        assert_eq!(
-            mapping_store
-                .lid_for_pn("123@s.whatsapp.net")
-                .await
-                .unwrap(),
-            Some("abc".to_owned())
-        );
-        assert_eq!(
-            mapping_store.pn_for_lid("abc@lid").await.unwrap(),
-            Some("123".to_owned())
-        );
-        processor.abort();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_does_not_reprocess_processed_node_events() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor(
-                connection.clone(),
-                IncomingDecryptor,
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let mut events = client.subscribe();
-        let notification = BinaryNode::new("notification")
-            .with_attr("id", "notify-1")
-            .with_attr("from", "123@s.whatsapp.net")
-            .with_attr("type", "devices");
-
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&notification).unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(ack.tag, "ack");
-        assert_eq!(ack.attrs["id"], "notify-1");
-        assert_eq!(ack.attrs["class"], "notification");
-        assert_eq!(recv_node_event(&mut events).await, notification);
-        tokio::task::yield_now().await;
-        assert!(matches!(
-            sink_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-        processor.abort();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_handles_offline_node_children() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor(
-                connection.clone(),
-                IncomingDecryptor,
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let mut events = client.subscribe();
-        let text_one = wa_proto::proto::Message {
-            conversation: Some("one".to_owned()),
-            ..wa_proto::proto::Message::default()
-        };
-        let text_two = wa_proto::proto::Message {
-            conversation: Some("two".to_owned()),
-            ..wa_proto::proto::Message::default()
-        };
-        let offline = BinaryNode::new("offline").with_content(vec![
-            BinaryNode::new("message")
-                .with_attr("id", "offline-1")
-                .with_attr("from", "123@s.whatsapp.net")
-                .with_attr("type", "text")
-                .with_content(vec![
-                    BinaryNode::new("plaintext")
-                        .with_content(Bytes::from(text_one.encode_to_vec())),
                 ]),
-            BinaryNode::new("message")
-                .with_attr("id", "offline-2")
-                .with_attr("from", "456@s.whatsapp.net")
-                .with_attr("type", "text")
-                .with_content(vec![
-                    BinaryNode::new("plaintext")
-                        .with_content(Bytes::from(text_two.encode_to_vec())),
-                ]),
-        ]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&offline).unwrap()))
-            .await
-            .unwrap();
-
-        let first_ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(first_ack.tag, "ack");
-        assert_eq!(first_ack.attrs["id"], "offline-1");
-        assert_eq!(first_ack.attrs["class"], "message");
-        let second_ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(second_ack.tag, "ack");
-        assert_eq!(second_ack.attrs["id"], "offline-2");
-        assert_eq!(second_ack.attrs["class"], "message");
-
-        let batch = recv_batch_event(&mut events).await;
-        assert_eq!(batch.messages_upsert.len(), 2);
-        assert_eq!(batch.messages_upsert[0].key.id, "offline-1");
-        assert_eq!(batch.messages_upsert[1].key.id, "offline-2");
-
-        let stored_key = wa_core::message_event_store_key(&batch.messages_upsert[1].key);
-        let stored = store
-            .get(KeyNamespace::MessageEvent, &stored_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_message_event(&stored).unwrap();
-        assert_eq!(stored, batch.messages_upsert[1]);
-        processor.abort();
-        connection.close().await.unwrap();
+            ])])
     }
 
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_refreshes_dirty_communities() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor(
-                connection.clone(),
-                IncomingDecryptor,
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let mut events = client.subscribe();
-        let dirty = BinaryNode::new("ib").with_content(vec![
-            BinaryNode::new("dirty")
-                .with_attr("type", "communities")
-                .with_attr("timestamp", "999"),
-        ]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&dirty).unwrap()))
-            .await
-            .unwrap();
-
-        let participating_query = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(participating_query.attrs["xmlns"], "w:g2");
-        assert_eq!(participating_query.attrs["to"], "@g.us");
-        assert_eq!(participating_query.attrs["type"], "get");
-        assert_child(
-            test_child(&participating_query, "participating"),
-            "participants",
-        );
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(
-                    &BinaryNode::new("iq")
-                        .with_attr("id", participating_query.attrs["id"].clone())
-                        .with_attr("type", "result")
-                        .with_content(vec![BinaryNode::new("communities").with_content(vec![
-                            BinaryNode::new("community")
-                                .with_attr("id", "123")
-                                .with_attr("subject", "Updates")
-                                .with_content(vec![
-                                    BinaryNode::new("parent"),
-                                    BinaryNode::new("participant")
-                                        .with_attr("jid", "111@s.whatsapp.net"),
-                                ]),
-                        ])]),
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let clean = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(clean.attrs["xmlns"], "urn:xmpp:whatsapp:dirty");
-        let clean_child = test_child(&clean, "clean");
-        assert_eq!(clean_child.attrs["type"], "groups");
-        assert_eq!(clean_child.attrs["timestamp"], "999");
-        let update = recv_groups_update_event(&mut events).await;
-        assert_eq!(update.len(), 1);
-        assert_eq!(update[0].jid, "123@g.us");
-        assert_eq!(update[0].fields["source"], "community_dirty_refresh");
-        assert_eq!(update[0].fields["subject"], "Updates");
-        assert_eq!(update[0].fields["is_community"], "true");
-        processor.abort();
-        connection.close().await.unwrap();
+    #[cfg(feature = "wat1")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_1 {
+        use super::*;
+        include!("tests_chunk_1.rs");
     }
 
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn incoming_processor_refreshes_dirty_groups() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.account_jid = Some("999:2@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) =
-            mock_connection_with_events(client.events.clone());
-        let mut processor = client
-            .spawn_incoming_processor(
-                connection.clone(),
-                IncomingDecryptor,
-                wa_core::EventBufferConfig {
-                    max_pending_items: 8,
-                },
-            )
-            .unwrap();
-        let mut events = client.subscribe();
-        let dirty = BinaryNode::new("ib").with_content(vec![
-            BinaryNode::new("dirty")
-                .with_attr("type", "groups")
-                .with_attr("timestamp", "998"),
-        ]);
-
-        stream_tx
-            .send(InboundFrame::new(encode_binary_node(&dirty).unwrap()))
-            .await
-            .unwrap();
-
-        let participating_query = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(participating_query.attrs["xmlns"], "w:g2");
-        assert_eq!(participating_query.attrs["to"], "@g.us");
-        assert_eq!(participating_query.attrs["type"], "get");
-        assert_child(
-            test_child(&participating_query, "participating"),
-            "participants",
-        );
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(
-                    &BinaryNode::new("iq")
-                        .with_attr("id", participating_query.attrs["id"].clone())
-                        .with_attr("type", "result")
-                        .with_content(vec![BinaryNode::new("groups").with_content(vec![
-                            BinaryNode::new("group")
-                                .with_attr("id", "123")
-                                .with_attr("subject", "Team")
-                                .with_content(vec![BinaryNode::new("participant")
-                                    .with_attr("jid", "111@s.whatsapp.net")]),
-                        ])]),
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let clean = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(clean.attrs["xmlns"], "urn:xmpp:whatsapp:dirty");
-        let clean_child = test_child(&clean, "clean");
-        assert_eq!(clean_child.attrs["type"], "groups");
-        assert_eq!(clean_child.attrs["timestamp"], "998");
-        let update = recv_groups_update_event(&mut events).await;
-        assert_eq!(update.len(), 1);
-        assert_eq!(update[0].jid, "123@g.us");
-        assert_eq!(update[0].fields["source"], "group_dirty_refresh");
-        assert_eq!(update[0].fields["subject"], "Team");
-        processor.abort();
-        connection.close().await.unwrap();
+    #[cfg(feature = "wat2")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_2 {
+        use super::*;
+        include!("tests_chunk_2.rs");
     }
 
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn send_media_retry_request_with_payload_writes_server_error_receipt() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let key = MessageKey {
-            remote_jid: Some("123@s.whatsapp.net".to_owned()),
-            from_me: Some(false),
-            id: Some("m1".to_owned()),
-            participant: None,
-        };
-
-        let node = client
-            .send_media_retry_request_with_payload(
-                &connection,
-                &key,
-                "999:7@s.whatsapp.net",
-                MediaRetryPayload::new(
-                    Bytes::from_static(b"ciphertext"),
-                    Bytes::from(vec![1u8; 12]),
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(node.attrs["type"], "server-error");
-
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent, node);
-        assert_eq!(sent.attrs["to"], "999@s.whatsapp.net");
-        connection.close().await.unwrap();
+    #[cfg(feature = "wat3")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_3 {
+        use super::*;
+        include!("tests_chunk_3.rs");
     }
 
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn send_media_retry_request_encrypts_payload_from_stored_account() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let key = MessageKey {
-            remote_jid: Some("123@s.whatsapp.net".to_owned()),
-            from_me: Some(false),
-            id: Some("m1".to_owned()),
-            participant: None,
-        };
-
-        let node = client
-            .send_media_retry_request(&connection, &key, &[8u8; 32])
-            .await
-            .unwrap();
-
-        assert_eq!(node.attrs["to"], "999@s.whatsapp.net");
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        let update = wa_core::parse_media_retry_update(&sent).unwrap();
-        assert_eq!(update.key, key);
-        let media = update.media.unwrap();
-        assert_eq!(media.iv.len(), 12);
-        assert!(!media.ciphertext.is_empty());
-        connection.close().await.unwrap();
+    #[cfg(feature = "wat4")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_4 {
+        use super::*;
+        include!("tests_chunk_4.rs");
     }
 
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn read_messages_can_send_read_self_receipts() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let keys = vec![MessageKey {
-            remote_jid: Some("123@s.whatsapp.net".to_owned()),
-            from_me: Some(false),
-            id: Some("m1".to_owned()),
-            participant: None,
-        }];
-
-        let receipts = client
-            .read_messages(&connection, &keys, false, Some(11))
-            .await
-            .unwrap();
-
-        assert_eq!(receipts.len(), 1);
-        let sent = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent.attrs["id"], "m1");
-        assert_eq!(sent.attrs["type"], "read-self");
-        assert_eq!(sent.attrs["t"], "11");
-        connection.close().await.unwrap();
+    #[cfg(feature = "wat5")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_5 {
+        use super::*;
+        include!("tests_chunk_5.rs");
     }
 
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn fetch_statuses_and_disappearing_modes_send_usync_queries() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let status_fut = client.fetch_statuses(&connection, ["123@s.whatsapp.net"]);
-        tokio::pin!(status_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "status");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "123@s.whatsapp.net")
-                                .with_content(vec![
-                                    BinaryNode::new("status")
-                                        .with_attr("t", "42")
-                                        .with_content("available"),
-                                ]),
-                        ]),
-                    ])])
-            },
-            &mut status_fut,
-        )
-        .await;
-
-        assert_eq!(
-            status_fut.await.unwrap(),
-            vec![USyncStatusResult {
-                jid: "123@s.whatsapp.net".to_owned(),
-                status: wa_core::USyncStatus {
-                    status: Some("available".to_owned()),
-                    set_at: Some(42),
-                },
-            }]
-        );
-
-        let disappearing_fut = client.fetch_disappearing_modes(&connection, ["123@s.whatsapp.net"]);
-        tokio::pin!(disappearing_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "disappearing_mode");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "123@s.whatsapp.net")
-                                .with_content(vec![
-                                    BinaryNode::new("disappearing_mode")
-                                        .with_attr("duration", "604800")
-                                        .with_attr("t", "43"),
-                                ]),
-                        ]),
-                    ])])
-            },
-            &mut disappearing_fut,
-        )
-        .await;
-
-        assert_eq!(
-            disappearing_fut.await.unwrap(),
-            vec![USyncDisappearingModeResult {
-                jid: "123@s.whatsapp.net".to_owned(),
-                mode: wa_core::USyncDisappearingMode {
-                    duration: 604800,
-                    set_at: Some(43),
-                },
-            }]
-        );
-        connection.close().await.unwrap();
+    #[cfg(feature = "wat6")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_6 {
+        use super::*;
+        include!("tests_chunk_6.rs");
     }
 
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn fetch_bot_profiles_sends_profile_query_and_maps_results() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let profile_fut =
-            client.fetch_bot_profiles(&connection, [("123@s.whatsapp.net", "persona-1")]);
-        tokio::pin!(profile_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                assert_usync_query_protocol(&node, "bot");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "123@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("bot").with_content(vec![
-                                    BinaryNode::new("profile")
-                                        .with_attr("persona_id", "persona-1")
-                                        .with_content(vec![
-                                            BinaryNode::new("name").with_content("Helper"),
-                                            BinaryNode::new("commands").with_content(vec![
-                                                BinaryNode::new("command").with_content(vec![
-                                                    BinaryNode::new("name").with_content("/help"),
-                                                    BinaryNode::new("description")
-                                                        .with_content("Show help"),
-                                                ]),
-                                            ]),
-                                        ]),
-                                ])]),
-                        ]),
-                    ])])
-            },
-            &mut profile_fut,
-        )
-        .await;
-
-        assert_eq!(
-            profile_fut.await.unwrap(),
-            vec![USyncBotProfile {
-                jid: "123@s.whatsapp.net".to_owned(),
-                name: Some("Helper".to_owned()),
-                attributes: None,
-                description: None,
-                category: None,
-                is_default: false,
-                prompts: Vec::new(),
-                persona_id: Some("persona-1".to_owned()),
-                commands: vec![wa_core::USyncBotProfileCommand {
-                    name: "/help".to_owned(),
-                    description: "Show help".to_owned(),
-                }],
-                commands_description: None,
-            }]
-        );
-        connection.close().await.unwrap();
+    #[cfg(feature = "wat7")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_7 {
+        use super::*;
+        include!("tests_chunk_7.rs");
     }
 
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn profile_picture_url_attaches_lid_backed_tc_token_for_user_target() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("ownlid@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        wa_core::LidPnMappingStore::new(store.clone())
-            .store_mappings(vec![wa_core::LidPnMapping {
-                pn: "123@s.whatsapp.net".to_owned(),
-                lid: "abc@lid".to_owned(),
-            }])
-            .await
-            .unwrap();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("abc@lid", Bytes::from_static(b"profile-token"))
-                .unwrap()
-                .with_timestamp_seconds(current_unix_timestamp()),
-        )
-        .await
-        .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let picture_fut =
-            client.fetch_profile_picture_url(&connection, "123@c.us", ProfilePictureType::Preview);
-        tokio::pin!(picture_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:profile:picture");
-                assert_eq!(node.attrs["target"], "123@s.whatsapp.net");
-                let picture = test_child(&node, "picture");
-                assert_eq!(picture.attrs["type"], "preview");
-                assert_eq!(picture.attrs["query"], "url");
-                assert_eq!(
-                    test_node_bytes(test_child(&node, "tctoken")),
-                    Some(Bytes::from_static(b"profile-token"))
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("picture").with_attr("url", "https://example.invalid/u"),
-                    ])
-            },
-            &mut picture_fut,
-        )
-        .await;
-
-        assert_eq!(
-            picture_fut.await.unwrap().as_deref(),
-            Some("https://example.invalid/u")
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn profile_picture_url_skips_tc_token_for_group_and_self_targets() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("999:7@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("ownlid@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("123@g.us", Bytes::from_static(b"group-token"))
-                .unwrap()
-                .with_timestamp_seconds(current_unix_timestamp()),
-        )
-        .await
-        .unwrap();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("999@s.whatsapp.net", Bytes::from_static(b"self-token"))
-                .unwrap()
-                .with_timestamp_seconds(current_unix_timestamp()),
-        )
-        .await
-        .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let group_picture_fut =
-            client.fetch_profile_picture_url(&connection, "123@g.us", ProfilePictureType::Preview);
-        tokio::pin!(group_picture_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:profile:picture");
-                assert_eq!(node.attrs["target"], "123@g.us");
-                assert!(test_children(&node, "tctoken").is_empty());
-                empty_result_for(&node)
-            },
-            &mut group_picture_fut,
-        )
-        .await;
-        assert_eq!(group_picture_fut.await.unwrap(), None);
-
-        let self_picture_fut = client.fetch_profile_picture_url(
-            &connection,
-            "999:7@s.whatsapp.net",
-            ProfilePictureType::Preview,
-        );
-        tokio::pin!(self_picture_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:profile:picture");
-                assert_eq!(node.attrs["target"], "999@s.whatsapp.net");
-                assert!(test_children(&node, "tctoken").is_empty());
-                empty_result_for(&node)
-            },
-            &mut self_picture_fut,
-        )
-        .await;
-        assert_eq!(self_picture_fut.await.unwrap(), None);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn privacy_profile_and_blocklist_methods_use_account_iqs() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let privacy_fut = client.fetch_privacy_settings(&connection);
-        tokio::pin!(privacy_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "privacy");
-                assert_eq!(node.attrs["type"], "get");
-                assert!(test_child(&node, "privacy").attrs.is_empty());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("privacy").with_content(vec![
-                        BinaryNode::new("category")
-                            .with_attr("name", "last")
-                            .with_attr("value", "contacts"),
-                    ])])
-            },
-            &mut privacy_fut,
-        )
-        .await;
-        let settings = privacy_fut.await.unwrap();
-        assert_eq!(settings.get(PrivacyCategory::LastSeen), Some("contacts"));
-
-        let update_privacy_fut = client.update_privacy_setting(
-            &connection,
-            PrivacyCategory::Online,
-            PrivacyValue::MatchLastSeen,
-        );
-        tokio::pin!(update_privacy_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "privacy");
-                assert_eq!(node.attrs["type"], "set");
-                let category = test_child(test_child(&node, "privacy"), "category");
-                assert_eq!(category.attrs["name"], "online");
-                assert_eq!(category.attrs["value"], "match_last_seen");
-                empty_result_for(&node)
-            },
-            &mut update_privacy_fut,
-        )
-        .await;
-        update_privacy_fut.await.unwrap();
-
-        let failed_privacy_fut = client.update_privacy_setting(
-            &connection,
-            PrivacyCategory::Online,
-            PrivacyValue::MatchLastSeen,
-        );
-        tokio::pin!(failed_privacy_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "privacy");
-                error_result_for(&node, "403", "denied")
-            },
-            &mut failed_privacy_fut,
-        )
-        .await;
-        assert!(failed_privacy_fut.await.is_err());
-
-        let disappearing_fut = client.set_default_disappearing_mode(&connection, 604800);
-        tokio::pin!(disappearing_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "disappearing_mode");
-                assert_eq!(
-                    test_child(&node, "disappearing_mode").attrs["duration"],
-                    "604800"
-                );
-                empty_result_for(&node)
-            },
-            &mut disappearing_fut,
-        )
-        .await;
-        disappearing_fut.await.unwrap();
-
-        let failed_disappearing_fut = client.set_default_disappearing_mode(&connection, 604800);
-        tokio::pin!(failed_disappearing_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "disappearing_mode");
-                error_result_for(&node, "500", "server rejected update")
-            },
-            &mut failed_disappearing_fut,
-        )
-        .await;
-        assert!(failed_disappearing_fut.await.is_err());
-
-        let status_fut = client.update_profile_status(&connection, "Busy");
-        tokio::pin!(status_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "status");
-                assert_eq!(
-                    test_node_text(test_child(&node, "status")).as_deref(),
-                    Some("Busy")
-                );
-                empty_result_for(&node)
-            },
-            &mut status_fut,
-        )
-        .await;
-        status_fut.await.unwrap();
-
-        let failed_status_fut = client.update_profile_status(&connection, "Busy");
-        tokio::pin!(failed_status_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "status");
-                error_result_for(&node, "400", "bad status")
-            },
-            &mut failed_status_fut,
-        )
-        .await;
-        assert!(failed_status_fut.await.is_err());
-
-        let picture_fut =
-            client.fetch_profile_picture_url(&connection, "123@c.us", ProfilePictureType::Preview);
-        tokio::pin!(picture_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:profile:picture");
-                assert_eq!(node.attrs["target"], "123@s.whatsapp.net");
-                let picture = test_child(&node, "picture");
-                assert_eq!(picture.attrs["type"], "preview");
-                assert_eq!(picture.attrs["query"], "url");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("picture").with_attr("url", "https://example.invalid/p"),
-                    ])
-            },
-            &mut picture_fut,
-        )
-        .await;
-        assert_eq!(
-            picture_fut.await.unwrap().as_deref(),
-            Some("https://example.invalid/p")
-        );
-
-        let update_picture_fut = client.update_profile_picture(
-            &connection,
-            Some("123@s.whatsapp.net"),
-            b"jpeg".to_vec(),
-        );
-        tokio::pin!(update_picture_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:profile:picture");
-                assert_eq!(node.attrs["target"], "123@s.whatsapp.net");
-                let picture = test_child(&node, "picture");
-                assert_eq!(picture.attrs["type"], "image");
-                assert_eq!(test_node_text(picture).as_deref(), Some("jpeg"));
-                empty_result_for(&node)
-            },
-            &mut update_picture_fut,
-        )
-        .await;
-        update_picture_fut.await.unwrap();
-
-        let failed_picture_update = client.update_profile_picture(
-            &connection,
-            Some("123@s.whatsapp.net"),
-            b"jpeg".to_vec(),
-        );
-        tokio::pin!(failed_picture_update);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:profile:picture");
-                assert_eq!(node.attrs["target"], "123@s.whatsapp.net");
-                error_result_for(&node, "403", "denied")
-            },
-            &mut failed_picture_update,
-        )
-        .await;
-        assert!(failed_picture_update.await.is_err());
-
-        let remove_picture_fut = client.remove_profile_picture(&connection, None);
-        tokio::pin!(remove_picture_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:profile:picture");
-                assert!(!node.attrs.contains_key("target"));
-                assert!(node.content.is_none());
-                empty_result_for(&node)
-            },
-            &mut remove_picture_fut,
-        )
-        .await;
-        remove_picture_fut.await.unwrap();
-
-        let blocklist_fut = client.fetch_blocklist(&connection);
-        tokio::pin!(blocklist_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "blocklist");
-                assert_eq!(node.attrs["type"], "get");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("list").with_content(vec![
-                        BinaryNode::new("item").with_attr("jid", "abc@lid"),
-                        BinaryNode::new("item").with_attr("jid", "def@lid"),
-                    ])])
-            },
-            &mut blocklist_fut,
-        )
-        .await;
-        assert_eq!(blocklist_fut.await.unwrap(), vec!["abc@lid", "def@lid"]);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn block_status_and_presence_methods_use_identity_state() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("123:7@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("own@lid".to_owned());
-        credentials.account_name = Some("Agent@Desk".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        wa_core::LidPnMappingStore::new(store.clone())
-            .store_mappings(vec![wa_core::LidPnMapping {
-                pn: "555@s.whatsapp.net".to_owned(),
-                lid: "lid555@lid".to_owned(),
-            }])
-            .await
-            .unwrap();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("lid555@lid", Bytes::from_static(b"presence-token"))
-                .unwrap()
-                .with_timestamp_seconds(current_unix_timestamp()),
-        )
-        .await
-        .unwrap();
-        wa_core::save_tc_token(
-            &store,
-            wa_core::TcTokenRecord::new("777@g.us", Bytes::from_static(b"group-presence-token"))
-                .unwrap()
-                .with_timestamp_seconds(current_unix_timestamp()),
-        )
-        .await
-        .unwrap();
-
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let block_fut =
-            client.update_block_status(&connection, "555@s.whatsapp.net", BlocklistAction::Block);
-        tokio::pin!(block_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "blocklist");
-                let item = test_child(&node, "item");
-                assert_eq!(item.attrs["action"], "block");
-                assert_eq!(item.attrs["jid"], "lid555@lid");
-                assert_eq!(item.attrs["pn_jid"], "555@s.whatsapp.net");
-                empty_result_for(&node)
-            },
-            &mut block_fut,
-        )
-        .await;
-        block_fut.await.unwrap();
-
-        let failed_block_fut =
-            client.update_block_status(&connection, "555@s.whatsapp.net", BlocklistAction::Block);
-        tokio::pin!(failed_block_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "blocklist");
-                let item = test_child(&node, "item");
-                assert_eq!(item.attrs["action"], "block");
-                error_result_for(&node, "403", "denied")
-            },
-            &mut failed_block_fut,
-        )
-        .await;
-        assert!(failed_block_fut.await.is_err());
-
-        let unblock_fut =
-            client.update_block_status(&connection, "lid555@lid", BlocklistAction::Unblock);
-        tokio::pin!(unblock_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let item = test_child(&node, "item");
-                assert_eq!(item.attrs["action"], "unblock");
-                assert_eq!(item.attrs["jid"], "lid555@lid");
-                assert!(!item.attrs.contains_key("pn_jid"));
-                empty_result_for(&node)
-            },
-            &mut unblock_fut,
-        )
-        .await;
-        unblock_fut.await.unwrap();
-
-        let online = client
-            .send_presence_update(&connection, PresenceState::Available, None)
-            .await
-            .unwrap();
-        assert_eq!(online.tag, "presence");
-        assert_eq!(online.attrs["name"], "AgentDesk");
-        assert_eq!(online.attrs["type"], "available");
-        let sent_online = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_online, online);
-
-        let recording = client
-            .send_presence_update(&connection, PresenceState::Recording, Some("777@lid"))
-            .await
-            .unwrap();
-        assert_eq!(recording.tag, "chatstate");
-        assert_eq!(recording.attrs["from"], "own@lid");
-        assert_eq!(recording.attrs["to"], "777@lid");
-        assert_eq!(test_child(&recording, "composing").attrs["media"], "audio");
-        let sent_recording = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_recording, recording);
-
-        let subscribe = client
-            .subscribe_presence(&connection, "555@s.whatsapp.net")
-            .await
-            .unwrap();
-        assert_eq!(subscribe.tag, "presence");
-        assert_eq!(subscribe.attrs["type"], "subscribe");
-        assert_eq!(subscribe.attrs["to"], "555@s.whatsapp.net");
-        assert_eq!(
-            test_node_bytes(test_child(&subscribe, "tctoken")),
-            Some(Bytes::from_static(b"presence-token"))
-        );
-        let sent_subscribe = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_subscribe, subscribe);
-
-        let group_subscribe = client
-            .subscribe_presence(&connection, "777@g.us")
-            .await
-            .unwrap();
-        assert_eq!(group_subscribe.tag, "presence");
-        assert_eq!(group_subscribe.attrs["type"], "subscribe");
-        assert_eq!(group_subscribe.attrs["to"], "777@g.us");
-        assert!(group_subscribe.content.is_none());
-        let sent_group_subscribe = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_group_subscribe, group_subscribe);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn app_state_methods_use_sync_and_dirty_iqs() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let clean = client
-            .clean_dirty_bits(&connection, DirtyBitType::Groups, Some(123))
-            .await
-            .unwrap();
-        assert_eq!(clean.attrs["xmlns"], "urn:xmpp:whatsapp:dirty");
-        assert_eq!(clean.attrs["type"], "set");
-        let clean_child = test_child(&clean, "clean");
-        assert_eq!(clean_child.attrs["type"], "groups");
-        assert_eq!(clean_child.attrs["timestamp"], "123");
-        let sent_clean = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_clean, clean);
-
-        let sync_fut = client.sync_app_state(
-            &connection,
-            [
-                AppStateCollectionRequest::new(AppStateCollection::RegularHigh, 0),
-                AppStateCollectionRequest::new(AppStateCollection::RegularLow, 9)
-                    .with_return_snapshot(false),
-            ],
-        );
-        tokio::pin!(sync_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-                assert_eq!(node.attrs["type"], "set");
-                let collections = test_children(test_child(&node, "sync"), "collection");
-                assert_eq!(collections[0].attrs["name"], "regular_high");
-                assert_eq!(collections[0].attrs["version"], "0");
-                assert_eq!(collections[0].attrs["return_snapshot"], "true");
-                assert_eq!(collections[1].attrs["name"], "regular_low");
-                assert_eq!(collections[1].attrs["version"], "9");
-                assert_eq!(collections[1].attrs["return_snapshot"], "false");
-                empty_result_for(&node)
-            },
-            &mut sync_fut,
-        )
-        .await;
-        assert_eq!(sync_fut.await.unwrap().attrs["type"], "result");
-
-        let failed_sync_fut = client.sync_app_state(
-            &connection,
-            [AppStateCollectionRequest::new(
-                AppStateCollection::RegularHigh,
-                0,
-            )],
-        );
-        tokio::pin!(failed_sync_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-                error_result_for(&node, "409", "collection conflict")
-            },
-            &mut failed_sync_fut,
-        )
-        .await;
-        assert!(failed_sync_fut.await.is_err());
-
-        let patch_fut = client.upload_app_state_patch_bytes(
-            &connection,
-            AppStateCollection::RegularHigh,
-            8,
-            b"patch".to_vec(),
-        );
-        tokio::pin!(patch_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular_high");
-                assert_eq!(collection.attrs["version"], "8");
-                assert_eq!(collection.attrs["return_snapshot"], "false");
-                assert_eq!(
-                    test_node_text(test_child(collection, "patch")).as_deref(),
-                    Some("patch")
-                );
-                empty_result_for(&node)
-            },
-            &mut patch_fut,
-        )
-        .await;
-        assert_eq!(patch_fut.await.unwrap().attrs["type"], "result");
-
-        let failed_patch_fut = client.upload_app_state_patch_bytes(
-            &connection,
-            AppStateCollection::RegularHigh,
-            8,
-            b"patch".to_vec(),
-        );
-        tokio::pin!(failed_patch_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular_high");
-                error_result_for(&node, "500", "patch rejected")
-            },
-            &mut failed_patch_fut,
-        )
-        .await;
-        assert!(failed_patch_fut.await.is_err());
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn refresh_dirty_groups_fetches_groups_then_cleans_dirty_bit() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let refresh_fut = client.refresh_dirty_groups(&connection, Some(777));
-        tokio::pin!(refresh_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["type"], "get");
-                assert_eq!(node.attrs["to"], "@g.us");
-                let participating = test_child(&node, "participating");
-                assert_child(participating, "participants");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("groups").with_content(vec![
-                        BinaryNode::new("group")
-                            .with_attr("id", "123")
-                            .with_attr("subject", "Team")
-                            .with_content(vec![BinaryNode::new("participant")
-                                .with_attr("jid", "111@s.whatsapp.net")]),
-                    ])])
-            },
-            &mut refresh_fut,
-        )
-        .await;
-
-        let refresh = refresh_fut.await.unwrap();
-        assert_eq!(refresh.groups.len(), 1);
-        assert_eq!(refresh.groups[0].jid, "123@g.us");
-        assert_eq!(refresh.groups[0].subject.as_deref(), Some("Team"));
-        assert_eq!(refresh.clean.attrs["xmlns"], "urn:xmpp:whatsapp:dirty");
-        let clean_child = test_child(&refresh.clean, "clean");
-        assert_eq!(clean_child.attrs["type"], "groups");
-        assert_eq!(clean_child.attrs["timestamp"], "777");
-        let sent_clean = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_clean, refresh.clean);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn process_group_dirty_node_refreshes_and_emits_update() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let dirty = BinaryNode::new("ib").with_content(vec![
-            BinaryNode::new("dirty")
-                .with_attr("type", "groups")
-                .with_attr("timestamp", "900"),
-        ]);
-
-        let process_fut = client.process_group_dirty_node(&connection, &dirty);
-        tokio::pin!(process_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["to"], "@g.us");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("groups").with_content(vec![
-                        BinaryNode::new("group")
-                            .with_attr("id", "123")
-                            .with_attr("subject", "Team")
-                            .with_content(vec![BinaryNode::new("participant")
-                                .with_attr("jid", "111@s.whatsapp.net")]),
-                    ])])
-            },
-            &mut process_fut,
-        )
-        .await;
-        let refresh = process_fut.await.unwrap().unwrap();
-        assert_eq!(refresh.groups.len(), 1);
-        assert_eq!(refresh.clean.attrs["xmlns"], "urn:xmpp:whatsapp:dirty");
-        let sent_clean = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_clean, refresh.clean);
-        let update = recv_groups_update_event(&mut events).await;
-        assert_eq!(update[0].jid, "123@g.us");
-        assert_eq!(update[0].fields["source"], "group_dirty_refresh");
-        assert_eq!(update[0].fields["subject"], "Team");
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn account_reachout_and_message_capping_use_wmex_queries() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let reachout_fut = client.fetch_account_reachout_timelock(&connection);
-        tokio::pin!(reachout_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:mex");
-                assert_eq!(node.attrs["to"], "s.whatsapp.net");
-                let (query_id, variables) = test_wmex_query(&node);
-                assert_eq!(query_id, "23983697327930364");
-                assert_eq!(variables, serde_json::json!({}));
-                wmex_response_for_query(
-                    &node,
-                    "xwa2_fetch_account_reachout_timelock",
-                    r#"{
-                        "is_active": true,
-                        "time_enforcement_ends": "1700000000",
-                        "enforcement_type": "WEB_COMPANION_ONLY"
-                    }"#,
-                )
-            },
-            &mut reachout_fut,
-        )
-        .await;
-        let reachout = reachout_fut.await.unwrap();
-        assert!(reachout.is_active);
-        assert_eq!(reachout.time_enforcement_ends, Some(1_700_000_000));
-        assert_eq!(
-            reachout.enforcement_type,
-            wa_core::ReachoutTimelockEnforcementType::WebCompanionOnly
-        );
-        assert_eq!(
-            events.recv().await.unwrap(),
-            Event::ReachoutTimelockUpdate(reachout)
-        );
-
-        let capping_fut = client.fetch_message_capping_info(&connection);
-        tokio::pin!(capping_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let (query_id, variables) = test_wmex_query(&node);
-                assert_eq!(query_id, "24503548349331633");
-                assert_eq!(variables["input"]["type"], "INDIVIDUAL_NEW_CHAT_MSG");
-                wmex_response_for_query(
-                    &node,
-                    "xwa2_message_capping_info",
-                    r#"{
-                        "total_quota": "50",
-                        "used_quota": 12,
-                        "capping_status": "FIRST_WARNING"
-                    }"#,
-                )
-            },
-            &mut capping_fut,
-        )
-        .await;
-        let capping = capping_fut.await.unwrap();
-        assert_eq!(capping.total_quota, Some(50));
-        assert_eq!(capping.used_quota, Some(12));
-        assert_eq!(
-            capping.capping_status,
-            Some(wa_core::MessageCappingStatus::FirstWarning)
-        );
-
-        let failed_capping_fut = client.fetch_message_capping_info(&connection);
-        tokio::pin!(failed_capping_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let (query_id, variables) = test_wmex_query(&node);
-                assert_eq!(query_id, "24503548349331633");
-                assert_eq!(variables["input"]["type"], "INDIVIDUAL_NEW_CHAT_MSG");
-                error_result_for(&node, "429", "rate limited")
-            },
-            &mut failed_capping_fut,
-        )
-        .await;
-        let err = failed_capping_fut.await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("WMex query failed (429): rate limited")
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn refresh_dirty_communities_fetches_communities_then_cleans_group_dirty_bit() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let refresh_fut = client.refresh_dirty_communities(&connection, Some(888));
-        tokio::pin!(refresh_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["type"], "get");
-                assert_eq!(node.attrs["to"], "@g.us");
-                let participating = test_child(&node, "participating");
-                assert_child(participating, "participants");
-                assert_child(participating, "description");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("communities").with_content(vec![
-                        BinaryNode::new("community")
-                            .with_attr("id", "123")
-                            .with_attr("subject", "Updates")
-                            .with_content(vec![
-                                BinaryNode::new("parent"),
-                                BinaryNode::new("participant")
-                                    .with_attr("jid", "111@s.whatsapp.net"),
-                            ]),
-                    ])])
-            },
-            &mut refresh_fut,
-        )
-        .await;
-
-        let refresh = refresh_fut.await.unwrap();
-        assert_eq!(refresh.communities.len(), 1);
-        assert_eq!(refresh.communities[0].jid, "123@g.us");
-        assert_eq!(refresh.communities[0].subject.as_deref(), Some("Updates"));
-        assert!(refresh.communities[0].is_community);
-        assert_eq!(refresh.clean.attrs["xmlns"], "urn:xmpp:whatsapp:dirty");
-        let clean_child = test_child(&refresh.clean, "clean");
-        assert_eq!(clean_child.attrs["type"], "groups");
-        assert_eq!(clean_child.attrs["timestamp"], "888");
-        let sent_clean = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_clean, refresh.clean);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn process_community_dirty_node_refreshes_and_emits_update() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let dirty = BinaryNode::new("ib").with_content(vec![
-            BinaryNode::new("dirty")
-                .with_attr("type", "communities")
-                .with_attr("timestamp", "901"),
-        ]);
-
-        let process_fut = client.process_community_dirty_node(&connection, &dirty);
-        tokio::pin!(process_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["to"], "@g.us");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("communities").with_content(vec![
-                        BinaryNode::new("community")
-                            .with_attr("id", "123")
-                            .with_attr("subject", "Updates")
-                            .with_content(vec![BinaryNode::new("parent")]),
-                    ])])
-            },
-            &mut process_fut,
-        )
-        .await;
-        let refresh = process_fut.await.unwrap().unwrap();
-        assert_eq!(refresh.communities.len(), 1);
-        assert_eq!(refresh.clean.attrs["xmlns"], "urn:xmpp:whatsapp:dirty");
-        let sent_clean = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(sent_clean, refresh.clean);
-        let update = recv_groups_update_event(&mut events).await;
-        assert_eq!(update[0].jid, "123@g.us");
-        assert_eq!(update[0].fields["source"], "community_dirty_refresh");
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn business_profile_and_catalog_methods_use_business_iqs() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let profile_fut = client.fetch_business_profile(&connection, "123@c.us");
-        tokio::pin!(profile_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:biz");
-                assert_eq!(node.attrs["to"], "s.whatsapp.net");
-                assert_eq!(node.attrs["type"], "get");
-                let business_profile = test_child(&node, "business_profile");
-                assert_eq!(business_profile.attrs["v"], "244");
-                assert_eq!(
-                    test_child(business_profile, "profile").attrs["jid"],
-                    "123@s.whatsapp.net"
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("business_profile").with_content(
-                        vec![
-                            BinaryNode::new("profile")
-                                .with_attr("jid", "123@s.whatsapp.net")
-                                .with_content(vec![
-                                    BinaryNode::new("address").with_content("1 Main"),
-                                    BinaryNode::new("description").with_content("Daily goods"),
-                                    BinaryNode::new("website").with_content("https://example.com"),
-                                    BinaryNode::new("email").with_content("shop@example.com"),
-                                    BinaryNode::new("categories").with_content(vec![
-                                        BinaryNode::new("category").with_content("Grocery"),
-                                    ]),
-                                    BinaryNode::new("business_hours")
-                                        .with_attr("timezone", "UTC")
-                                        .with_content(vec![
-                                            BinaryNode::new("business_hours_config")
-                                                .with_attr("day_of_week", "mon")
-                                                .with_attr("mode", "specific_hours")
-                                                .with_attr("open_time", "540")
-                                                .with_attr("close_time", "1020"),
-                                        ]),
-                                ]),
-                        ],
-                    )])
-            },
-            &mut profile_fut,
-        )
-        .await;
-        let profile = profile_fut.await.unwrap().unwrap();
-        assert_eq!(profile.jid.as_deref(), Some("123@s.whatsapp.net"));
-        assert_eq!(profile.description, "Daily goods");
-        assert_eq!(profile.websites, vec!["https://example.com"]);
-        assert_eq!(profile.category.as_deref(), Some("Grocery"));
-        assert_eq!(
-            profile.business_hours.unwrap().config[0].close_time,
-            Some(1020)
-        );
-
-        let update = BusinessProfileUpdate::new()
-            .with_address("2 Main")
-            .with_email("team@example.com")
-            .with_description("Open daily")
-            .with_websites(["https://example.com"])
-            .with_hours(wa_core::BusinessHours {
-                timezone: Some("UTC".to_owned()),
-                config: vec![
-                    wa_core::BusinessHoursConfig::new("mon", "specific_hours")
-                        .unwrap()
-                        .with_open_close(540, 1020),
-                ],
-            });
-        let update_fut = client.update_business_profile(&connection, update);
-        tokio::pin!(update_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:biz");
-                assert_eq!(node.attrs["to"], "s.whatsapp.net");
-                assert_eq!(node.attrs["type"], "set");
-                let profile = test_child(&node, "business_profile");
-                assert_eq!(profile.attrs["v"], "3");
-                assert_eq!(profile.attrs["mutation_type"], "delta");
-                assert_eq!(
-                    test_node_text(test_child(profile, "address")).as_deref(),
-                    Some("2 Main")
-                );
-                assert_eq!(
-                    test_node_text(test_child(profile, "website")).as_deref(),
-                    Some("https://example.com")
-                );
-                let hours = test_child(profile, "business_hours");
-                assert_eq!(hours.attrs["timezone"], "UTC");
-                let config = test_child(hours, "business_hours_config");
-                assert_eq!(config.attrs["day_of_week"], "mon");
-                assert_eq!(config.attrs["open_time"], "540");
-                empty_result_for(&node)
-            },
-            &mut update_fut,
-        )
-        .await;
-        update_fut.await.unwrap();
-
-        let cover_upload =
-            wa_core::BusinessCoverPhotoUpload::new("cover-1", "token-1", 1_700_000_000).unwrap();
-        let cover_update_fut = client.update_business_cover_photo(&connection, cover_upload);
-        tokio::pin!(cover_update_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:biz");
-                assert_eq!(node.attrs["to"], "s.whatsapp.net");
-                assert_eq!(node.attrs["type"], "set");
-                let profile = test_child(&node, "business_profile");
-                assert_eq!(profile.attrs["v"], "3");
-                assert_eq!(profile.attrs["mutation_type"], "delta");
-                let cover = test_child(profile, "cover_photo");
-                assert_eq!(cover.attrs["op"], "update");
-                assert_eq!(cover.attrs["id"], "cover-1");
-                assert_eq!(cover.attrs["token"], "token-1");
-                assert_eq!(cover.attrs["ts"], "1700000000");
-                empty_result_for(&node)
-            },
-            &mut cover_update_fut,
-        )
-        .await;
-        assert_eq!(cover_update_fut.await.unwrap(), "cover-1");
-
-        let failed_cover_update = client.update_business_cover_photo(
-            &connection,
-            wa_core::BusinessCoverPhotoUpload::new("cover-2", "token-2", 1_700_000_001).unwrap(),
-        );
-        tokio::pin!(failed_cover_update);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let profile = test_child(&node, "business_profile");
-                let cover = test_child(profile, "cover_photo");
-                assert_eq!(cover.attrs["op"], "update");
-                assert_eq!(cover.attrs["id"], "cover-2");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "error")
-                    .with_attr("code", "403")
-                    .with_attr("text", "denied")
-            },
-            &mut failed_cover_update,
-        )
-        .await;
-        assert!(failed_cover_update.await.is_err());
-
-        let cover_remove_fut = client.remove_business_cover_photo(&connection, "cover-1");
-        tokio::pin!(cover_remove_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:biz");
-                let profile = test_child(&node, "business_profile");
-                let cover = test_child(profile, "cover_photo");
-                assert_eq!(cover.attrs["op"], "delete");
-                assert_eq!(cover.attrs["id"], "cover-1");
-                empty_result_for(&node)
-            },
-            &mut cover_remove_fut,
-        )
-        .await;
-        cover_remove_fut.await.unwrap();
-
-        let catalog_query = BusinessCatalogQuery::new("123@c.us")
-            .unwrap()
-            .with_limit(25)
-            .unwrap()
-            .with_cursor("cursor")
-            .unwrap();
-        let catalog_fut = client.fetch_business_catalog(&connection, catalog_query);
-        tokio::pin!(catalog_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:biz:catalog");
-                assert_eq!(node.attrs["to"], "s.whatsapp.net");
-                assert_eq!(node.attrs["type"], "get");
-                let catalog = test_child(&node, "product_catalog");
-                assert_eq!(catalog.attrs["jid"], "123@s.whatsapp.net");
-                assert_eq!(catalog.attrs["allow_shop_source"], "true");
-                assert_eq!(
-                    test_node_text(test_child(catalog, "limit")).as_deref(),
-                    Some("25")
-                );
-                assert_eq!(
-                    test_node_text(test_child(catalog, "after")).as_deref(),
-                    Some("cursor")
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("product_catalog").with_content(vec![
-                            BinaryNode::new("product")
-                                .with_attr("is_hidden", "true")
-                                .with_content(vec![
-                                    BinaryNode::new("id").with_content("sku-1"),
-                                    BinaryNode::new("name").with_content("Widget"),
-                                    BinaryNode::new("retailer_id").with_content("retailer"),
-                                    BinaryNode::new("description").with_content("Useful"),
-                                    BinaryNode::new("price").with_content("12345000"),
-                                    BinaryNode::new("currency").with_content("USD"),
-                                    BinaryNode::new("media").with_content(vec![
-                                        BinaryNode::new("image").with_content(vec![
-                                            BinaryNode::new("request_image_url")
-                                                .with_content("https://img/small"),
-                                            BinaryNode::new("original_image_url")
-                                                .with_content("https://img/full"),
-                                        ]),
-                                    ]),
-                                    BinaryNode::new("status_info").with_content(vec![
-                                        BinaryNode::new("status").with_content("APPROVED"),
-                                    ]),
-                                ]),
-                            BinaryNode::new("paging").with_content(vec![
-                                BinaryNode::new("after").with_content("next"),
-                            ]),
-                        ])])
-            },
-            &mut catalog_fut,
-        )
-        .await;
-        let catalog = catalog_fut.await.unwrap();
-        assert_eq!(catalog.next_page_cursor.as_deref(), Some("next"));
-        assert_eq!(catalog.products.len(), 1);
-        assert_eq!(catalog.products[0].id, "sku-1");
-        assert_eq!(catalog.products[0].price, 12_345_000);
-        assert!(catalog.products[0].is_hidden);
-        assert_eq!(
-            catalog.products[0].image_urls.requested.as_deref(),
-            Some("https://img/small")
-        );
-
-        let create = BusinessProductCreate::new("Widget", "Useful", 12_345_000, "USD")
-            .unwrap()
-            .with_retailer_id("retailer")
-            .with_url("https://example.com/widget")
-            .with_images([wa_core::BusinessProductImage::new("https://img/uploaded").unwrap()])
-            .with_origin(wa_core::BusinessProductOrigin::country_code("US").unwrap())
-            .hidden(true);
-        let create_fut = client.create_business_product(&connection, create);
-        tokio::pin!(create_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:biz:catalog");
-                assert_eq!(node.attrs["to"], "s.whatsapp.net");
-                assert_eq!(node.attrs["type"], "set");
-                let add = test_child(&node, "product_catalog_add");
-                assert_eq!(add.attrs["v"], "1");
-                let product = test_child(add, "product");
-                assert_eq!(product.attrs["is_hidden"], "true");
-                assert_eq!(
-                    test_node_text(test_child(product, "name")).as_deref(),
-                    Some("Widget")
-                );
-                assert_eq!(
-                    test_node_text(test_child(product, "price")).as_deref(),
-                    Some("12345000")
-                );
-                let image = test_child(test_child(product, "media"), "image");
-                assert_eq!(
-                    test_node_text(test_child(image, "url")).as_deref(),
-                    Some("https://img/uploaded")
-                );
-                let compliance = test_child(product, "compliance_info");
-                assert_eq!(
-                    test_node_text(test_child(compliance, "country_code_origin")).as_deref(),
-                    Some("US")
-                );
-                business_product_mutation_response(&node, "product_catalog_add")
-            },
-            &mut create_fut,
-        )
-        .await;
-        let created = create_fut.await.unwrap();
-        assert_eq!(created.id, "sku-1");
-        assert_eq!(created.name, "Widget");
-
-        let update = BusinessProductUpdate::new()
-            .with_name("Widget v2")
-            .with_price(22)
-            .hidden(false);
-        let update_fut = client.update_business_product(&connection, "sku-1", update);
-        tokio::pin!(update_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let edit = test_child(&node, "product_catalog_edit");
-                assert_eq!(edit.attrs["v"], "1");
-                let product = test_child(edit, "product");
-                assert_eq!(
-                    test_node_text(test_child(product, "id")).as_deref(),
-                    Some("sku-1")
-                );
-                assert_eq!(
-                    test_node_text(test_child(product, "name")).as_deref(),
-                    Some("Widget v2")
-                );
-                assert_eq!(product.attrs["is_hidden"], "false");
-                business_product_mutation_response(&node, "product_catalog_edit")
-            },
-            &mut update_fut,
-        )
-        .await;
-        let updated = update_fut.await.unwrap();
-        assert_eq!(updated.id, "sku-1");
-
-        let delete_fut = client.delete_business_products(&connection, ["sku-1", "sku-2"]);
-        tokio::pin!(delete_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let delete = test_child(&node, "product_catalog_delete");
-                assert_eq!(delete.attrs["v"], "1");
-                let products = test_children(delete, "product");
-                assert_eq!(products.len(), 2);
-                assert_eq!(
-                    test_node_text(test_child(products[0], "id")).as_deref(),
-                    Some("sku-1")
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("product_catalog_delete").with_attr("deleted_count", "2"),
-                    ])
-            },
-            &mut delete_fut,
-        )
-        .await;
-        assert_eq!(delete_fut.await.unwrap(), 2);
-
-        let collections_query = BusinessCollectionsQuery::new("123@c.us")
-            .unwrap()
-            .with_collection_limit(12)
-            .unwrap()
-            .with_item_limit(5)
-            .unwrap();
-        let collections_fut = client.fetch_business_collections(&connection, collections_query);
-        tokio::pin!(collections_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:biz:catalog");
-                assert_eq!(node.attrs["smax_id"], "35");
-                let collections = test_child(&node, "collections");
-                assert_eq!(collections.attrs["biz_jid"], "123@s.whatsapp.net");
-                assert_eq!(
-                    test_node_text(test_child(collections, "collection_limit")).as_deref(),
-                    Some("12")
-                );
-                assert_eq!(
-                    test_node_text(test_child(collections, "item_limit")).as_deref(),
-                    Some("5")
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("collections").with_content(vec![
-                        BinaryNode::new("collection").with_content(vec![
-                            BinaryNode::new("id").with_content("collection-1"),
-                            BinaryNode::new("name").with_content("Featured"),
-                            business_product_node(),
-                            BinaryNode::new("status_info").with_content(vec![
-                                BinaryNode::new("status").with_content("APPROVED"),
-                                BinaryNode::new("can_appeal").with_content("true"),
-                            ]),
-                        ]),
-                    ])])
-            },
-            &mut collections_fut,
-        )
-        .await;
-        let collections = collections_fut.await.unwrap();
-        assert_eq!(collections.len(), 1);
-        assert_eq!(collections[0].id, "collection-1");
-        assert_eq!(collections[0].products[0].id, "sku-1");
-        assert!(collections[0].status.can_appeal);
-
-        let order_fut = client.fetch_business_order_details(&connection, "order-1", "token");
-        tokio::pin!(order_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "fb:thrift_iq");
-                assert_eq!(node.attrs["smax_id"], "5");
-                let order = test_child(&node, "order");
-                assert_eq!(order.attrs["op"], "get");
-                assert_eq!(order.attrs["id"], "order-1");
-                assert_eq!(
-                    test_node_text(test_child(order, "token")).as_deref(),
-                    Some("token")
-                );
-                let dimensions = test_child(order, "image_dimensions");
-                assert_eq!(
-                    test_node_text(test_child(dimensions, "width")).as_deref(),
-                    Some("100")
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("order").with_content(vec![
-                        BinaryNode::new("product").with_content(vec![
-                            BinaryNode::new("id").with_content("sku-1"),
-                            BinaryNode::new("name").with_content("Widget"),
-                            BinaryNode::new("image").with_content(vec![
-                                BinaryNode::new("url").with_content("https://img"),
-                            ]),
-                            BinaryNode::new("price").with_content("12345000"),
-                            BinaryNode::new("currency").with_content("USD"),
-                            BinaryNode::new("quantity").with_content("2"),
-                        ]),
-                        BinaryNode::new("price").with_content(vec![
-                            BinaryNode::new("total").with_content("24690000"),
-                            BinaryNode::new("currency").with_content("USD"),
-                        ]),
-                    ])])
-            },
-            &mut order_fut,
-        )
-        .await;
-        let order = order_fut.await.unwrap();
-        assert_eq!(order.price.total, 24_690_000);
-        assert_eq!(order.products[0].quantity, 2);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn business_product_mutations_upload_images_before_sending_iqs() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let transport = ClientMediaUploadTransport::default();
-        let transfer = wa_core::MediaTransfer::new(transport.clone());
-
-        let create = BusinessProductCreate::new("Widget", "Useful", 12_345_000, "USD").unwrap();
-        let create_fut = client.create_business_product_with_image_bytes(
-            &connection,
-            &transfer,
-            create,
-            vec![b"image a".as_slice(), b"image b".as_slice()],
-            Some("media.test"),
-        );
-        tokio::pin!(create_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let add = test_child(&node, "product_catalog_add");
-                let product = test_child(add, "product");
-                let images = test_children(test_child(product, "media"), "image");
-                assert_eq!(images.len(), 2);
-                assert_eq!(
-                    test_node_text(test_child(images[0], "url")).as_deref(),
-                    Some("https://media.test/client/upload/0")
-                );
-                assert_eq!(
-                    test_node_text(test_child(images[1], "url")).as_deref(),
-                    Some("https://media.test/client/upload/1")
-                );
-                business_product_mutation_response(&node, "product_catalog_add")
-            },
-            &mut create_fut,
-        )
-        .await;
-        assert_eq!(create_fut.await.unwrap().id, "sku-1");
-
-        {
-            let uploads = transport.uploads.lock().unwrap();
-            assert_eq!(uploads.len(), 2);
-            assert_eq!(uploads[0].kind, wa_core::MediaKind::ProductCatalogImage);
-            assert_eq!(uploads[1].kind, wa_core::MediaKind::ProductCatalogImage);
-        }
-
-        let input = test_client_media_path("product-update-image");
-        tokio::fs::write(&input, b"updated image").await.unwrap();
-        let update = BusinessProductUpdate::new().with_name("Widget v2");
-        let update_fut = client.update_business_product_with_image_files(
-            &connection,
-            &transfer,
-            "sku-1",
-            update,
-            [&input],
-            Some("media.test"),
-        );
-        tokio::pin!(update_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let edit = test_child(&node, "product_catalog_edit");
-                let product = test_child(edit, "product");
-                assert_eq!(
-                    test_node_text(test_child(product, "id")).as_deref(),
-                    Some("sku-1")
-                );
-                assert_eq!(
-                    test_node_text(test_child(product, "name")).as_deref(),
-                    Some("Widget v2")
-                );
-                let image = test_child(test_child(product, "media"), "image");
-                assert_eq!(
-                    test_node_text(test_child(image, "url")).as_deref(),
-                    Some("https://media.test/client/upload/2")
-                );
-                business_product_mutation_response(&node, "product_catalog_edit")
-            },
-            &mut update_fut,
-        )
-        .await;
-        assert_eq!(update_fut.await.unwrap().id, "sku-1");
-        {
-            let uploads = transport.uploads.lock().unwrap();
-            assert_eq!(uploads.len(), 3);
-            assert_eq!(uploads[2].kind, wa_core::MediaKind::ProductCatalogImage);
-        }
-
-        let _ = tokio::fs::remove_file(&input).await;
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn newsletter_wmex_methods_send_queries_and_parse_results() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let metadata_fut = client.fetch_newsletter_metadata(
-            &connection,
-            NewsletterMetadataLookup::jid("abc@newsletter"),
-        );
-        tokio::pin!(metadata_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:mex");
-                assert_eq!(node.attrs["to"], "s.whatsapp.net");
-                let (query_id, variables) = test_wmex_query(&node);
-                assert_eq!(query_id, "6563316087068696");
-                assert_eq!(variables["input"]["key"], "abc@newsletter");
-                assert_eq!(variables["input"]["type"], "JID");
-                wmex_response_for_query(
-                    &node,
-                    "xwa2_newsletter",
-                    r#"{
-                        "result": {
-                            "id": "abc@newsletter",
-                            "thread_metadata": {
-                                "name": { "text": "Updates" },
-                                "description": { "text": "Daily" },
-                                "subscribers_count": "9"
-                            },
-                            "viewer_metadata": { "mute": "OFF", "role": "SUBSCRIBER" }
-                        }
-                    }"#,
-                )
-            },
-            &mut metadata_fut,
-        )
-        .await;
-        let metadata = metadata_fut.await.unwrap().unwrap();
-        assert_eq!(metadata.id, "abc@newsletter");
-        assert_eq!(metadata.name.as_deref(), Some("Updates"));
-        assert_eq!(metadata.subscribers, Some(9));
-
-        let follow_fut = client.follow_newsletter(&connection, "abc@newsletter");
-        tokio::pin!(follow_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let (query_id, variables) = test_wmex_query(&node);
-                assert_eq!(query_id, "24404358912487870");
-                assert_eq!(variables["newsletter_id"], "abc@newsletter");
-                wmex_response_for_query(&node, "xwa2_newsletter_join_v2", "{}")
-            },
-            &mut follow_fut,
-        )
-        .await;
-        follow_fut.await.unwrap();
-
-        let subscribers_fut =
-            client.fetch_newsletter_subscriber_count(&connection, "abc@newsletter");
-        tokio::pin!(subscribers_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let (query_id, _) = test_wmex_query(&node);
-                assert_eq!(query_id, "9783111038412085");
-                wmex_response_for_query(
-                    &node,
-                    "xwa2_newsletter_subscribers",
-                    r#"{ "subscribers": "12" }"#,
-                )
-            },
-            &mut subscribers_fut,
-        )
-        .await;
-        assert_eq!(subscribers_fut.await.unwrap(), 12);
-
-        let admin_fut = client.fetch_newsletter_admin_count(&connection, "abc@newsletter");
-        tokio::pin!(admin_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let (query_id, _) = test_wmex_query(&node);
-                assert_eq!(query_id, "7130823597031706");
-                wmex_response_for_query(&node, "xwa2_newsletter_admin", r#"{ "admin_count": 2 }"#)
-            },
-            &mut admin_fut,
-        )
-        .await;
-        assert_eq!(admin_fut.await.unwrap(), 2);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn newsletter_direct_methods_use_newsletter_iqs_and_message_reactions() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let messages_fut =
-            client.fetch_newsletter_messages(&connection, "abc@newsletter", 5, Some(10), Some(20));
-        tokio::pin!(messages_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "newsletter");
-                assert_eq!(node.attrs["to"], "abc@newsletter");
-                assert_eq!(node.attrs["type"], "get");
-                let updates = test_child(&node, "message_updates");
-                assert_eq!(updates.attrs["count"], "5");
-                assert_eq!(updates.attrs["since"], "10");
-                assert_eq!(updates.attrs["after"], "20");
-                let message = wa_proto::proto::Message {
-                    conversation: Some("newsletter text".to_owned()),
-                    ..wa_proto::proto::Message::default()
-                };
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("message_updates").with_content(vec![
-                        BinaryNode::new("message")
-                            .with_attr("message_id", "server-1")
-                            .with_attr("t", "1700000000")
-                            .with_content(vec![
-                                BinaryNode::new("plaintext").with_content(message.encode_to_vec()),
-                            ]),
-                    ])])
-            },
-            &mut messages_fut,
-        )
-        .await;
-        let messages = messages_fut.await.unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].key.remote_jid, "abc@newsletter");
-        assert_eq!(messages[0].key.id, "server-1");
-        assert_eq!(messages[0].timestamp, Some(1_700_000_000));
-        assert_eq!(messages[0].fields["kind"], "newsletter");
-        assert_eq!(messages[0].fields["payload_kind"], "plaintext");
-        assert_eq!(messages[0].fields["source"], "newsletter_fetch");
-        let decoded =
-            wa_proto::proto::Message::decode(messages[0].payload.clone().unwrap()).unwrap();
-        assert_eq!(decoded.conversation.as_deref(), Some("newsletter text"));
-
-        let live_fut = client.subscribe_newsletter_live_updates(&connection, "abc@newsletter");
-        tokio::pin!(live_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "newsletter");
-                assert_eq!(node.attrs["type"], "set");
-                assert!(test_child(&node, "live_updates").attrs.is_empty());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("live_updates").with_attr("duration", "3600"),
-                    ])
-            },
-            &mut live_fut,
-        )
-        .await;
-        assert_eq!(live_fut.await.unwrap().unwrap().duration, "3600");
-
-        let reaction_fut = client.react_to_newsletter_message(
-            &connection,
-            "abc@newsletter",
-            "server-1",
-            Some("+"),
-        );
-        tokio::pin!(reaction_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.tag, "message");
-                assert_eq!(node.attrs["to"], "abc@newsletter");
-                assert_eq!(node.attrs["type"], "reaction");
-                assert_eq!(node.attrs["server_id"], "server-1");
-                assert_eq!(test_child(&node, "reaction").attrs["code"], "+");
-                BinaryNode::new("message")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut reaction_fut,
-        )
-        .await;
-        reaction_fut.await.unwrap();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn app_state_patch_bundle_upload_uses_encoded_patch_and_previous_version() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let chat_patch = wa_core::build_pin_chat_patch("123@s.whatsapp.net", true, 13).unwrap();
-        let key_id = [4u8; 32];
-        let key_data = [8u8; 32];
-        let mutation = wa_core::encrypt_chat_mutation_patch_with_iv(
-            &chat_patch,
-            &key_id,
-            &key_data,
-            &[3u8; 16],
-        )
-        .unwrap();
-        let previous = wa_core::AppStatePatchState::new(
-            3,
-            Bytes::from(vec![0u8; wa_core::APP_STATE_HASH_LEN]),
-        )
-        .unwrap();
-        let bundle = wa_core::build_app_state_patch_bundle(
-            AppStateCollection::RegularLow,
-            &previous,
-            &key_id,
-            &key_data,
-            [mutation],
-        )
-        .unwrap();
-        let upload_fut = client.upload_app_state_patch_bundle(&connection, &bundle);
-        tokio::pin!(upload_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular_low");
-                assert_eq!(collection.attrs["version"], "3");
-                assert_eq!(collection.attrs["return_snapshot"], "false");
-                assert_eq!(
-                    test_node_bytes(test_child(collection, "patch")).as_deref(),
-                    Some(bundle.encoded_patch.as_ref())
-                );
-                empty_result_for(&node)
-            },
-            &mut upload_fut,
-        )
-        .await;
-        assert_eq!(upload_fut.await.unwrap().attrs["type"], "result");
-
-        let failed_upload_fut = client.upload_app_state_patch_bundle(&connection, &bundle);
-        tokio::pin!(failed_upload_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular_low");
-                error_result_for(&node, "500", "patch rejected")
-            },
-            &mut failed_upload_fut,
-        )
-        .await;
-        assert!(failed_upload_fut.await.is_err());
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn apply_decoded_app_state_patch_persists_state_and_emits_batch() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let previous = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        assert_eq!(previous.version(), 0);
-
-        let key_id = [4u8; 32];
-        let key_data = [8u8; 32];
-        let patch =
-            wa_core::build_quick_reply_patch(QuickReplyMutation::new("qr-1", "/hi", "hello"), 19)
-                .unwrap();
-        let mutation =
-            wa_core::encrypt_chat_mutation_patch_with_iv(&patch, &key_id, &key_data, &[3u8; 16])
-                .unwrap();
-        let bundle = wa_core::build_app_state_patch_bundle(
-            AppStateCollection::Regular,
-            &previous,
-            &key_id,
-            &key_data,
-            [mutation],
-        )
-        .unwrap();
-        let decoded = wa_core::decode_app_state_patch(
-            AppStateCollection::Regular,
-            &previous,
-            &bundle.patch,
-            &key_data,
-        )
-        .unwrap();
-
-        let batch = client
-            .apply_decoded_app_state_patch(&decoded, false)
-            .await
-            .unwrap();
-        assert_eq!(batch.quick_replies_update.len(), 1);
-        assert_eq!(batch.quick_replies_update[0].id, "qr-1");
-
-        let emitted = recv_batch_event(&mut events).await;
-        assert_eq!(emitted.quick_replies_update.len(), 1);
-        assert_eq!(emitted.quick_replies_update[0].id, "qr-1");
-
-        let stored = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        assert_eq!(stored.version(), bundle.next_state.version());
-        assert_eq!(stored.hash(), bundle.next_state.hash());
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn sync_and_apply_app_state_persists_inline_patches_and_emits_batch() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let previous = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        let key_id = [4u8; 32];
-        let key_data = [8u8; 32];
-        let patch =
-            wa_core::build_quick_reply_patch(QuickReplyMutation::new("qr-1", "/hi", "hello"), 19)
-                .unwrap();
-        let mutation =
-            wa_core::encrypt_chat_mutation_patch_with_iv(&patch, &key_id, &key_data, &[3u8; 16])
-                .unwrap();
-        let bundle = wa_core::build_app_state_patch_bundle(
-            AppStateCollection::Regular,
-            &previous,
-            &key_id,
-            &key_data,
-            [mutation],
-        )
-        .unwrap();
-        let encoded_patch = bundle.patch.encode_to_vec();
-        let expected_version = bundle.next_state.version();
-        let expected_hash = bundle.next_state.hash().clone();
-
-        let sync_fut = client.sync_and_apply_app_state(
-            &connection,
-            [AppStateCollectionRequest::new(
-                AppStateCollection::Regular,
-                0,
-            )],
-            &key_data,
-            false,
-        );
-        tokio::pin!(sync_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular");
-                assert_eq!(collection.attrs["version"], "0");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("sync").with_content(vec![
-                        BinaryNode::new("collection")
-                            .with_attr("name", "regular")
-                            .with_attr("version", expected_version.to_string())
-                            .with_content(vec![BinaryNode::new("patches").with_content(vec![
-                                BinaryNode::new("patch").with_content(encoded_patch),
-                            ])]),
-                    ])])
-            },
-            &mut sync_fut,
-        )
-        .await;
-
-        let outcome = sync_fut.await.unwrap();
-        assert_eq!(outcome.batches.len(), 1);
-        assert_eq!(outcome.batches[0].quick_replies_update[0].id, "qr-1");
-        assert_eq!(outcome.collections.len(), 1);
-        assert_eq!(
-            outcome.collections[0].collection,
-            AppStateCollection::Regular
-        );
-        assert_eq!(outcome.collections[0].applied_patches, 1);
-        assert_eq!(outcome.collections[0].emitted_batches, 1);
-        assert!(!outcome.collections[0].snapshot_pending);
-        assert!(outcome.pending_snapshots.is_empty());
-
-        let emitted = recv_batch_event(&mut events).await;
-        assert_eq!(emitted.quick_replies_update.len(), 1);
-        assert_eq!(emitted.quick_replies_update[0].id, "qr-1");
-
-        let stored = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        assert_eq!(stored.version(), expected_version);
-        assert_eq!(stored.hash(), &expected_hash);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn sync_and_apply_app_state_until_current_follows_inline_patch_pages() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let previous = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        let key_id = [4u8; 32];
-        let key_data = [8u8; 32];
-
-        let quick_patch =
-            wa_core::build_quick_reply_patch(QuickReplyMutation::new("qr-1", "/hi", "hello"), 19)
-                .unwrap();
-        let quick_mutation = wa_core::encrypt_chat_mutation_patch_with_iv(
-            &quick_patch,
-            &key_id,
-            &key_data,
-            &[3u8; 16],
-        )
-        .unwrap();
-        let quick_bundle = wa_core::build_app_state_patch_bundle(
-            AppStateCollection::Regular,
-            &previous,
-            &key_id,
-            &key_data,
-            [quick_mutation],
-        )
-        .unwrap();
-
-        let label_patch =
-            wa_core::build_label_edit_patch(LabelEditMutation::new("7", "Important"), 20).unwrap();
-        let label_mutation = wa_core::encrypt_chat_mutation_patch_with_iv(
-            &label_patch,
-            &key_id,
-            &key_data,
-            &[4u8; 16],
-        )
-        .unwrap();
-        let label_bundle = wa_core::build_app_state_patch_bundle(
-            AppStateCollection::Regular,
-            &quick_bundle.next_state,
-            &key_id,
-            &key_data,
-            [label_mutation],
-        )
-        .unwrap();
-        let quick_patch_bytes = quick_bundle.patch.encode_to_vec();
-        let label_patch_bytes = label_bundle.patch.encode_to_vec();
-        let quick_version = quick_bundle.next_state.version();
-        let label_version = label_bundle.next_state.version();
-        let label_hash = label_bundle.next_state.hash().clone();
-
-        let sync_fut = client.sync_and_apply_app_state_until_current(
-            &connection,
-            [AppStateCollection::Regular],
-            &key_data,
-            false,
-            4,
-        );
-        tokio::pin!(sync_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular");
-                assert_eq!(collection.attrs["version"], "0");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("sync").with_content(vec![
-                        BinaryNode::new("collection")
-                            .with_attr("name", "regular")
-                            .with_attr("version", quick_version.to_string())
-                            .with_attr("has_more_patches", "true")
-                            .with_content(vec![BinaryNode::new("patches").with_content(vec![
-                                BinaryNode::new("patch").with_content(quick_patch_bytes),
-                            ])]),
-                    ])])
-            },
-            &mut sync_fut,
-        )
-        .await;
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular");
-                assert_eq!(collection.attrs["version"], quick_version.to_string());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("sync").with_content(vec![
-                        BinaryNode::new("collection")
-                            .with_attr("name", "regular")
-                            .with_attr("version", label_version.to_string())
-                            .with_content(vec![BinaryNode::new("patches").with_content(vec![
-                                BinaryNode::new("patch").with_content(label_patch_bytes),
-                            ])]),
-                    ])])
-            },
-            &mut sync_fut,
-        )
-        .await;
-
-        let outcome = sync_fut.await.unwrap();
-        assert_eq!(outcome.batches.len(), 2);
-        assert_eq!(outcome.batches[0].quick_replies_update[0].id, "qr-1");
-        assert_eq!(outcome.batches[1].labels_edit[0].id, "7");
-        assert_eq!(outcome.collections.len(), 2);
-        assert_eq!(outcome.collections[0].final_version, quick_version);
-        assert!(outcome.collections[0].has_more_patches);
-        assert_eq!(outcome.collections[1].final_version, label_version);
-        assert!(!outcome.collections[1].has_more_patches);
-
-        let first = recv_batch_event(&mut events).await;
-        assert_eq!(first.quick_replies_update[0].id, "qr-1");
-        let second = recv_batch_event(&mut events).await;
-        assert_eq!(second.labels_edit[0].id, "7");
-
-        let stored = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        assert_eq!(stored.version(), label_version);
-        assert_eq!(stored.hash(), &label_hash);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn sync_with_store_keys_blocks_missing_key_then_retries_after_key_arrives() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let previous = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        let key_id = [4u8; 32];
-        let key_data = [8u8; 32];
-        let patch =
-            wa_core::build_quick_reply_patch(QuickReplyMutation::new("qr-1", "/hi", "hello"), 19)
-                .unwrap();
-        let mutation =
-            wa_core::encrypt_chat_mutation_patch_with_iv(&patch, &key_id, &key_data, &[3u8; 16])
-                .unwrap();
-        let bundle = wa_core::build_app_state_patch_bundle(
-            AppStateCollection::Regular,
-            &previous,
-            &key_id,
-            &key_data,
-            [mutation],
-        )
-        .unwrap();
-        let encoded_patch = bundle.patch.encode_to_vec();
-        let expected_version = bundle.next_state.version();
-        let expected_hash = bundle.next_state.hash().clone();
-
-        let blocked_fut = client.sync_and_apply_app_state_until_current_with_store_keys(
-            &connection,
-            [AppStateCollection::Regular],
-            false,
-            3,
-        );
-        tokio::pin!(blocked_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular");
-                assert_eq!(collection.attrs["version"], "0");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("sync").with_content(vec![
-                        BinaryNode::new("collection")
-                            .with_attr("name", "regular")
-                            .with_attr("version", expected_version.to_string())
-                            .with_attr("has_more_patches", "true")
-                            .with_content(vec![BinaryNode::new("patches").with_content(vec![
-                                BinaryNode::new("patch").with_content(encoded_patch.clone()),
-                            ])]),
-                    ])])
-            },
-            &mut blocked_fut,
-        )
-        .await;
-        let blocked = blocked_fut.await.unwrap();
-        assert!(blocked.batches.is_empty());
-        assert_eq!(blocked.blocked.len(), 1);
-        assert_eq!(blocked.blocked[0].collection, AppStateCollection::Regular);
-        assert_eq!(blocked.blocked[0].key_id, Bytes::copy_from_slice(&key_id));
-        assert_eq!(blocked.blocked[0].previous_version, 0);
-        assert_eq!(
-            client
-                .load_app_state_patch_state(AppStateCollection::Regular)
-                .await
-                .unwrap()
-                .version(),
-            0
-        );
-
-        let key_share_message = wa_proto::proto::Message {
-            protocol_message: Some(Box::new(wa_proto::proto::message::ProtocolMessage {
-                r#type: Some(
-                    wa_proto::proto::message::protocol_message::Type::AppStateSyncKeyShare as i32,
-                ),
-                app_state_sync_key_share: Some(wa_proto::proto::message::AppStateSyncKeyShare {
-                    keys: vec![wa_proto::proto::message::AppStateSyncKey {
-                        key_id: Some(wa_proto::proto::message::AppStateSyncKeyId {
-                            key_id: Some(Bytes::copy_from_slice(&key_id)),
-                        }),
-                        key_data: Some(wa_proto::proto::message::AppStateSyncKeyData {
-                            key_data: Some(Bytes::copy_from_slice(&key_data)),
-                            fingerprint: None,
-                            timestamp: None,
-                        }),
-                    }],
-                }),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-        let key_share_event = Event::MessagesUpsert(vec![
-            MessageEvent::new(wa_core::MessageEventKey::new(
-                "own@s.whatsapp.net",
-                "key-share",
-                None,
-            ))
-            .with_payload(Bytes::from(key_share_message.encode_to_vec()))
-            .with_field("from_me", "true"),
-        ]);
-        let key_share_events = [key_share_event];
-        let retry_fut =
-            client.handle_app_state_sync_key_share_events(&connection, &key_share_events, false, 3);
-        tokio::pin!(retry_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular");
-                assert_eq!(collection.attrs["version"], "0");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("sync").with_content(vec![
-                        BinaryNode::new("collection")
-                            .with_attr("name", "regular")
-                            .with_attr("version", expected_version.to_string())
-                            .with_content(vec![BinaryNode::new("patches").with_content(vec![
-                                BinaryNode::new("patch").with_content(encoded_patch),
-                            ])]),
-                    ])])
-            },
-            &mut retry_fut,
-        )
-        .await;
-        let applied = retry_fut.await.unwrap();
-        assert_eq!(
-            client
-                .load_app_state_sync_key_data(&key_id)
-                .await
-                .unwrap()
-                .unwrap(),
-            key_data.to_vec()
-        );
-        assert!(applied.blocked.is_empty());
-        assert_eq!(applied.batches.len(), 1);
-        assert_eq!(applied.batches[0].quick_replies_update[0].id, "qr-1");
-        let emitted = recv_batch_event(&mut events).await;
-        assert_eq!(emitted.quick_replies_update[0].id, "qr-1");
-
-        let stored = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        assert_eq!(stored.version(), expected_version);
-        assert_eq!(stored.hash(), &expected_hash);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn sync_recover_and_apply_app_state_until_current_downloads_snapshot() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let key_id = [4u8; 32];
-        let key_data = [8u8; 32];
-
-        let patch =
-            wa_core::build_quick_reply_patch(QuickReplyMutation::new("qr-1", "/hi", "hello"), 19)
-                .unwrap();
-        let mutation =
-            wa_core::encrypt_chat_mutation_patch_with_iv(&patch, &key_id, &key_data, &[3u8; 16])
-                .unwrap();
-        let expected_state = AppStatePatchState::empty()
-            .apply_hash_mutations_at_version(
-                11,
-                [wa_core::AppStateHashMutation::from_encrypted(&mutation).unwrap()],
-            )
-            .unwrap();
-        let keys = wa_crypto::derive_app_state_keys(&key_data).unwrap();
-        let snapshot_mac = wa_crypto::app_state_snapshot_mac(
-            expected_state.hash(),
-            11,
-            AppStateCollection::Regular.name(),
-            &keys,
-        )
-        .unwrap();
-        let snapshot = wa_proto::proto::SyncdSnapshot {
-            version: Some(wa_proto::proto::SyncdVersion { version: Some(11) }),
-            records: vec![mutation.mutation.record.clone().unwrap()],
-            mac: Some(Bytes::copy_from_slice(&snapshot_mac)),
-            key_id: Some(wa_proto::proto::KeyId {
-                id: Some(Bytes::copy_from_slice(&key_id)),
-            }),
-        };
-        let snapshot_bytes = Bytes::from(snapshot.encode_to_vec());
-        let encrypted = wa_crypto::encrypt_media_bytes_with_key(
-            &snapshot_bytes,
-            wa_crypto::MediaKind::AppState,
-            &[6u8; 32],
-        )
-        .unwrap();
-        let snapshot_ref = wa_core::ExternalBlobReference {
-            media_key: Some(Bytes::copy_from_slice(encrypted.media_key.expose())),
-            direct_path: Some("/app-state/snapshot".to_owned()),
-            handle: None,
-            file_size_bytes: Some(encrypted.file_length),
-            file_sha256: Some(encrypted.file_sha256.clone()),
-            file_enc_sha256: Some(encrypted.file_enc_sha256.clone()),
-        };
-        let snapshot_ref_bytes = Bytes::from(snapshot_ref.encode_to_vec());
-        let transport = HistoryDownloadTransport::default();
-        transport.add_download(
-            "https://snapshot.test/app-state/snapshot",
-            encrypted.ciphertext_with_mac.clone(),
-        );
-        let transfer = wa_core::MediaTransfer::new(transport);
-
-        let sync_fut = client.sync_recover_and_apply_app_state_until_current(
-            &connection,
-            &transfer,
-            [AppStateCollection::Regular],
-            AppStateSyncRecoveryOptions::new(&key_data, 2)
-                .with_initial_sync(true)
-                .with_fallback_host("snapshot.test"),
-        );
-        tokio::pin!(sync_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let collection = test_child(test_child(&node, "sync"), "collection");
-                assert_eq!(collection.attrs["name"], "regular");
-                assert_eq!(collection.attrs["version"], "0");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("sync").with_content(vec![
-                        BinaryNode::new("collection")
-                            .with_attr("name", "regular")
-                            .with_attr("version", "0")
-                            .with_content(vec![
-                                BinaryNode::new("snapshot").with_content(snapshot_ref_bytes),
-                            ]),
-                    ])])
-            },
-            &mut sync_fut,
-        )
-        .await;
-
-        let outcome = sync_fut.await.unwrap();
-        assert!(outcome.pending_snapshots.is_empty());
-        assert_eq!(outcome.batches.len(), 1);
-        assert_eq!(outcome.batches[0].quick_replies_update[0].id, "qr-1");
-        assert_eq!(outcome.collections.len(), 2);
-        assert!(outcome.collections[0].snapshot_pending);
-        assert_eq!(outcome.collections[1].final_version, 11);
-        assert!(!outcome.collections[1].snapshot_pending);
-
-        let emitted = recv_batch_event(&mut events).await;
-        assert_eq!(emitted.quick_replies_update.len(), 1);
-        assert_eq!(emitted.quick_replies_update[0].id, "qr-1");
-
-        let stored = client
-            .load_app_state_patch_state(AppStateCollection::Regular)
-            .await
-            .unwrap();
-        assert_eq!(stored.version(), expected_state.version());
-        assert_eq!(stored.hash(), expected_state.hash());
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn high_level_chat_mutation_methods_build_and_upload_patch_bundles() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let key_id = [4u8; 32];
-        let key_data = [8u8; 32];
-        let previous = wa_core::AppStatePatchState::new(
-            3,
-            Bytes::from(vec![0u8; wa_core::APP_STATE_HASH_LEN]),
-        )
-        .unwrap();
-        let upload = AppStateMutationUpload::new(&previous, &key_id, &key_data);
-
-        let pin_fut = client.set_chat_pinned(&connection, "123@s.whatsapp.net", true, 13, upload);
-        tokio::pin!(pin_fut);
-        let sent_frame = tokio::select! {
-            _ = &mut pin_fut => panic!("pin chat mutation completed before mock response"),
-            sent = sink_rx.recv() => sent.unwrap(),
-        };
-        let node = decode_inbound_binary_node(&sent_frame).unwrap().node;
-        assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-        let collection = test_child(test_child(&node, "sync"), "collection");
-        assert_eq!(collection.attrs["name"], "regular_low");
-        assert_eq!(collection.attrs["version"], "3");
-        let patch_bytes = test_node_bytes(test_child(collection, "patch")).unwrap();
-        let patch = wa_proto::proto::SyncdPatch::decode(patch_bytes.as_ref()).unwrap();
-        assert_eq!(
-            patch.version.as_ref().and_then(|version| version.version),
-            Some(4)
-        );
-        assert_eq!(patch.mutations.len(), 1);
-        assert_eq!(
-            patch.key_id.as_ref().and_then(|key| key.id.as_deref()),
-            Some(key_id.as_slice())
-        );
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let bundle = pin_fut.await.unwrap();
-        assert_eq!(bundle.collection, AppStateCollection::RegularLow);
-        assert_eq!(bundle.previous_version, 3);
-        assert_eq!(bundle.next_state.version(), 4);
-        assert_eq!(bundle.patch.mutations.len(), 1);
-
-        let delete_fut = client.delete_chat(&connection, "123@s.whatsapp.net", None, 15, upload);
-        tokio::pin!(delete_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut delete_fut,
-            "delete chat",
-            AppStateCollection::RegularHigh,
-            3,
-        )
-        .await;
-        assert_eq!(
-            patch.version.as_ref().and_then(|version| version.version),
-            Some(4)
-        );
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        let bundle = delete_fut.await.unwrap();
-        assert_eq!(bundle.collection, AppStateCollection::RegularHigh);
-        assert_eq!(bundle.previous_version, 3);
-        assert_eq!(bundle.next_state.version(), 4);
-
-        let key = MessageKey {
-            remote_jid: Some("123@s.whatsapp.net".to_owned()),
-            from_me: Some(false),
-            id: Some("msg-1".to_owned()),
-            participant: None,
-        };
-        let star_fut = client.set_message_starred(&connection, key, true, 16, upload);
-        tokio::pin!(star_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut star_fut,
-            "star message",
-            AppStateCollection::RegularLow,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        let bundle = star_fut.await.unwrap();
-        assert_eq!(bundle.collection, AppStateCollection::RegularLow);
-        assert_eq!(bundle.next_state.version(), 4);
-
-        let profile_name_fut = client.update_profile_name(&connection, "Agent", 17, upload);
-        tokio::pin!(profile_name_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut profile_name_fut,
-            "profile name",
-            AppStateCollection::CriticalBlock,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        let bundle = profile_name_fut.await.unwrap();
-        assert_eq!(bundle.collection, AppStateCollection::CriticalBlock);
-        assert_eq!(bundle.next_state.version(), 4);
-
-        let contact = ContactSyncAction::new()
-            .with_full_name("Agent Smith")
-            .with_pn_jid("123@s.whatsapp.net");
-        let contact_fut =
-            client.update_contact(&connection, "123@s.whatsapp.net", contact, 18, upload);
-        tokio::pin!(contact_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut contact_fut,
-            "contact",
-            AppStateCollection::CriticalUnblockLow,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        let bundle = contact_fut.await.unwrap();
-        assert_eq!(bundle.collection, AppStateCollection::CriticalUnblockLow);
-        assert_eq!(bundle.next_state.version(), 4);
-
-        let remove_contact_fut =
-            client.remove_contact(&connection, "123@s.whatsapp.net", 19, upload);
-        tokio::pin!(remove_contact_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut remove_contact_fut,
-            "remove contact",
-            AppStateCollection::CriticalUnblockLow,
-            3,
-        )
-        .await;
-        assert_eq!(
-            patch.mutations[0].operation,
-            Some(wa_core::AppStatePatchOperation::Remove.proto_value())
-        );
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        let bundle = remove_contact_fut.await.unwrap();
-        assert_eq!(bundle.collection, AppStateCollection::CriticalUnblockLow);
-
-        let quick_reply = QuickReplyMutation::new("1700000000", "/hi", "hello");
-        let quick_reply_fut = client.upsert_quick_reply(&connection, quick_reply, 20, upload);
-        tokio::pin!(quick_reply_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut quick_reply_fut,
-            "quick reply",
-            AppStateCollection::Regular,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            quick_reply_fut.await.unwrap().collection,
-            AppStateCollection::Regular
-        );
-
-        let delete_quick_reply_fut =
-            client.delete_quick_reply(&connection, "1700000000", 21, upload);
-        tokio::pin!(delete_quick_reply_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut delete_quick_reply_fut,
-            "delete quick reply",
-            AppStateCollection::Regular,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            delete_quick_reply_fut.await.unwrap().collection,
-            AppStateCollection::Regular
-        );
-
-        let label = LabelEditMutation::new("7", "Important");
-        let label_fut = client.upsert_label(&connection, label, 22, upload);
-        tokio::pin!(label_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut label_fut,
-            "label",
-            AppStateCollection::Regular,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            label_fut.await.unwrap().collection,
-            AppStateCollection::Regular
-        );
-
-        let delete_label_fut = client.delete_label(&connection, "7", 23, upload);
-        tokio::pin!(delete_label_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut delete_label_fut,
-            "delete label",
-            AppStateCollection::Regular,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            delete_label_fut.await.unwrap().collection,
-            AppStateCollection::Regular
-        );
-
-        let chat_label_fut =
-            client.set_chat_label(&connection, "123@s.whatsapp.net", "7", true, 24, upload);
-        tokio::pin!(chat_label_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut chat_label_fut,
-            "chat label",
-            AppStateCollection::Regular,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            chat_label_fut.await.unwrap().collection,
-            AppStateCollection::Regular
-        );
-
-        let message_label_fut = client.set_message_label(
-            &connection,
-            MessageLabelTarget::new("123@s.whatsapp.net", "7", "msg-1"),
-            false,
-            25,
-            upload,
-        );
-        tokio::pin!(message_label_fut);
-        let (node, patch) = recv_app_state_upload(
-            &mut sink_rx,
-            &mut message_label_fut,
-            "message label",
-            AppStateCollection::Regular,
-            3,
-        )
-        .await;
-        assert_eq!(patch.mutations.len(), 1);
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&empty_result_for(&node)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            message_label_fut.await.unwrap().collection,
-            AppStateCollection::Regular
-        );
-
-        let failed_pin_fut =
-            client.set_chat_pinned(&connection, "123@s.whatsapp.net", false, 14, upload);
-        tokio::pin!(failed_pin_fut);
-        let sent_frame = tokio::select! {
-            _ = &mut failed_pin_fut => panic!("failed pin chat mutation completed before mock response"),
-            sent = sink_rx.recv() => sent.unwrap(),
-        };
-        let node = decode_inbound_binary_node(&sent_frame).unwrap().node;
-        assert_eq!(node.attrs["xmlns"], "w:sync:app:state");
-        let collection = test_child(test_child(&node, "sync"), "collection");
-        assert_eq!(collection.attrs["name"], "regular_low");
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(&error_result_for(&node, "500", "patch rejected")).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert!(failed_pin_fut.await.is_err());
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn group_metadata_create_and_participants_use_group_iqs() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let metadata_fut = client.fetch_group_metadata(&connection, "123@g.us");
-        tokio::pin!(metadata_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "get");
-                assert_eq!(test_child(&node, "query").attrs["request"], "interactive");
-                group_metadata_response(&node, "123", "Team")
-            },
-            &mut metadata_fut,
-        )
-        .await;
-        let metadata = metadata_fut.await.unwrap();
-        assert_eq!(metadata.jid, "123@g.us");
-        assert_eq!(metadata.subject.as_deref(), Some("Team"));
-
-        let create_fut = client.create_group(
-            &connection,
-            "New team",
-            ["111@s.whatsapp.net", "222@s.whatsapp.net"],
-        );
-        tokio::pin!(create_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["to"], "@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let create = test_child(&node, "create");
-                assert_eq!(create.attrs["subject"], "New team");
-                assert!(!create.attrs["key"].is_empty());
-                assert_eq!(test_children(create, "participant").len(), 2);
-                group_metadata_response(&node, "456", "New team")
-            },
-            &mut create_fut,
-        )
-        .await;
-        assert_eq!(create_fut.await.unwrap().jid, "456@g.us");
-
-        let participants_fut = client.update_group_participants(
-            &connection,
-            "123@g.us",
-            GroupParticipantAction::Add,
-            ["333@s.whatsapp.net", "444@s.whatsapp.net"],
-        );
-        tokio::pin!(participants_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                let add = test_child(&node, "add");
-                assert_eq!(test_children(add, "participant").len(), 2);
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_attr("from", "123@g.us")
-                    .with_content(vec![BinaryNode::new("add").with_content(vec![
-                        BinaryNode::new("participant").with_attr("jid", "333@s.whatsapp.net"),
-                        BinaryNode::new("participant")
-                            .with_attr("jid", "444@s.whatsapp.net")
-                            .with_attr("error", "403"),
-                    ])])
-            },
-            &mut participants_fut,
-        )
-        .await;
-        let result = participants_fut.await.unwrap();
-        assert_eq!(result.group_jid.as_deref(), Some("123@g.us"));
-        assert_eq!(result.action, GroupParticipantAction::Add);
-        assert_eq!(result.participants[0].status, 200);
-        assert_eq!(result.participants[1].error_code, Some(403));
-
-        let leave_fut = client.leave_group(&connection, "123@g.us");
-        tokio::pin!(leave_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["to"], "@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let leave = test_child(&node, "leave");
-                assert_eq!(test_child(leave, "group").attrs["id"], "123@g.us");
-                empty_result_for(&node)
-            },
-            &mut leave_fut,
-        )
-        .await;
-        leave_fut.await.unwrap();
-
-        let subject_fut = client.set_group_subject(&connection, "123@g.us", "Renamed");
-        tokio::pin!(subject_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(
-                    test_node_text(test_child(&node, "subject")).as_deref(),
-                    Some("Renamed")
-                );
-                empty_result_for(&node)
-            },
-            &mut subject_fut,
-        )
-        .await;
-        subject_fut.await.unwrap();
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn group_description_invites_settings_and_join_requests_use_group_iqs() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let description_fut =
-            client.set_group_description(&connection, "123@g.us", Some("New description"));
-        tokio::pin!(description_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "get");
-                group_metadata_response_with_description(&node, "123", "Team", Some("old-desc"))
-            },
-            &mut description_fut,
-        )
-        .await;
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                let description = test_child(&node, "description");
-                assert_eq!(description.attrs["prev"], "old-desc");
-                assert!(!description.attrs["id"].is_empty());
-                assert_eq!(
-                    test_child(description, "body")
-                        .content
-                        .as_ref()
-                        .and_then(|content| {
-                            match content {
-                                wa_binary::BinaryNodeContent::Bytes(bytes) => {
-                                    std::str::from_utf8(bytes).ok().map(str::to_owned)
-                                }
-                                wa_binary::BinaryNodeContent::Text(text) => Some(text.clone()),
-                                wa_binary::BinaryNodeContent::Nodes(_) => None,
-                            }
-                        }),
-                    Some("New description".to_owned())
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut description_fut,
-        )
-        .await;
-        description_fut.await.unwrap();
-
-        let invite_fut = client.fetch_group_invite_code(&connection, "123@g.us");
-        tokio::pin!(invite_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "get");
-                assert!(test_child(&node, "invite").attrs.is_empty());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("invite").with_attr("code", "invite-code"),
-                    ])
-            },
-            &mut invite_fut,
-        )
-        .await;
-        assert_eq!(invite_fut.await.unwrap().as_deref(), Some("invite-code"));
-
-        let accept_fut = client.accept_group_invite(&connection, "invite-code");
-        tokio::pin!(accept_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "@g.us");
-                assert_eq!(test_child(&node, "invite").attrs["code"], "invite-code");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("group").with_attr("jid", "789@g.us")])
-            },
-            &mut accept_fut,
-        )
-        .await;
-        assert_eq!(accept_fut.await.unwrap().as_deref(), Some("789@g.us"));
-
-        let invite_v4 =
-            GroupInviteV4::new("123@g.us", "v4-code", 1_700_000_000, "222@s.whatsapp.net").unwrap();
-        let accept_v4_fut = client.accept_group_invite_v4(&connection, &invite_v4);
-        tokio::pin!(accept_v4_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let accept = test_child(&node, "accept");
-                assert_eq!(accept.attrs["code"], "v4-code");
-                assert_eq!(accept.attrs["expiration"], "1700000000");
-                assert_eq!(accept.attrs["admin"], "222@s.whatsapp.net");
-                empty_result_for(&node)
-            },
-            &mut accept_v4_fut,
-        )
-        .await;
-        assert!(accept_v4_fut.await.unwrap());
-
-        let revoke_v4_fut =
-            client.revoke_group_invite_v4(&connection, "123@g.us", "333@s.whatsapp.net");
-        tokio::pin!(revoke_v4_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let revoke = test_child(&node, "revoke");
-                assert_eq!(
-                    test_child(revoke, "participant").attrs["jid"],
-                    "333@s.whatsapp.net"
-                );
-                empty_result_for(&node)
-            },
-            &mut revoke_v4_fut,
-        )
-        .await;
-        assert!(revoke_v4_fut.await.unwrap());
-
-        let setting_fut =
-            client.update_group_setting(&connection, "123@g.us", GroupSettingUpdate::Locked);
-        tokio::pin!(setting_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert!(test_child(&node, "locked").attrs.is_empty());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut setting_fut,
-        )
-        .await;
-        setting_fut.await.unwrap();
-
-        let failed_setting_fut =
-            client.update_group_setting(&connection, "123@g.us", GroupSettingUpdate::Locked);
-        tokio::pin!(failed_setting_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert!(test_child(&node, "locked").attrs.is_empty());
-                error_result_for(&node, "403", "denied")
-            },
-            &mut failed_setting_fut,
-        )
-        .await;
-        assert!(failed_setting_fut.await.is_err());
-
-        let ephemeral_fut = client.set_group_ephemeral(&connection, "123@g.us", 86400);
-        tokio::pin!(ephemeral_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(test_child(&node, "ephemeral").attrs["expiration"], "86400");
-                empty_result_for(&node)
-            },
-            &mut ephemeral_fut,
-        )
-        .await;
-        ephemeral_fut.await.unwrap();
-
-        let member_add_fut = client.set_group_member_add_mode(
-            &connection,
-            "123@g.us",
-            GroupMemberAddMode::AllMembers,
-        );
-        tokio::pin!(member_add_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(
-                    test_node_text(test_child(&node, "member_add_mode")).as_deref(),
-                    Some("all_member_add")
-                );
-                empty_result_for(&node)
-            },
-            &mut member_add_fut,
-        )
-        .await;
-        member_add_fut.await.unwrap();
-
-        let join_approval_fut =
-            client.set_group_join_approval_mode(&connection, "123@g.us", GroupJoinApprovalMode::On);
-        tokio::pin!(join_approval_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                let mode = test_child(&node, "membership_approval_mode");
-                assert_eq!(test_child(mode, "group_join").attrs["state"], "on");
-                empty_result_for(&node)
-            },
-            &mut join_approval_fut,
-        )
-        .await;
-        join_approval_fut.await.unwrap();
-
-        let join_list_fut = client.fetch_group_join_requests(&connection, "123@g.us");
-        tokio::pin!(join_list_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "get");
-                assert!(
-                    test_child(&node, "membership_approval_requests")
-                        .attrs
-                        .is_empty()
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("membership_approval_requests").with_content(vec![
-                            BinaryNode::new("membership_approval_request")
-                                .with_attr("jid", "555@s.whatsapp.net")
-                                .with_attr("t", "44")
-                                .with_attr("request_method", "invite_link"),
-                        ]),
-                    ])
-            },
-            &mut join_list_fut,
-        )
-        .await;
-        let requests = join_list_fut.await.unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].jid, "555@s.whatsapp.net");
-        assert_eq!(requests[0].requested_at, Some(44));
-
-        let join_update_fut = client.update_group_join_requests(
-            &connection,
-            "123@g.us",
-            GroupJoinRequestAction::Approve,
-            ["555@s.whatsapp.net"],
-        );
-        tokio::pin!(join_update_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                let wrapper = test_child(&node, "membership_requests_action");
-                let approve = test_child(wrapper, "approve");
-                assert_eq!(test_children(approve, "participant").len(), 1);
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("membership_requests_action").with_content(vec![
-                            BinaryNode::new("approve").with_content(vec![
-                                BinaryNode::new("participant")
-                                    .with_attr("jid", "555@s.whatsapp.net"),
-                            ]),
-                        ]),
-                    ])
-            },
-            &mut join_update_fut,
-        )
-        .await;
-        let update = join_update_fut.await.unwrap();
-        assert_eq!(update.action, GroupJoinRequestAction::Approve);
-        assert_eq!(update.participants[0].status, 200);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn accept_group_invite_v4_with_message_events_emits_update_and_stub() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let invite =
-            GroupInviteV4::new("123@g.us", "v4-code", 1_700_000_000, "222@s.whatsapp.net").unwrap();
-        let invite_key = wa_core::MessageEventKey::new("222@s.whatsapp.net", "invite-msg", None);
-
-        let accept_fut = client.accept_group_invite_v4_with_message_events(
-            &connection,
-            &invite,
-            Some(invite_key.clone()),
-        );
-        tokio::pin!(accept_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let accept = test_child(&node, "accept");
-                assert_eq!(accept.attrs["code"], "v4-code");
-                assert_eq!(accept.attrs["expiration"], "1700000000");
-                assert_eq!(accept.attrs["admin"], "222@s.whatsapp.net");
-                empty_result_for(&node)
-            },
-            &mut accept_fut,
-        )
-        .await;
-        assert!(accept_fut.await.unwrap());
-
-        let batch = recv_batch_event(&mut events).await;
-        assert_eq!(batch.messages_update.len(), 1);
-        assert_eq!(batch.messages_update[0].key, invite_key);
-        assert_eq!(
-            batch.messages_update[0].fields["source"],
-            "group_invite_v4_accept"
-        );
-        assert_eq!(batch.messages_update[0].fields["invite_status"], "accepted");
-        assert_eq!(batch.messages_update[0].fields["invite_code"], "");
-        assert_eq!(batch.messages_update[0].fields["invite_expiration"], "0");
-        assert_eq!(batch.messages_upsert.len(), 1);
-        let stub = &batch.messages_upsert[0];
-        assert_eq!(stub.key.remote_jid, "123@g.us");
-        assert_eq!(stub.key.participant.as_deref(), Some("222@s.whatsapp.net"));
-        assert_eq!(stub.fields["source"], "group_invite_v4_accept");
-        assert_eq!(stub.fields["kind"], "notify");
-        assert_eq!(stub.fields["stub_type"], "group_participant_add");
-        assert_eq!(stub.fields["participant"], "222@s.whatsapp.net");
-
-        let stored_update_key = wa_core::message_event_store_key(&invite_key);
-        let stored_update = store
-            .get(KeyNamespace::MessageUpdate, &stored_update_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_update = wa_core::decode_stored_message_update(&stored_update).unwrap();
-        assert_eq!(stored_update, batch.messages_update[0]);
-
-        let stored_stub_key = wa_core::message_event_store_key(&stub.key);
-        let stored_stub = store
-            .get(KeyNamespace::MessageEvent, &stored_stub_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_stub = wa_core::decode_stored_message_event(&stored_stub).unwrap();
-        assert_eq!(stored_stub, *stub);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn persisted_message_event_batch_merges_updates_and_deletes() {
-        let store = wa_store::MemoryAuthStore::new();
-        let key = wa_core::MessageEventKey::new("123@s.whatsapp.net", "msg-1", None);
-        let store_key = wa_core::message_event_store_key(&key);
-        let upsert = MessageEvent::new(key.clone())
-            .with_timestamp(10)
-            .with_field("status", "pending");
-
-        persist_message_event_batch(
-            &store,
-            &wa_core::EventBatch {
-                messages_upsert: vec![upsert],
-                ..wa_core::EventBatch::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        persist_message_event_batch(
-            &store,
-            &wa_core::EventBatch {
-                messages_update: vec![
-                    wa_core::MessageUpdate::new(key.clone())
-                        .with_timestamp(11)
-                        .with_field("status", "server_ack"),
-                ],
-                ..wa_core::EventBatch::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let stored = store
-            .get(KeyNamespace::MessageEvent, &store_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_message_event(&stored).unwrap();
-        assert_eq!(stored.timestamp, Some(11));
-        assert_eq!(stored.fields["status"], "server_ack");
-        assert_eq!(
-            store
-                .get(KeyNamespace::MessageUpdate, &store_key)
-                .await
-                .unwrap(),
-            None
-        );
-
-        persist_message_event_batch(
-            &store,
-            &wa_core::EventBatch {
-                messages_delete: vec![key],
-                ..wa_core::EventBatch::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            store
-                .get(KeyNamespace::MessageEvent, &store_key)
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn receive_persistence_stores_history_chat_contact_and_group_state() {
-        let store = wa_store::MemoryAuthStore::new();
-        let history = wa_core::HistorySetEvent {
-            chats: vec![
-                wa_core::ChatEvent::new("123@s.whatsapp.net").with_field("display_name", "Alice"),
-            ],
-            contacts: vec![
-                wa_core::ContactEvent::new("123@s.whatsapp.net").with_field("name", "Alice"),
-            ],
-            messages: Vec::new(),
-            is_latest: true,
-        };
-        let group = wa_core::GroupUpdateEvent::new("456@g.us").with_field("subject", "Team");
-        let batch = wa_core::EventBatch {
-            history: Some(history),
-            groups_update: vec![group],
-            ..wa_core::EventBatch::default()
-        };
-
-        persist_receive_events(&store, &[Event::Batch(Box::new(batch))])
-            .await
-            .unwrap();
-
-        let chat = store
-            .get(KeyNamespace::ChatEvent, "123@s.whatsapp.net")
-            .await
-            .unwrap()
-            .unwrap();
-        let chat = wa_core::decode_stored_chat_event(&chat).unwrap();
-        assert_eq!(chat.fields["display_name"], "Alice");
-
-        let contact = store
-            .get(KeyNamespace::ContactEvent, "123@s.whatsapp.net")
-            .await
-            .unwrap()
-            .unwrap();
-        let contact = wa_core::decode_stored_contact_event(&contact).unwrap();
-        assert_eq!(contact.fields["name"], "Alice");
-
-        let group = store
-            .get(KeyNamespace::GroupEvent, "456@g.us")
-            .await
-            .unwrap()
-            .unwrap();
-        let group = wa_core::decode_stored_group_event(&group).unwrap();
-        assert_eq!(group.fields["subject"], "Team");
-
-        persist_receive_events(
-            &store,
-            &[
-                Event::ChatsUpdate(vec![
-                    wa_core::ChatEvent::new("123@s.whatsapp.net").with_field("unread_count", "3"),
-                ]),
-                Event::ContactsUpdate(vec![
-                    wa_core::ContactEvent::new("123@s.whatsapp.net").with_field("notify", "A"),
-                ]),
-                Event::GroupsUpdate(vec![
-                    wa_core::GroupUpdateEvent::new("456@g.us").with_field("announce", "false"),
-                ]),
-            ],
-        )
-        .await
-        .unwrap();
-
-        let chat = store
-            .get(KeyNamespace::ChatEvent, "123@s.whatsapp.net")
-            .await
-            .unwrap()
-            .unwrap();
-        let chat = wa_core::decode_stored_chat_event(&chat).unwrap();
-        assert_eq!(chat.fields["display_name"], "Alice");
-        assert_eq!(chat.fields["unread_count"], "3");
-
-        let contact = store
-            .get(KeyNamespace::ContactEvent, "123@s.whatsapp.net")
-            .await
-            .unwrap()
-            .unwrap();
-        let contact = wa_core::decode_stored_contact_event(&contact).unwrap();
-        assert_eq!(contact.fields["name"], "Alice");
-        assert_eq!(contact.fields["notify"], "A");
-
-        let group = store
-            .get(KeyNamespace::GroupEvent, "456@g.us")
-            .await
-            .unwrap()
-            .unwrap();
-        let group = wa_core::decode_stored_group_event(&group).unwrap();
-        assert_eq!(group.fields["subject"], "Team");
-        assert_eq!(group.fields["announce"], "false");
-
-        persist_receive_events(
-            &store,
-            &[
-                Event::ChatsDelete(vec!["123@s.whatsapp.net".to_owned()]),
-                Event::ContactsDelete(vec!["123@s.whatsapp.net".to_owned()]),
-            ],
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            store
-                .get(KeyNamespace::ChatEvent, "123@s.whatsapp.net")
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            store
-                .get(KeyNamespace::ContactEvent, "123@s.whatsapp.net")
-                .await
-                .unwrap(),
-            None
-        );
-        assert!(
-            store
-                .get(KeyNamespace::GroupEvent, "456@g.us")
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn receive_persistence_stores_receipts_and_reactions() {
-        let store = wa_store::MemoryAuthStore::new();
-        let key = wa_core::MessageEventKey::new(
-            "123@s.whatsapp.net",
-            "msg-1",
-            Some("456@s.whatsapp.net".to_owned()),
-        );
-        let receipt = wa_core::ReceiptEvent::new(key.clone(), "read")
-            .with_participant("789@s.whatsapp.net")
-            .with_timestamp(1_700_000_004);
-        let reaction = wa_core::ReactionEvent::new(key, "789@s.whatsapp.net")
-            .with_text("+")
-            .with_timestamp(1_700_000_005);
-        let batch = wa_core::EventBatch {
-            receipts_update: vec![receipt.clone()],
-            reactions_update: vec![reaction.clone()],
-            ..wa_core::EventBatch::default()
-        };
-
-        persist_receive_events(&store, &[Event::Batch(Box::new(batch))])
-            .await
-            .unwrap();
-
-        let receipt_key = wa_core::receipt_event_store_key(&receipt);
-        let stored_receipt = store
-            .get(KeyNamespace::ReceiptEvent, &receipt_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_receipt = wa_core::decode_stored_receipt_event(&stored_receipt).unwrap();
-        assert_eq!(stored_receipt, receipt);
-
-        let reaction_key = wa_core::reaction_event_store_key(&reaction);
-        let stored_reaction = store
-            .get(KeyNamespace::ReactionEvent, &reaction_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_reaction = wa_core::decode_stored_reaction_event(&stored_reaction).unwrap();
-        assert_eq!(stored_reaction, reaction);
-
-        let replacement =
-            wa_core::ReactionEvent::new(stored_reaction.key.clone(), "789@s.whatsapp.net")
-                .with_text("-")
-                .with_timestamp(1_700_000_006);
-        persist_receive_events(&store, &[Event::ReactionsUpdate(vec![replacement.clone()])])
-            .await
-            .unwrap();
-        let stored_reaction = store
-            .get(KeyNamespace::ReactionEvent, &reaction_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_reaction = wa_core::decode_stored_reaction_event(&stored_reaction).unwrap();
-        assert_eq!(stored_reaction, replacement);
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn receive_persistence_stores_media_retry_events() {
-        let store = wa_store::MemoryAuthStore::new();
-        let key = wa_core::MessageEventKey::new(
-            "123@s.whatsapp.net",
-            "msg-1",
-            Some("456@s.whatsapp.net".to_owned()),
-        );
-        let retry = wa_core::MediaRetryEvent::new(key.clone(), false)
-            .with_encrypted_payload(Bytes::from_static(b"cipher"), Bytes::from_static(b"iv"));
-        let batch = wa_core::EventBatch {
-            media_retry: vec![retry.clone()],
-            ..wa_core::EventBatch::default()
-        };
-
-        persist_receive_events(&store, &[Event::Batch(Box::new(batch))])
-            .await
-            .unwrap();
-
-        let store_key = wa_core::media_retry_event_store_key(&retry);
-        let stored = store
-            .get(KeyNamespace::MediaRetryEvent, &store_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_media_retry_event(&stored).unwrap();
-        assert_eq!(stored, retry);
-
-        let replacement = wa_core::MediaRetryEvent::new(key, false).with_error(
-            2,
-            Some("missing".to_owned()),
-            404,
-        );
-        persist_receive_events(&store, &[Event::MediaRetry(vec![replacement.clone()])])
-            .await
-            .unwrap();
-
-        let stored = store
-            .get(KeyNamespace::MediaRetryEvent, &store_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_media_retry_event(&stored).unwrap();
-        assert_eq!(stored, replacement);
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn receive_persistence_stores_call_events() {
-        let store = wa_store::MemoryAuthStore::new();
-        let call = wa_core::CallEvent::new("call-stanza-1", "123@s.whatsapp.net", "offer")
-            .with_call_id("call-1")
-            .with_participant("456@s.whatsapp.net")
-            .with_timestamp(1_700_000_007)
-            .with_field("child_audio", "true");
-        let batch = wa_core::EventBatch {
-            calls_update: vec![call.clone()],
-            ..wa_core::EventBatch::default()
-        };
-
-        persist_receive_events(&store, &[Event::Batch(Box::new(batch))])
-            .await
-            .unwrap();
-
-        let store_key = wa_core::call_event_store_key(&call);
-        let stored = store
-            .get(KeyNamespace::CallEvent, &store_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_call_event(&stored).unwrap();
-        assert_eq!(stored, call);
-
-        let replacement = wa_core::CallEvent::new("call-stanza-1", "123@s.whatsapp.net", "offer")
-            .with_call_id("call-1")
-            .with_participant("789@s.whatsapp.net")
-            .with_timestamp(1_700_000_008)
-            .with_field("child_video", "true");
-        persist_receive_events(&store, &[Event::CallsUpdate(vec![replacement.clone()])])
-            .await
-            .unwrap();
-
-        let stored = store
-            .get(KeyNamespace::CallEvent, &store_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored = wa_core::decode_stored_call_event(&stored).unwrap();
-        assert_eq!(stored, replacement);
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn receive_persistence_stores_labels_associations_and_quick_replies() {
-        let store = wa_store::MemoryAuthStore::new();
-        let label = wa_core::LabelEvent::new("7")
-            .with_field("name", "Important")
-            .with_field("color", "4");
-        let association = wa_core::LabelAssociationEvent::chat("7", "123@s.whatsapp.net", true);
-        let quick_reply = wa_core::QuickReplyEvent::new("qr-1")
-            .with_field("shortcut", "/hi")
-            .with_field("message", "hello");
-        let batch = wa_core::EventBatch {
-            labels_edit: vec![label.clone()],
-            labels_association: vec![association.clone()],
-            quick_replies_update: vec![quick_reply.clone()],
-            ..wa_core::EventBatch::default()
-        };
-
-        persist_receive_events(&store, &[Event::Batch(Box::new(batch))])
-            .await
-            .unwrap();
-
-        let stored_label = store
-            .get(KeyNamespace::LabelEvent, "7")
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_label = wa_core::decode_stored_label_event(&stored_label).unwrap();
-        assert_eq!(stored_label, label);
-
-        let association_key = wa_core::label_association_store_key(&association);
-        let stored_association = store
-            .get(KeyNamespace::LabelAssociation, &association_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_association =
-            wa_core::decode_stored_label_association_event(&stored_association).unwrap();
-        assert_eq!(stored_association, association);
-
-        let stored_quick_reply = store
-            .get(KeyNamespace::QuickReplyEvent, "qr-1")
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_quick_reply =
-            wa_core::decode_stored_quick_reply_event(&stored_quick_reply).unwrap();
-        assert_eq!(stored_quick_reply, quick_reply);
-
-        persist_receive_events(
-            &store,
-            &[
-                Event::LabelsEdit(vec![
-                    wa_core::LabelEvent::new("7").with_field("name", "Renamed"),
-                ]),
-                Event::LabelsAssociation(vec![wa_core::LabelAssociationEvent::chat(
-                    "7",
-                    "123@s.whatsapp.net",
-                    false,
-                )]),
-                Event::QuickRepliesUpdate(vec![
-                    wa_core::QuickReplyEvent::new("qr-1").with_field("count", "2"),
-                ]),
-            ],
-        )
-        .await
-        .unwrap();
-
-        let stored_label = store
-            .get(KeyNamespace::LabelEvent, "7")
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_label = wa_core::decode_stored_label_event(&stored_label).unwrap();
-        assert_eq!(stored_label.fields["name"], "Renamed");
-        assert_eq!(stored_label.fields["color"], "4");
-
-        let stored_association = store
-            .get(KeyNamespace::LabelAssociation, &association_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_association =
-            wa_core::decode_stored_label_association_event(&stored_association).unwrap();
-        assert!(!stored_association.labeled);
-
-        let stored_quick_reply = store
-            .get(KeyNamespace::QuickReplyEvent, "qr-1")
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_quick_reply =
-            wa_core::decode_stored_quick_reply_event(&stored_quick_reply).unwrap();
-        assert_eq!(stored_quick_reply.fields["shortcut"], "/hi");
-        assert_eq!(stored_quick_reply.fields["message"], "hello");
-        assert_eq!(stored_quick_reply.fields["count"], "2");
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn community_methods_use_community_iqs_and_parse_results() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let metadata_fut = client.fetch_community_metadata(&connection, "123@g.us");
-        tokio::pin!(metadata_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "w:g2");
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "get");
-                assert_eq!(test_child(&node, "query").attrs["request"], "interactive");
-                community_metadata_response(&node, "123", "Updates")
-            },
-            &mut metadata_fut,
-        )
-        .await;
-        let metadata = metadata_fut.await.unwrap();
-        assert_eq!(metadata.jid, "123@g.us");
-        assert_eq!(metadata.subject.as_deref(), Some("Updates"));
-        assert!(metadata.is_community);
-
-        let participating_fut = client.fetch_participating_communities(&connection);
-        tokio::pin!(participating_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "@g.us");
-                assert!(test_child(&node, "participating").attrs.is_empty());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("communities").with_content(vec![
-                        BinaryNode::new("community")
-                            .with_attr("id", "123")
-                            .with_attr("subject", "Updates")
-                            .with_content(vec![BinaryNode::new("parent")]),
-                    ])])
-            },
-            &mut participating_fut,
-        )
-        .await;
-        let communities = participating_fut.await.unwrap();
-        assert_eq!(communities.len(), 1);
-        assert_eq!(communities[0].jid, "123@g.us");
-
-        let create_fut = client.create_community(&connection, "Rust users", "Daily updates");
-        tokio::pin!(create_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let create = test_child(&node, "create");
-                assert_eq!(create.attrs["subject"], "Rust users");
-                let description = test_child(create, "description");
-                assert!(!description.attrs["id"].is_empty());
-                assert_eq!(
-                    test_node_text(test_child(description, "body")).as_deref(),
-                    Some("Daily updates")
-                );
-                assert_eq!(
-                    test_child(create, "parent").attrs["default_membership_approval_mode"],
-                    "request_required"
-                );
-                assert_child(create, "allow_non_admin_sub_group_creation");
-                assert_child(create, "create_general_chat");
-                community_metadata_response(&node, "456", "Rust users")
-            },
-            &mut create_fut,
-        )
-        .await;
-        assert_eq!(create_fut.await.unwrap().jid, "456@g.us");
-
-        let subgroup_fut = client.create_community_group(
-            &connection,
-            "Announcements",
-            ["111@s.whatsapp.net"],
-            "123@g.us",
-        );
-        tokio::pin!(subgroup_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "@g.us");
-                let create = test_child(&node, "create");
-                assert_eq!(create.attrs["subject"], "Announcements");
-                assert!(!create.attrs["key"].is_empty());
-                assert_eq!(test_children(create, "participant").len(), 1);
-                assert_eq!(test_child(create, "linked_parent").attrs["jid"], "123@g.us");
-                community_metadata_response(&node, "789", "Announcements")
-            },
-            &mut subgroup_fut,
-        )
-        .await;
-        assert_eq!(subgroup_fut.await.unwrap().jid, "789@g.us");
-
-        let leave_fut = client.leave_community(&connection, "123@g.us");
-        tokio::pin!(leave_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let leave = test_child(&node, "leave");
-                assert_eq!(test_child(leave, "community").attrs["id"], "123@g.us");
-                empty_result_for(&node)
-            },
-            &mut leave_fut,
-        )
-        .await;
-        leave_fut.await.unwrap();
-
-        let subject_fut = client.set_community_subject(&connection, "123@g.us", "Renamed");
-        tokio::pin!(subject_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(
-                    test_node_text(test_child(&node, "subject")).as_deref(),
-                    Some("Renamed")
-                );
-                empty_result_for(&node)
-            },
-            &mut subject_fut,
-        )
-        .await;
-        subject_fut.await.unwrap();
-
-        let description_fut =
-            client.set_community_description(&connection, "123@g.us", Some("New description"));
-        tokio::pin!(description_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "get");
-                community_metadata_response(&node, "123", "Updates")
-            },
-            &mut description_fut,
-        )
-        .await;
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                let description = test_child(&node, "description");
-                assert_eq!(description.attrs["prev"], "desc-1");
-                assert!(!description.attrs["id"].is_empty());
-                assert_eq!(
-                    test_node_text(test_child(description, "body")).as_deref(),
-                    Some("New description")
-                );
-                empty_result_for(&node)
-            },
-            &mut description_fut,
-        )
-        .await;
-        description_fut.await.unwrap();
-
-        let link_fut = client.link_community_group(&connection, "789@g.us", "123@g.us");
-        tokio::pin!(link_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                let link = test_child(test_child(&node, "links"), "link");
-                assert_eq!(link.attrs["link_type"], "sub_group");
-                assert_eq!(test_child(link, "group").attrs["jid"], "789@g.us");
-                empty_result_for(&node)
-            },
-            &mut link_fut,
-        )
-        .await;
-        link_fut.await.unwrap();
-
-        let failed_link_fut = client.link_community_group(&connection, "789@g.us", "123@g.us");
-        tokio::pin!(failed_link_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                let link = test_child(test_child(&node, "links"), "link");
-                assert_eq!(link.attrs["link_type"], "sub_group");
-                error_result_for(&node, "403", "denied")
-            },
-            &mut failed_link_fut,
-        )
-        .await;
-        assert!(failed_link_fut.await.is_err());
-
-        let linked_fut = client.fetch_community_linked_groups(&connection, "123@g.us");
-        tokio::pin!(linked_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "get");
-                assert!(test_child(&node, "sub_groups").attrs.is_empty());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("sub_groups").with_content(vec![
-                        BinaryNode::new("group")
-                            .with_attr("id", "789")
-                            .with_attr("subject", "Announcements")
-                            .with_attr("creator", "111@c.us")
-                            .with_attr("creation", "10")
-                            .with_attr("size", "4"),
-                    ])])
-            },
-            &mut linked_fut,
-        )
-        .await;
-        let linked = linked_fut.await.unwrap();
-        assert_eq!(linked[0].jid, "789@g.us");
-        assert_eq!(linked[0].owner.as_deref(), Some("111@s.whatsapp.net"));
-        assert_eq!(linked[0].size, Some(4));
-
-        let participants_fut = client.update_community_participants(
-            &connection,
-            "123@g.us",
-            GroupParticipantAction::Remove,
-            ["111@s.whatsapp.net"],
-        );
-        tokio::pin!(participants_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let remove = test_child(&node, "remove");
-                assert_eq!(remove.attrs["linked_groups"], "true");
-                assert_eq!(
-                    test_child(remove, "participant").attrs["jid"],
-                    "111@s.whatsapp.net"
-                );
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("remove").with_content(vec![
-                        BinaryNode::new("participant").with_attr("jid", "111@s.whatsapp.net"),
-                    ])])
-            },
-            &mut participants_fut,
-        )
-        .await;
-        let participants = participants_fut.await.unwrap();
-        assert_eq!(participants.action, GroupParticipantAction::Remove);
-        assert_eq!(participants.participants[0].status, 200);
-
-        let invite_fut = client.fetch_community_invite_code(&connection, "123@g.us");
-        tokio::pin!(invite_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "get");
-                assert!(test_child(&node, "invite").attrs.is_empty());
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("invite").with_attr("code", "community-code"),
-                    ])
-            },
-            &mut invite_fut,
-        )
-        .await;
-        assert_eq!(invite_fut.await.unwrap().as_deref(), Some("community-code"));
-
-        let ephemeral_fut = client.set_community_ephemeral(&connection, "123@g.us", 86400);
-        tokio::pin!(ephemeral_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(test_child(&node, "ephemeral").attrs["expiration"], "86400");
-                empty_result_for(&node)
-            },
-            &mut ephemeral_fut,
-        )
-        .await;
-        ephemeral_fut.await.unwrap();
-
-        let setting_fut =
-            client.update_community_setting(&connection, "123@g.us", GroupSettingUpdate::Locked);
-        tokio::pin!(setting_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert!(test_child(&node, "locked").attrs.is_empty());
-                empty_result_for(&node)
-            },
-            &mut setting_fut,
-        )
-        .await;
-        setting_fut.await.unwrap();
-
-        let member_add_fut = client.set_community_member_add_mode(
-            &connection,
-            "123@g.us",
-            GroupMemberAddMode::AllMembers,
-        );
-        tokio::pin!(member_add_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(
-                    test_node_text(test_child(&node, "member_add_mode")).as_deref(),
-                    Some("all_member_add")
-                );
-                empty_result_for(&node)
-            },
-            &mut member_add_fut,
-        )
-        .await;
-        member_add_fut.await.unwrap();
-
-        let approval_fut = client.set_community_join_approval_mode(
-            &connection,
-            "123@g.us",
-            GroupJoinApprovalMode::On,
-        );
-        tokio::pin!(approval_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let mode = test_child(&node, "membership_approval_mode");
-                assert_eq!(test_child(mode, "community_join").attrs["state"], "on");
-                empty_result_for(&node)
-            },
-            &mut approval_fut,
-        )
-        .await;
-        approval_fut.await.unwrap();
-
-        let unlink_fut = client.unlink_community_group(&connection, "789@g.us", "123@g.us");
-        tokio::pin!(unlink_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                let unlink = test_child(&node, "unlink");
-                assert_eq!(unlink.attrs["unlink_type"], "sub_group");
-                assert_eq!(test_child(unlink, "group").attrs["jid"], "789@g.us");
-                empty_result_for(&node)
-            },
-            &mut unlink_fut,
-        )
-        .await;
-        unlink_fut.await.unwrap();
-
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn accept_community_invite_v4_with_message_events_emits_update_and_stub() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let invite =
-            GroupInviteV4::new("123@g.us", "v4-code", 1_700_000_000, "222@s.whatsapp.net").unwrap();
-        let invite_key =
-            wa_core::MessageEventKey::new("222@s.whatsapp.net", "community-invite-msg", None);
-
-        let accept_fut = client.accept_community_invite_v4_with_message_events(
-            &connection,
-            &invite,
-            Some(invite_key.clone()),
-        );
-        tokio::pin!(accept_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["to"], "123@g.us");
-                assert_eq!(node.attrs["type"], "set");
-                let accept = test_child(&node, "accept");
-                assert_eq!(accept.attrs["code"], "v4-code");
-                assert_eq!(accept.attrs["expiration"], "1700000000");
-                assert_eq!(accept.attrs["admin"], "222@s.whatsapp.net");
-                empty_result_for(&node)
-            },
-            &mut accept_fut,
-        )
-        .await;
-        assert!(accept_fut.await.unwrap());
-
-        let batch = recv_batch_event(&mut events).await;
-        assert_eq!(batch.messages_update.len(), 1);
-        assert_eq!(batch.messages_update[0].key, invite_key);
-        assert_eq!(
-            batch.messages_update[0].fields["source"],
-            "community_invite_v4_accept"
-        );
-        assert_eq!(batch.messages_update[0].fields["invite_status"], "accepted");
-        assert_eq!(batch.messages_update[0].fields["invite_expiration"], "0");
-        assert_eq!(batch.messages_upsert.len(), 1);
-        let stub = &batch.messages_upsert[0];
-        assert_eq!(stub.key.remote_jid, "123@g.us");
-        assert_eq!(stub.key.participant.as_deref(), Some("222@s.whatsapp.net"));
-        assert_eq!(stub.fields["source"], "community_invite_v4_accept");
-        assert_eq!(stub.fields["stub_type"], "group_participant_add");
-
-        let stored_update_key = wa_core::message_event_store_key(&invite_key);
-        let stored_update = store
-            .get(KeyNamespace::MessageUpdate, &stored_update_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_update = wa_core::decode_stored_message_update(&stored_update).unwrap();
-        assert_eq!(stored_update, batch.messages_update[0]);
-
-        let stored_stub_key = wa_core::message_event_store_key(&stub.key);
-        let stored_stub = store
-            .get(KeyNamespace::MessageEvent, &stored_stub_key)
-            .await
-            .unwrap()
-            .unwrap();
-        let stored_stub = wa_core::decode_stored_message_event(&stored_stub).unwrap();
-        assert_eq!(stored_stub, *stub);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn fetch_lid_mappings_sends_query_and_persists_mappings() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store.clone()).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let mapping_fut = client.fetch_lid_mappings(&connection, ["123@s.whatsapp.net"]);
-        tokio::pin!(mapping_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                                BinaryNode::new("user")
-                                    .with_attr("jid", "123@s.whatsapp.net")
-                                    .with_content(vec![
-                                        BinaryNode::new("lid").with_attr("val", "abc@lid"),
-                                    ]),
-                            ]),
-                    ])])
-            },
-            &mut mapping_fut,
-        )
-        .await;
-
-        assert_eq!(
-            mapping_fut.await.unwrap(),
-            vec![wa_core::USyncLidMapping {
-                pn: "123@s.whatsapp.net".to_owned(),
-                lid: "abc@lid".to_owned(),
-            }]
-        );
-        let mapping_store = wa_core::LidPnMappingStore::new(store);
-        assert_eq!(
-            mapping_store
-                .lid_for_pn("123@s.whatsapp.net")
-                .await
-                .unwrap(),
-            Some("abc".to_owned())
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn fetch_device_jids_sends_query_and_excludes_own_device() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut credentials = wa_core::create_initial_credentials().unwrap();
-        credentials.registered = true;
-        credentials.account_jid = Some("123:7@s.whatsapp.net".to_owned());
-        credentials.account_lid = Some("abc@lid".to_owned());
-        wa_core::save_credentials(&store, credentials)
-            .await
-            .unwrap();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let devices_fut = client.fetch_device_jids(&connection, ["123@s.whatsapp.net"], false);
-        tokio::pin!(devices_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "usync");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
-                        BinaryNode::new("list").with_content(vec![
-                            BinaryNode::new("user")
-                                .with_attr("jid", "123@s.whatsapp.net")
-                                .with_content(vec![BinaryNode::new("devices").with_content(vec![
-                                    BinaryNode::new("device-list").with_content(vec![
-                                        BinaryNode::new("device").with_attr("id", "0"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "7")
-                                            .with_attr("key-index", "1"),
-                                        BinaryNode::new("device")
-                                            .with_attr("id", "8")
-                                            .with_attr("key-index", "2"),
-                                    ]),
-                                ])]),
-                        ]),
-                    ])])
-            },
-            &mut devices_fut,
-        )
-        .await;
-
-        assert_eq!(
-            devices_fut.await.unwrap(),
-            vec![
-                USyncDeviceJid {
-                    jid: "123@s.whatsapp.net".to_owned(),
-                    key_index: None,
-                    is_hosted: false,
-                },
-                USyncDeviceJid {
-                    jid: "123:8@s.whatsapp.net".to_owned(),
-                    key_index: Some(2),
-                    is_hosted: false,
-                },
-            ]
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn prepare_pairing_code_request_persists_state() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-
-        let request = client
-            .prepare_pairing_code_request("+1 234-567", Some("ABCDEFGH"))
-            .await
-            .unwrap();
-
-        assert_eq!(request.pairing_code, "ABCDEFGH");
-        assert_eq!(request.account_jid, "1234567@s.whatsapp.net");
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            Event::CredentialsUpdated
-        ));
-
-        let stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert_eq!(stored.pairing_code.as_deref(), Some("ABCDEFGH"));
-        assert_eq!(
-            stored.account_jid.as_deref(),
-            Some("1234567@s.whatsapp.net")
-        );
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn send_pairing_code_request_writes_encoded_node() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-
-        let request = client
-            .send_pairing_code_request(&connection, "+1 234-567", Some("ABCDEFGH"))
-            .await
-            .unwrap();
-
-        let sent_frame = sink_rx.recv().await.unwrap();
-        assert_eq!(sent_frame, encode_binary_node(&request.node).unwrap());
-
-        let sent = decode_inbound_binary_node(&sent_frame).unwrap().node;
-        assert_eq!(sent.tag, "iq");
-        assert_eq!(sent.attrs["id"], request.node.attrs["id"]);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn respond_to_pair_device_challenge_sends_ack_and_emits_qr() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-        let stanza = BinaryNode::new("iq")
-            .with_attr("id", "pair-1")
-            .with_content(vec![BinaryNode::new("pair-device").with_content(vec![
-                BinaryNode::new("ref").with_content("ref-a"),
-                BinaryNode::new("ref").with_content("ref-b"),
-            ])]);
-
-        let qr_codes = client
-            .respond_to_pair_device_challenge(&connection, &stanza)
-            .await
-            .unwrap();
-
-        let ack = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(
-            ack,
-            BinaryNode::new("iq")
-                .with_attr("to", "s.whatsapp.net")
-                .with_attr("type", "result")
-                .with_attr("id", "pair-1")
-        );
-        assert_eq!(qr_codes.len(), 2);
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            Event::Qr(qr) if qr.contains("#ref-a,")
-        ));
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            Event::Qr(qr) if qr.contains("#ref-b,")
-        ));
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn respond_to_pair_success_sends_reply_and_persists_credentials() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut client = Client::builder(store.clone()).connect().await.unwrap();
-        let credentials = client.credentials().clone();
-        let account_key = generate_key_pair();
-        let stanza = pair_success_stanza(&credentials, &account_key);
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, _stream_tx) = mock_connection();
-
-        client
-            .respond_to_pair_success(&connection, &stanza)
-            .await
-            .unwrap();
-
-        let reply = decode_inbound_binary_node(&sink_rx.recv().await.unwrap())
-            .unwrap()
-            .node;
-        assert_eq!(reply.attrs["id"], "success-1");
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            Event::CredentialsUpdated
-        ));
-
-        let stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert!(stored.registered);
-        assert_eq!(
-            stored.account_jid.as_deref(),
-            Some("12345:7@s.whatsapp.net")
-        );
-        assert_eq!(stored.account_lid.as_deref(), Some("abc@lid"));
-        assert_eq!(
-            stored.account_signature_key,
-            Some(Bytes::copy_from_slice(&account_key.public))
-        );
-        assert!(
-            stored
-                .signed_device_identity
-                .as_ref()
-                .is_some_and(|identity| !identity.is_empty())
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn query_available_pre_key_count_sends_count_iq() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let count_fut = client.query_available_pre_key_count(&connection);
-        tokio::pin!(count_fut);
-
-        let sent_frame = tokio::select! {
-            result = &mut count_fut => panic!("count query completed before the mock server response: {result:?}"),
-            sent = sink_rx.recv() => sent.unwrap(),
-        };
-        let sent = decode_inbound_binary_node(&sent_frame).unwrap().node;
-        assert_eq!(sent.attrs["xmlns"], "encrypt");
-        assert_eq!(sent.attrs["type"], "get");
-        assert_eq!(sent.attrs["to"], wa_core::SERVER_JID);
-        let tag = sent.attrs["id"].clone();
-        stream_tx
-            .send(InboundFrame::new(
-                encode_binary_node(
-                    &BinaryNode::new("iq")
-                        .with_attr("id", tag)
-                        .with_attr("type", "result")
-                        .with_content(vec![BinaryNode::new("count").with_attr("value", "7")]),
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(count_fut.await.unwrap(), 7);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn validates_key_bundle_digest_as_typed_result() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let valid_fut = client.validate_key_bundle_digest(&connection);
-        tokio::pin!(valid_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["xmlns"], "encrypt");
-                assert_eq!(node.attrs["type"], "get");
-                assert_eq!(node.attrs["to"], wa_core::SERVER_JID);
-                assert_child(&node, "digest");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("digest")])
-            },
-            &mut valid_fut,
-        )
-        .await;
-        assert!(valid_fut.await.unwrap());
-
-        let missing_fut = client.validate_key_bundle_digest(&connection);
-        tokio::pin!(missing_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_child(&node, "digest");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut missing_fut,
-        )
-        .await;
-        assert!(!missing_fut.await.unwrap());
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn upload_pre_keys_sends_query_and_persists_keys() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let upload = {
-            let upload_fut = client.upload_pre_keys(&connection, 3);
-            tokio::pin!(upload_fut);
-
-            let sent_frame = tokio::select! {
-                result = &mut upload_fut => panic!("pre-key upload completed before the mock server response: {result:?}"),
-                sent = sink_rx.recv() => sent.unwrap(),
-            };
-            let sent = decode_inbound_binary_node(&sent_frame).unwrap().node;
-            assert_eq!(sent.attrs["xmlns"], "encrypt");
-            assert_eq!(sent.attrs["type"], "set");
-            assert_eq!(sent.attrs["to"], wa_core::SERVER_JID);
-            let tag = sent.attrs["id"].clone();
-            stream_tx
-                .send(InboundFrame::new(
-                    encode_binary_node(
-                        &BinaryNode::new("iq")
-                            .with_attr("id", tag)
-                            .with_attr("type", "result"),
-                    )
-                    .unwrap(),
-                ))
-                .await
-                .unwrap();
-
-            upload_fut.await.unwrap()
-        };
-
-        assert_eq!(upload.pre_key_ids, vec![1, 2, 3]);
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            Event::CredentialsUpdated
-        ));
-        let stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert_eq!(stored.next_pre_key_id, 4);
-        assert_eq!(stored.first_unuploaded_pre_key_id, 4);
-        for key_id in 1..=3 {
-            assert!(
-                store
-                    .get(KeyNamespace::PreKey, &key_id.to_string())
-                    .await
-                    .unwrap()
-                    .is_some()
-            );
-        }
-
-        {
-            let failed_upload_fut = client.upload_pre_keys(&connection, 1);
-            tokio::pin!(failed_upload_fut);
-            respond_to_next_query(
-                &mut sink_rx,
-                &stream_tx,
-                |node| {
-                    assert_eq!(node.attrs["xmlns"], "encrypt");
-                    assert_eq!(node.attrs["type"], "set");
-                    assert_child(&node, "list");
-                    error_result_for(&node, "500", "upload failed")
-                },
-                &mut failed_upload_fut,
-            )
-            .await;
-            let err = failed_upload_fut.await.unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("pre-key upload failed (500): upload failed")
-            );
-        }
-        let failed_stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert_eq!(failed_stored.next_pre_key_id, 5);
-        assert_eq!(failed_stored.first_unuploaded_pre_key_id, 4);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn rotate_signed_pre_key_sends_query_then_persists_rotation() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut client = Client::builder(store.clone()).connect().await.unwrap();
-        let original_key_id = client.credentials().signed_pre_key.key_id;
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-
-        let rotated = {
-            let rotate_fut = client.rotate_signed_pre_key(&connection);
-            tokio::pin!(rotate_fut);
-
-            let sent_frame = tokio::select! {
-                result = &mut rotate_fut => panic!("signed pre-key rotation completed before the mock server response: {result:?}"),
-                sent = sink_rx.recv() => sent.unwrap(),
-            };
-            let sent = decode_inbound_binary_node(&sent_frame).unwrap().node;
-            assert_eq!(sent.attrs["xmlns"], "encrypt");
-            assert_eq!(sent.attrs["type"], "set");
-            assert_eq!(sent.attrs["to"], wa_core::SERVER_JID);
-            let tag = sent.attrs["id"].clone();
-            stream_tx
-                .send(InboundFrame::new(
-                    encode_binary_node(
-                        &BinaryNode::new("iq")
-                            .with_attr("id", tag)
-                            .with_attr("type", "result"),
-                    )
-                    .unwrap(),
-                ))
-                .await
-                .unwrap();
-
-            rotate_fut.await.unwrap()
-        };
-
-        assert_eq!(rotated.key_id, original_key_id + 1);
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            Event::CredentialsUpdated
-        ));
-        let stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert_eq!(stored.signed_pre_key, rotated);
-
-        {
-            let failed_rotate_fut = client.rotate_signed_pre_key(&connection);
-            tokio::pin!(failed_rotate_fut);
-            respond_to_next_query(
-                &mut sink_rx,
-                &stream_tx,
-                |node| {
-                    assert_eq!(node.attrs["xmlns"], "encrypt");
-                    assert_eq!(node.attrs["type"], "set");
-                    assert_child(&node, "rotate");
-                    error_result_for(&node, "409", "rotation rejected")
-                },
-                &mut failed_rotate_fut,
-            )
-            .await;
-            let err = failed_rotate_fut.await.unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("signed pre-key rotation failed (409): rotation rejected")
-            );
-        }
-        let stored_after_error = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert_eq!(stored_after_error.signed_pre_key, rotated);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn post_auth_maintenance_uploads_minimum_when_digest_valid_but_server_count_low() {
-        let store = wa_store::MemoryAuthStore::new();
-        let mut client = Client::builder(store.clone()).connect().await.unwrap();
-        let mut events = client.subscribe();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let maintenance_fut = client.run_post_auth_key_maintenance(&connection);
-        tokio::pin!(maintenance_fut);
-
-        let digest_tag = respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_child(&node, "digest");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("digest")])
-            },
-            &mut maintenance_fut,
-        )
-        .await;
-        assert!(digest_tag.starts_with("q-"));
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_child(&node, "count");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![BinaryNode::new("count").with_attr("value", "1")])
-            },
-            &mut maintenance_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_child(&node, "list");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut maintenance_fut,
-        )
-        .await;
-
-        let maintenance = maintenance_fut.await.unwrap();
-        assert!(maintenance.digest_validated);
-        assert_eq!(
-            maintenance.pre_key_upload.unwrap().pre_key_ids,
-            vec![1, 2, 3, 4, 5]
-        );
-        assert!(maintenance.signed_pre_key_rotation.is_none());
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            Event::CredentialsUpdated
-        ));
-        let stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert_eq!(stored.next_pre_key_id, 6);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn post_auth_maintenance_uploads_initial_keys_after_missing_digest_and_rotates_when_enabled()
-     {
-        let store = wa_store::MemoryAuthStore::new();
-        let config = ClientConfig {
-            rotate_signed_pre_key_on_connect: true,
-            ..ClientConfig::default()
-        };
-        let mut client = Client::builder(store.clone())
-            .config(config)
-            .connect()
-            .await
-            .unwrap();
-        let original_signed_pre_key_id = client.credentials().signed_pre_key.key_id;
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let maintenance_fut = client.run_post_auth_key_maintenance(&connection);
-        tokio::pin!(maintenance_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_child(&node, "digest");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut maintenance_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_child(&node, "list");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut maintenance_fut,
-        )
-        .await;
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_child(&node, "rotate");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-            },
-            &mut maintenance_fut,
-        )
-        .await;
-
-        let maintenance = maintenance_fut.await.unwrap();
-        assert!(!maintenance.digest_validated);
-        assert_eq!(
-            maintenance.pre_key_upload.unwrap().pre_key_ids.len(),
-            wa_core::INITIAL_PRE_KEY_COUNT
-        );
-        assert_eq!(
-            maintenance.signed_pre_key_rotation.unwrap().key_id,
-            original_signed_pre_key_id + 1
-        );
-
-        let stored = wa_core::load_credentials(&store).await.unwrap().unwrap();
-        assert_eq!(
-            stored.next_pre_key_id,
-            wa_core::INITIAL_PRE_KEY_COUNT as u32 + 1
-        );
-        assert_eq!(stored.signed_pre_key.key_id, original_signed_pre_key_id + 1);
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn history_sync_facade_downloads_and_processes_payload() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let history = wa_core::HistorySync {
-            sync_type: wa_core::HistorySyncType::InitialBootstrap as i32,
-            conversations: vec![wa_proto::proto::Conversation {
-                id: "123@s.whatsapp.net".to_owned(),
-                display_name: Some("Alice".to_owned()),
-                messages: vec![wa_proto::proto::HistorySyncMsg {
-                    msg_order_id: Some(1),
-                    message: Some(wa_proto::proto::WebMessageInfo {
-                        key: Some(wa_proto::proto::MessageKey {
-                            remote_jid: Some("123@s.whatsapp.net".to_owned()),
-                            from_me: Some(false),
-                            id: Some("msg-1".to_owned()),
-                            participant: None,
-                        }),
-                        message_timestamp: Some(1_700_000_000),
-                        ..Default::default()
-                    }),
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&history.encode_to_vec()).unwrap();
-        let compressed = Bytes::from(encoder.finish().unwrap());
-        let encrypted = wa_crypto::encrypt_media_bytes_with_key(
-            &compressed,
-            wa_crypto::MediaKind::HistorySync,
-            &[5u8; 32],
-        )
-        .unwrap();
-        let notification = wa_core::HistorySyncNotification {
-            file_sha256: Some(encrypted.file_sha256.clone()),
-            file_length: Some(encrypted.file_length),
-            media_key: Some(Bytes::copy_from_slice(encrypted.media_key.expose())),
-            file_enc_sha256: Some(encrypted.file_enc_sha256.clone()),
-            direct_path: Some("/history/sync".to_owned()),
-            ..Default::default()
-        };
-        let transport = HistoryDownloadTransport::default();
-        transport.add_download(
-            "https://history.test/history/sync",
-            encrypted.ciphertext_with_mac.clone(),
-        );
-        let transfer = wa_core::MediaTransfer::new(transport);
-
-        let processed = client
-            .download_and_process_history_sync(
-                &transfer,
-                &notification,
-                Some("history.test"),
-                wa_core::HistorySyncDecodeConfig::default(),
-                wa_core::HistorySyncProcessConfig::default().latest(true),
-            )
-            .await
-            .unwrap();
-
-        let history = processed.batch.history.unwrap();
-        assert!(history.is_latest);
-        assert_eq!(history.chats.len(), 1);
-        assert_eq!(history.messages.len(), 1);
-        assert_eq!(history.messages[0].key.id, "msg-1");
-    }
-
-    #[cfg(feature = "memory-store")]
-    #[tokio::test]
-    async fn fetch_media_connection_info_sends_query_and_parses_hosts() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let (connection, mut sink_rx, stream_tx) = mock_connection();
-        let media_fut = client.fetch_media_connection_info(&connection);
-        tokio::pin!(media_fut);
-
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(node.attrs["xmlns"], "w:m");
-                assert_child(&node, "media_conn");
-                BinaryNode::new("iq")
-                    .with_attr("id", node.attrs["id"].clone())
-                    .with_attr("type", "result")
-                    .with_content(vec![
-                        BinaryNode::new("media_conn")
-                            .with_attr("auth", "auth-token")
-                            .with_attr("ttl", "90")
-                            .with_content(vec![
-                                BinaryNode::new("host")
-                                    .with_attr("hostname", "media.example")
-                                    .with_attr("maxContentLengthBytes", "4096"),
-                            ]),
-                    ])
-            },
-            &mut media_fut,
-        )
-        .await;
-
-        let info = media_fut.await.unwrap();
-        assert_eq!(info.auth, "auth-token");
-        assert_eq!(info.ttl_seconds, 90);
-        assert_eq!(info.hosts[0].hostname, "media.example");
-        assert_eq!(info.hosts[0].max_content_length_bytes, Some(4096));
-
-        let failed_media_fut = client.fetch_media_connection_info(&connection);
-        tokio::pin!(failed_media_fut);
-        respond_to_next_query(
-            &mut sink_rx,
-            &stream_tx,
-            |node| {
-                assert_eq!(node.attrs["type"], "set");
-                assert_eq!(node.attrs["xmlns"], "w:m");
-                assert_child(&node, "media_conn");
-                error_result_for(&node, "401", "media denied")
-            },
-            &mut failed_media_fut,
-        )
-        .await;
-
-        let err = failed_media_fut.await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("media connection query failed (401): media denied")
-        );
-        connection.close().await.unwrap();
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn upload_media_bytes_cached_reuses_cached_descriptor() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let transport = ClientMediaUploadTransport::default();
-        let transfer = wa_core::MediaTransfer::new(transport.clone());
-        let cache = wa_core::MemoryMediaUploadCache::default();
-
-        let first = client
-            .upload_media_bytes_cached(
-                &transfer,
-                b"client cached media",
-                wa_core::MediaKind::Image,
-                &cache,
-            )
-            .await
-            .unwrap();
-        let second = client
-            .upload_media_bytes_cached(
-                &transfer,
-                b"client cached media",
-                wa_core::MediaKind::Image,
-                &cache,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(first, second);
-        assert_eq!(transport.uploads.lock().unwrap().len(), 1);
-        assert_eq!(cache.len().unwrap(), 1);
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn business_media_upload_facade_uses_business_media_kinds() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let transport = ClientMediaUploadTransport::default();
-        let transfer = wa_core::MediaTransfer::new(transport.clone());
-        let cache = wa_core::MemoryMediaUploadCache::default();
-        let input = test_client_media_path("business-image");
-        tokio::fs::write(&input, b"product file image")
-            .await
-            .unwrap();
-
-        let product = client
-            .upload_business_product_image_bytes_cached(
-                &transfer,
-                b"product image",
-                Some("media.test"),
-                &cache,
-            )
-            .await
-            .unwrap();
-        let product_again = client
-            .upload_business_product_image_bytes_cached(
-                &transfer,
-                b"product image",
-                Some("media.test"),
-                &cache,
-            )
-            .await
-            .unwrap();
-        assert_eq!(product, product_again);
-        assert_eq!(product.url, "https://media.test/client/upload/0");
-
-        let product_file = client
-            .upload_business_product_image_file_cached(
-                &transfer,
-                &input,
-                Some("media.test"),
-                &cache,
-            )
-            .await
-            .unwrap();
-        let product_file_again = client
-            .upload_business_product_image_file_cached(
-                &transfer,
-                &input,
-                Some("media.test"),
-                &cache,
-            )
-            .await
-            .unwrap();
-        assert_eq!(product_file, product_file_again);
-        assert_eq!(product_file.url, "https://media.test/client/upload/1");
-
-        let batch_bytes = client
-            .upload_business_product_images_bytes(
-                &transfer,
-                vec![b"batch image a".as_slice(), b"batch image b".as_slice()],
-                Some("media.test"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(batch_bytes.len(), 2);
-        assert_eq!(batch_bytes[0].url, "https://media.test/client/upload/2");
-        assert_eq!(batch_bytes[1].url, "https://media.test/client/upload/3");
-
-        let batch_files = client
-            .upload_business_product_image_files(&transfer, [&input, &input], Some("media.test"))
-            .await
-            .unwrap();
-        assert_eq!(batch_files.len(), 2);
-        assert_eq!(batch_files[0].url, "https://media.test/client/upload/4");
-        assert_eq!(batch_files[1].url, "https://media.test/client/upload/5");
-
-        let cover = client
-            .upload_business_cover_photo_bytes(&transfer, b"cover image")
-            .await
-            .unwrap();
-        assert_eq!(cover.id, "cover-6");
-        assert_eq!(cover.token, "token-6");
-        assert_eq!(cover.timestamp, 1_700_000_006);
-
-        let cover_file = client
-            .upload_business_cover_photo_file(&transfer, &input)
-            .await
-            .unwrap();
-        assert_eq!(cover_file.id, "cover-7");
-        assert_eq!(cover_file.token, "token-7");
-        assert_eq!(cover_file.timestamp, 1_700_000_007);
-
-        {
-            let uploads = transport.uploads.lock().unwrap();
-            assert_eq!(uploads.len(), 8);
-            for upload in uploads.iter().take(6) {
-                assert_eq!(upload.kind, wa_core::MediaKind::ProductCatalogImage);
-            }
-            assert_eq!(uploads[6].kind, wa_core::MediaKind::BusinessCoverPhoto);
-            assert_eq!(uploads[7].kind, wa_core::MediaKind::BusinessCoverPhoto);
-        }
-
-        let _ = tokio::fs::remove_file(&input).await;
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn media_file_facade_uploads_caches_and_downloads_files() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let transport = ClientMediaUploadTransport::default();
-        let transfer = wa_core::MediaTransfer::new(transport.clone());
-        let cache = wa_core::MemoryMediaUploadCache::default();
-        let input = test_client_media_path("input");
-        let output = test_client_media_path("output");
-        tokio::fs::write(&input, b"client file media")
-            .await
-            .unwrap();
-
-        let first = client
-            .upload_media_file_cached(&transfer, &input, wa_core::MediaKind::Image, &cache)
-            .await
-            .unwrap();
-        let second = client
-            .upload_media_file_cached(&transfer, &input, wa_core::MediaKind::Image, &cache)
-            .await
-            .unwrap();
-        assert_eq!(first, second);
-        assert_eq!(transport.uploads.lock().unwrap().len(), 1);
-
-        let written = client
-            .download_media_to_file(
-                &transfer,
-                &first,
-                wa_core::MediaKind::Image,
-                Some("media.test"),
-                &output,
-            )
-            .await
-            .unwrap();
-        assert_eq!(written, 17);
-        assert_eq!(
-            tokio::fs::read(&output).await.unwrap(),
-            b"client file media"
-        );
-
-        let _ = tokio::fs::remove_file(&input).await;
-        let _ = tokio::fs::remove_file(&output).await;
-    }
-
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
-    #[tokio::test]
-    async fn media_retry_facade_refreshes_descriptor_and_downloads() {
-        let store = wa_store::MemoryAuthStore::new();
-        let client = Client::builder(store).connect().await.unwrap();
-        let media_key = [8u8; 32];
-        let encrypted = wa_crypto::encrypt_media_bytes_with_key(
-            b"client retried media",
-            wa_core::MediaKind::Image,
-            &media_key,
-        )
-        .unwrap();
-        let media = wa_core::uploaded_media_from_encrypted(
-            &encrypted,
-            wa_core::UploadedMediaLocation::new().with_direct_path("/client/old"),
-        )
-        .unwrap();
-        let notification = wa_proto::proto::MediaRetryNotification {
-            stanza_id: Some("msg-1".to_owned()),
-            direct_path: Some("/client/new".to_owned()),
-            result: Some(wa_proto::proto::media_retry_notification::ResultType::Success as i32),
-            message_secret: None,
-        };
-        let payload = wa_crypto::encrypt_media_retry_notification_with_iv(
-            &notification,
-            &media_key,
-            "msg-1",
-            &[4u8; 12],
-        )
-        .unwrap();
-        let key = wa_core::MessageEventKey::new("123@s.whatsapp.net", "msg-1", None);
-        let retry = wa_core::MediaRetryEvent::new(key.clone(), false)
-            .with_encrypted_payload(payload.ciphertext, payload.iv);
-
-        let application = client.apply_media_retry_event(&retry, &media).unwrap();
-        assert_eq!(
-            application.media.direct_path.as_deref(),
-            Some("/client/new")
-        );
-
-        let transport = ClientMediaUploadTransport::default();
-        transport.downloads.lock().unwrap().insert(
-            "https://media.test/client/new".to_owned(),
-            encrypted.ciphertext_with_mac.clone(),
-        );
-        let transfer = wa_core::MediaTransfer::new(transport);
-        let download = client
-            .download_media_bytes_after_retry(
-                &transfer,
-                &media,
-                wa_core::MediaKind::Image,
-                &retry,
-                Some("media.test"),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(download.plaintext, b"client retried media");
-        assert_eq!(
-            download.application.media.direct_path.as_deref(),
-            Some("/client/new")
-        );
-
-        client
-            .register_pending_media_retry(
-                key.clone(),
-                wa_core::PendingMediaRetry::new(media.clone(), wa_core::MediaKind::Image)
-                    .with_fallback_host("media.test"),
-            )
-            .unwrap();
-        let coordinated = client
-            .download_pending_media_after_retry(&transfer, &retry)
-            .await
-            .unwrap();
-        assert_eq!(coordinated.plaintext, b"client retried media");
-        assert!(
-            client
-                .media_retry_coordinator()
-                .pending(&key)
-                .unwrap()
-                .is_none()
-        );
-
-        client
-            .register_pending_media_retry(
-                key.clone(),
-                wa_core::PendingMediaRetry::new(media, wa_core::MediaKind::Image)
-                    .with_fallback_host("media.test"),
-            )
-            .unwrap();
-        let batch = wa_core::EventBatch {
-            media_retry: vec![retry],
-            ..wa_core::EventBatch::default()
-        };
-        let outcome = client
-            .handle_media_retry_batch(&transfer, &batch)
-            .await
-            .unwrap();
-        assert_eq!(outcome.downloads.len(), 1);
-        assert_eq!(outcome.downloads[0].plaintext, b"client retried media");
-        assert!(outcome.errors.is_empty());
-        assert_eq!(outcome.ignored_without_pending, 0);
-        assert!(
-            client
-                .media_retry_coordinator()
-                .pending(&key)
-                .unwrap()
-                .is_none()
-        );
+    #[cfg(feature = "wat8")]
+    #[allow(unused_imports, dead_code, clippy::all)]
+    mod chunk_8 {
+        use super::*;
+        include!("tests_chunk_8.rs");
     }
 
     fn mock_connection() -> (
@@ -15196,14 +13510,14 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    #[cfg(feature = "noise")]
     #[derive(Clone, Default)]
     struct ClientMediaUploadTransport {
         uploads: Arc<Mutex<Vec<wa_core::MediaUploadRequest>>>,
         downloads: Arc<Mutex<BTreeMap<String, Bytes>>>,
     }
 
-    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    #[cfg(feature = "noise")]
     #[async_trait]
     impl wa_core::MediaTransport for ClientMediaUploadTransport {
         async fn upload_media(
@@ -15247,6 +13561,29 @@ mod tests {
         std::env::temp_dir().join(format!("wa-client-media-{label}-{suffix}"))
     }
 
+    #[cfg(all(feature = "sqlite-store", feature = "noise"))]
+    fn test_client_sqlite_path(label: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("wa-client-sqlite-{label}-{suffix}"))
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise", feature = "image", unix))]
+    fn sample_client_png() -> Bytes {
+        Bytes::from_static(&[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0,
+            5, 0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ])
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise", feature = "image", unix))]
+    fn shell_quote(path: &std::path::Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
     fn mock_connection_with_events(
         events: EventHub,
     ) -> (
@@ -15285,6 +13622,22 @@ mod tests {
         panic!("expected batch event");
     }
 
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    async fn recv_media_retry_processed_event(
+        events: &mut tokio::sync::broadcast::Receiver<Event>,
+    ) -> wa_core::MediaRetryBatchOutcome {
+        for _ in 0..8 {
+            let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let Event::MediaRetryProcessed(outcome) = event {
+                return outcome;
+            }
+        }
+        panic!("expected media retry processed event");
+    }
+
     async fn recv_node_event(events: &mut tokio::sync::broadcast::Receiver<Event>) -> BinaryNode {
         for _ in 0..8 {
             let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
@@ -15311,6 +13664,21 @@ mod tests {
             }
         }
         panic!("expected LID mapping event");
+    }
+
+    async fn recv_default_disappearing_mode_event(
+        events: &mut tokio::sync::broadcast::Receiver<Event>,
+    ) -> wa_core::DefaultDisappearingMode {
+        for _ in 0..8 {
+            let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let Event::DefaultDisappearingModeUpdate(mode) = event {
+                return mode;
+            }
+        }
+        panic!("expected default disappearing mode event");
     }
 
     async fn recv_groups_update_event(
@@ -15355,7 +13723,57 @@ mod tests {
     }
 
     #[cfg(all(feature = "memory-store", feature = "noise"))]
-    async fn recv_app_state_upload<Fut>(
+    async fn respond_to_single_remote_device_query<Fut>(
+        sink_rx: &mut mpsc::Receiver<Bytes>,
+        stream_tx: &mpsc::Sender<InboundFrame>,
+        pending: &mut Fut,
+    ) -> String
+    where
+        Fut: Future + Unpin,
+        Fut::Output: std::fmt::Debug,
+    {
+        respond_to_next_query(
+            sink_rx,
+            stream_tx,
+            |node| {
+                assert_eq!(node.attrs["xmlns"], "usync");
+                assert_usync_query_protocol(&node, "devices");
+                assert_eq!(
+                    usync_query_user_jids(&node),
+                    vec![
+                        "123@s.whatsapp.net".to_owned(),
+                        "999:7@s.whatsapp.net".to_owned(),
+                    ]
+                );
+                BinaryNode::new("iq")
+                    .with_attr("id", node.attrs["id"].clone())
+                    .with_attr("type", "result")
+                    .with_content(vec![BinaryNode::new("usync").with_content(vec![
+                        BinaryNode::new("list").with_content(vec![
+                            BinaryNode::new("user")
+                                .with_attr("jid", "123@s.whatsapp.net")
+                                .with_content(vec![BinaryNode::new("devices").with_content(
+                                    vec![BinaryNode::new("device-list").with_content(vec![
+                                        BinaryNode::new("device").with_attr("id", "0"),
+                                    ])],
+                                )]),
+                            BinaryNode::new("user")
+                                .with_attr("jid", "999@s.whatsapp.net")
+                                .with_content(vec![BinaryNode::new("devices").with_content(
+                                    vec![BinaryNode::new("device-list").with_content(vec![
+                                        BinaryNode::new("device").with_attr("id", "7"),
+                                    ])],
+                                )]),
+                        ]),
+                    ])])
+            },
+            pending,
+        )
+        .await
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    async fn recv_app_state_upload<Fut, T>(
         sink_rx: &mut mpsc::Receiver<Bytes>,
         pending: &mut Fut,
         label: &str,
@@ -15363,7 +13781,7 @@ mod tests {
         expected_previous_version: u64,
     ) -> (BinaryNode, wa_proto::proto::SyncdPatch)
     where
-        Fut: Future<Output = CoreResult<AppStatePatchBundle>> + Unpin,
+        Fut: Future<Output = CoreResult<T>> + Unpin,
     {
         let sent_frame = tokio::select! {
             _ = pending => panic!("{label} app-state mutation completed before mock response"),
@@ -15456,6 +13874,7 @@ mod tests {
                     .with_attr("subject", subject)
                     .with_content(vec![
                         BinaryNode::new("parent"),
+                        BinaryNode::new("addressing_mode").with_content("lid"),
                         BinaryNode::new("description")
                             .with_attr("id", "desc-1")
                             .with_content(vec![BinaryNode::new("body").with_content("Daily")]),
@@ -15592,6 +14011,60 @@ mod tests {
             .collect()
     }
 
+    fn group_retry_primary_device_response(query: &BinaryNode) -> BinaryNode {
+        BinaryNode::new("iq")
+            .with_attr("id", query.attrs["id"].clone())
+            .with_attr("type", "result")
+            .with_content(vec![BinaryNode::new("usync").with_content(vec![
+                BinaryNode::new("list").with_content(vec![
+                    BinaryNode::new("user")
+                        .with_attr("jid", "123@s.whatsapp.net")
+                        .with_content(vec![BinaryNode::new("devices").with_content(vec![
+                            BinaryNode::new("device-list").with_content(vec![
+                                BinaryNode::new("device").with_attr("id", "0"),
+                                BinaryNode::new("device")
+                                    .with_attr("id", "1")
+                                    .with_attr("key-index", "11"),
+                            ]),
+                        ])]),
+                    BinaryNode::new("user")
+                        .with_attr("jid", "999@s.whatsapp.net")
+                        .with_content(vec![BinaryNode::new("devices").with_content(vec![
+                            BinaryNode::new("device").with_attr("id", "7"),
+                        ])]),
+                ]),
+            ])])
+    }
+
+    fn retry_all_devices_with_own_linked_device_response(query: &BinaryNode) -> BinaryNode {
+        BinaryNode::new("iq")
+            .with_attr("id", query.attrs["id"].clone())
+            .with_attr("type", "result")
+            .with_content(vec![BinaryNode::new("usync").with_content(vec![
+                BinaryNode::new("list").with_content(vec![
+                    BinaryNode::new("user")
+                        .with_attr("jid", "123@s.whatsapp.net")
+                        .with_content(vec![BinaryNode::new("devices").with_content(vec![
+                            BinaryNode::new("device-list").with_content(vec![
+                                BinaryNode::new("device")
+                                    .with_attr("id", "1")
+                                    .with_attr("key-index", "11"),
+                            ]),
+                        ])]),
+                    BinaryNode::new("user")
+                        .with_attr("jid", "999@s.whatsapp.net")
+                        .with_content(vec![BinaryNode::new("devices").with_content(vec![
+                            BinaryNode::new("device-list").with_content(vec![
+                                BinaryNode::new("device").with_attr("id", "7"),
+                                BinaryNode::new("device")
+                                    .with_attr("id", "8")
+                                    .with_attr("key-index", "8"),
+                            ]),
+                        ])]),
+                ]),
+            ])])
+    }
+
     fn encrypt_key_query_user_attrs(node: &BinaryNode) -> Vec<(String, Option<String>)> {
         let Some(wa_binary::BinaryNodeContent::Nodes(iq_children)) = &node.content else {
             panic!("encrypt IQ has no child list");
@@ -15637,6 +14110,452 @@ mod tests {
             ])
     }
 
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn valid_session_response_for_query(
+        query: &BinaryNode,
+        remote_credentials: &AuthCredentials,
+        remote_one_time_pre_key: &wa_crypto::KeyPair,
+        remote_one_time_pre_key_id: u32,
+    ) -> BinaryNode {
+        let users = encrypt_key_query_user_attrs(query)
+            .into_iter()
+            .map(|(jid, _)| {
+                valid_e2e_session_user_node(
+                    &jid,
+                    remote_credentials,
+                    remote_one_time_pre_key,
+                    remote_one_time_pre_key_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        BinaryNode::new("iq")
+            .with_attr("id", query.attrs["id"].clone())
+            .with_attr("type", "result")
+            .with_content(vec![BinaryNode::new("list").with_content(users)])
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn valid_e2e_session_user_node(
+        jid: &str,
+        remote_credentials: &AuthCredentials,
+        remote_one_time_pre_key: &wa_crypto::KeyPair,
+        remote_one_time_pre_key_id: u32,
+    ) -> BinaryNode {
+        BinaryNode::new("user")
+            .with_attr("jid", jid)
+            .with_content(vec![
+                BinaryNode::new("registration").with_content(
+                    wa_core::encode_big_endian(remote_credentials.registration_id, 4).unwrap(),
+                ),
+                BinaryNode::new("identity").with_content(Bytes::copy_from_slice(
+                    &remote_credentials.signed_identity_key.public,
+                )),
+                BinaryNode::new("skey").with_content(vec![
+                    BinaryNode::new("id").with_content(
+                        wa_core::encode_big_endian(remote_credentials.signed_pre_key.key_id, 3)
+                            .unwrap(),
+                    ),
+                    BinaryNode::new("value").with_content(Bytes::copy_from_slice(
+                        &remote_credentials.signed_pre_key.key_pair.public,
+                    )),
+                    BinaryNode::new("signature")
+                        .with_content(remote_credentials.signed_pre_key.signature.clone()),
+                ]),
+                BinaryNode::new("key").with_content(vec![
+                    BinaryNode::new("id").with_content(
+                        wa_core::encode_big_endian(remote_one_time_pre_key_id, 3).unwrap(),
+                    ),
+                    BinaryNode::new("value")
+                        .with_content(Bytes::copy_from_slice(&remote_one_time_pre_key.public)),
+                ]),
+            ])
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn test_signal_local_key_material(
+        credentials: &AuthCredentials,
+    ) -> wa_core::SignalLocalKeyMaterial {
+        wa_core::SignalLocalKeyMaterial {
+            registration_id: credentials.registration_id,
+            identity: wa_core::SignalLocalIdentity {
+                public_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
+                    &credentials.signed_identity_key.public,
+                )),
+                key_pair: credentials.signed_identity_key.clone(),
+            },
+            signed_pre_key: wa_core::SignalLocalSignedPreKey {
+                key_id: credentials.signed_pre_key.key_id,
+                public_key: Bytes::copy_from_slice(&prefixed_signal_public_key(
+                    &credentials.signed_pre_key.key_pair.public,
+                )),
+                key_pair: credentials.signed_pre_key.key_pair.clone(),
+                signature: credentials.signed_pre_key.signature.clone(),
+            },
+        }
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn signal_provider_session_with_receiving_chain_without_remote_ratchet(
+        valid_session: &Bytes,
+    ) -> Bytes {
+        // Decode/mutate/re-encode rather than splicing raw bytes: the provider
+        // session wire layout (previous_counter, trailing inbound_base_key) is an
+        // implementation detail of wa-core's encoder, so operate on the typed record.
+        let mut decoded = wa_core::decode_signal_provider_session_record(valid_session)
+            .expect("valid provider session decodes");
+        assert!(
+            decoded.remote_ratchet_key.is_some(),
+            "valid provider session has a remote ratchet key"
+        );
+        assert!(
+            decoded.receiving_chain.is_some(),
+            "valid provider session has a receiving chain"
+        );
+        assert!(
+            decoded.message_keys.is_empty(),
+            "test session should not include skipped keys"
+        );
+        decoded.remote_ratchet_key = None;
+        test_encode_provider_session_record_unchecked(&decoded)
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn signal_provider_session_with_skipped_key_without_remote_ratchet(
+        valid_without_remote_session: &Bytes,
+        skipped_ratchet_key: &Bytes,
+        skipped_counter: u32,
+        skipped_message_keys: &wa_core::SignalMessageKeyMaterial,
+    ) -> Bytes {
+        let mut decoded =
+            wa_core::decode_signal_provider_session_record(valid_without_remote_session)
+                .expect("valid provider session decodes");
+        assert!(
+            decoded.receiving_chain.is_none(),
+            "test session should not have a receiving chain"
+        );
+        assert!(
+            decoded.remote_ratchet_key.is_none(),
+            "test session should not have a remote ratchet key"
+        );
+        assert!(
+            decoded.message_keys.is_empty(),
+            "test session should not include skipped keys"
+        );
+        decoded.message_keys = vec![wa_core::signal::SignalProviderStoredMessageKey {
+            ratchet_key: skipped_ratchet_key.clone(),
+            counter: skipped_counter,
+            message_keys: skipped_message_keys.clone(),
+        }];
+        test_encode_provider_session_record_unchecked(&decoded)
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn signal_provider_session_with_remote_ratchet_without_receiving_chain(
+        valid_without_remote_session: &Bytes,
+        remote_ratchet_key: &Bytes,
+    ) -> Bytes {
+        let decoded = wa_core::decode_signal_provider_session_record(valid_without_remote_session)
+            .expect("valid provider session decodes");
+        assert!(
+            decoded.receiving_chain.is_none(),
+            "test session should not have a receiving chain"
+        );
+        assert!(
+            decoded.remote_ratchet_key.is_none(),
+            "test session should not have a remote ratchet key"
+        );
+        assert!(
+            decoded.message_keys.is_empty(),
+            "test session should not include skipped keys"
+        );
+        let mut decoded = decoded;
+        decoded.remote_ratchet_key = Some(remote_ratchet_key.clone());
+        test_encode_provider_session_record_unchecked(&decoded)
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn signal_provider_session_with_uninitialized_sending_chain_without_remote_ratchet(
+        valid_without_remote_session: &Bytes,
+    ) -> Bytes {
+        let decoded = wa_core::decode_signal_provider_session_record(valid_without_remote_session)
+            .expect("valid provider session decodes");
+        assert!(
+            decoded.receiving_chain.is_none(),
+            "test session should not have a receiving chain"
+        );
+        assert!(
+            decoded.remote_ratchet_key.is_none(),
+            "test session should not have a remote ratchet key"
+        );
+        assert!(
+            decoded.message_keys.is_empty(),
+            "test session should not include skipped keys"
+        );
+        assert_ne!(decoded.sending_chain.counter, 0);
+        let mut decoded = decoded;
+        let sending_key_len = decoded.sending_chain.key.expose().len();
+        decoded.sending_chain = wa_core::signal::SignalMessageChainKey {
+            key: wa_crypto::SecretBytes::from(vec![0u8; sending_key_len]),
+            counter: 0,
+        };
+        test_encode_provider_session_record_unchecked(&decoded)
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn put_test_bytes(out: &mut BytesMut, value: &[u8]) {
+        let len = u16::try_from(value.len()).expect("test field fits session length prefix");
+        out.put_u16(len);
+        out.extend_from_slice(value);
+    }
+
+    /// Mirror of `wa_core::encode_signal_provider_session_record` WITHOUT the
+    /// record-validity check. Several tests deliberately construct intentionally
+    /// invalid sessions (skipped key without remote ratchet, remote ratchet without
+    /// receiving chain) to exercise inbound rejection, so they cannot round-trip
+    /// through the validating public encoder. Keeping a faithful copy here (versus
+    /// raw byte splicing) means the wire layout — including `previous_counter` and
+    /// the trailing `inbound_base_key` section — stays correct by construction.
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn test_encode_provider_session_record_unchecked(
+        record: &wa_core::signal::SignalProviderSessionRecord,
+    ) -> Bytes {
+        let mut out = BytesMut::with_capacity(180);
+        out.put_u8(1); // PROVIDER_SESSION_VERSION
+        out.put_u8(2); // PROVIDER_SESSION_RECORD_KIND
+        out.put_u32(record.remote_registration_id);
+        put_test_bytes(
+            &mut out,
+            &wa_core::normalize_signal_public_key(&record.remote_identity_key).unwrap(),
+        );
+        put_test_bytes(&mut out, record.root_key.key.expose());
+        out.put_u32(record.sending_chain.counter);
+        put_test_bytes(&mut out, record.sending_chain.key.expose());
+        put_test_bytes(
+            &mut out,
+            &wa_crypto::prefixed_signal_public_key(&record.local_ratchet_key_pair.public),
+        );
+        put_test_bytes(&mut out, record.local_ratchet_key_pair.private.expose());
+        out.put_u32(record.previous_counter);
+        match &record.receiving_chain {
+            Some(chain) => {
+                out.put_u8(1);
+                out.put_u32(chain.counter);
+                put_test_bytes(&mut out, chain.key.expose());
+            }
+            None => out.put_u8(0),
+        }
+        match &record.remote_ratchet_key {
+            Some(key) => {
+                out.put_u8(1);
+                put_test_bytes(
+                    &mut out,
+                    &wa_core::normalize_signal_public_key(key).unwrap(),
+                );
+            }
+            None => out.put_u8(0),
+        }
+        out.put_u32(u32::try_from(record.message_keys.len()).unwrap());
+        for message_key in &record.message_keys {
+            put_test_bytes(
+                &mut out,
+                &wa_core::normalize_signal_public_key(&message_key.ratchet_key).unwrap(),
+            );
+            out.put_u32(message_key.counter);
+            put_test_bytes(&mut out, message_key.message_keys.cipher_key.expose());
+            put_test_bytes(&mut out, message_key.message_keys.mac_key.expose());
+            put_test_bytes(&mut out, &message_key.message_keys.iv);
+        }
+        match &record.inbound_base_key {
+            Some(key) => {
+                out.put_u8(1);
+                put_test_bytes(
+                    &mut out,
+                    &wa_core::normalize_signal_public_key(key).unwrap(),
+                );
+            }
+            None => out.put_u8(0),
+        }
+        out.freeze()
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn test_signal_local_pre_key(
+        key_id: u32,
+        key_pair: &wa_crypto::KeyPair,
+    ) -> wa_core::SignalLocalPreKey {
+        wa_core::SignalLocalPreKey {
+            key_id,
+            key_pair: key_pair.clone(),
+            public_key: Bytes::copy_from_slice(&prefixed_signal_public_key(&key_pair.public)),
+        }
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn pad_random_max16_for_test(mut bytes: Bytes, pad_len: u8) -> Bytes {
+        assert!((1..=16).contains(&pad_len));
+        let mut out = Vec::from(bytes.split_to(bytes.len()).as_ref());
+        out.extend(std::iter::repeat_n(pad_len, usize::from(pad_len)));
+        Bytes::from(out)
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn pre_key_message_outer_unknown_field(message: &[u8]) -> Bytes {
+        let mut unknown = message.to_vec();
+        unknown.extend_from_slice(&[0x78, 0x63]);
+        // The trailing unknown outer protobuf field is ignored on decode, so the
+        // decoded message matches the canonical (no-unknown-field) decoding.
+        assert_eq!(
+            wa_core::decode_signal_pre_key_whisper_message(&unknown).unwrap(),
+            wa_core::decode_signal_pre_key_whisper_message(message).unwrap(),
+        );
+        Bytes::from(unknown)
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn raw_client_sender_key_record(states: Vec<SenderKeyStateStructure>) -> Bytes {
+        SenderKeyRecordStructure {
+            sender_key_states: states,
+        }
+        .encode_to_vec()
+        .into()
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn raw_client_sender_key_state(
+        key_id: u32,
+        chain_iteration: u32,
+        chain_key_fill: u8,
+        signing_public_key: Bytes,
+        signing_private_key: Option<Bytes>,
+        message_keys: &[(u32, u8)],
+    ) -> SenderKeyStateStructure {
+        SenderKeyStateStructure {
+            sender_key_id: Some(key_id),
+            sender_chain_key: Some(sender_key_state_structure::SenderChainKey {
+                iteration: Some(chain_iteration),
+                seed: Some(Bytes::from(vec![chain_key_fill; 32])),
+            }),
+            sender_signing_key: Some(sender_key_state_structure::SenderSigningKey {
+                public: Some(signing_public_key),
+                private: signing_private_key,
+            }),
+            sender_message_keys: message_keys
+                .iter()
+                .map(
+                    |(iteration, seed_fill)| sender_key_state_structure::SenderMessageKey {
+                        iteration: Some(*iteration),
+                        seed: Some(Bytes::from(vec![*seed_fill; 32])),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn test_participant_enc_node<'a>(message_node: &'a BinaryNode, jid: &str) -> &'a BinaryNode {
+        let participants = test_child(message_node, "participants");
+        let to_node = test_children(participants, "to")
+            .into_iter()
+            .find(|node| node.attrs.get("jid").is_some_and(|value| value == jid))
+            .unwrap_or_else(|| panic!("missing relay participant {jid}"));
+        test_child(to_node, "enc")
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn assert_signal_placeholder_resend_request(
+        message_node: &BinaryNode,
+        recipient_jid: &str,
+        remote_credentials: &AuthCredentials,
+        remote_one_time_pre_key: &wa_crypto::KeyPair,
+        remote_one_time_pre_key_id: u32,
+        expected_destination_jid: &str,
+        expected_key: &MessageKey,
+    ) {
+        let enc = test_participant_enc_node(message_node, recipient_jid);
+        assert_eq!(enc.attrs["type"], "pkmsg");
+        let ciphertext = test_node_bytes(enc).unwrap();
+        let pre_key_message = wa_core::decode_signal_pre_key_whisper_message(&ciphertext).unwrap();
+        assert_eq!(pre_key_message.pre_key_id, Some(remote_one_time_pre_key_id));
+        assert_eq!(
+            pre_key_message.signed_pre_key_id,
+            remote_credentials.signed_pre_key.key_id
+        );
+
+        let remote_material = test_signal_local_key_material(remote_credentials);
+        let remote_pre_key =
+            test_signal_local_pre_key(remote_one_time_pre_key_id, remote_one_time_pre_key);
+        let decrypted = wa_core::decrypt_signal_inbound_pre_key_session_message(
+            &remote_material,
+            Some(&remote_pre_key),
+            &ciphertext,
+        )
+        .unwrap();
+        let unpadded = wa_core::unpad_random_max16(&decrypted.plaintext).unwrap();
+        let decoded = wa_proto::proto::Message::decode(unpadded).unwrap();
+        let device_sent = decoded.device_sent_message.unwrap();
+        assert_eq!(
+            device_sent.destination_jid.as_deref(),
+            Some(expected_destination_jid)
+        );
+        let protocol = device_sent.message.unwrap().protocol_message.unwrap();
+        assert_eq!(
+            protocol.r#type,
+            Some(
+                wa_proto::proto::message::protocol_message::Type::PeerDataOperationRequestMessage
+                    as i32,
+            )
+        );
+        let request = protocol.peer_data_operation_request_message.unwrap();
+        assert_eq!(
+            request.peer_data_operation_request_type,
+            Some(
+                wa_proto::proto::message::PeerDataOperationRequestType::PlaceholderMessageResend
+                    as i32,
+            )
+        );
+        assert_eq!(request.placeholder_message_resend_request.len(), 1);
+        assert_eq!(
+            request.placeholder_message_resend_request[0]
+                .message_key
+                .as_ref(),
+            Some(expected_key)
+        );
+    }
+
+    #[cfg(all(feature = "memory-store", feature = "noise"))]
+    fn assert_signal_conversation_relay(
+        message_node: &BinaryNode,
+        recipient_jid: &str,
+        remote_credentials: &AuthCredentials,
+        remote_one_time_pre_key: &wa_crypto::KeyPair,
+        remote_one_time_pre_key_id: u32,
+        expected_text: &str,
+    ) {
+        let enc = test_participant_enc_node(message_node, recipient_jid);
+        assert_eq!(enc.attrs["type"], "pkmsg");
+        let ciphertext = test_node_bytes(enc).unwrap();
+        let pre_key_message = wa_core::decode_signal_pre_key_whisper_message(&ciphertext).unwrap();
+        assert_eq!(pre_key_message.pre_key_id, Some(remote_one_time_pre_key_id));
+        assert_eq!(
+            pre_key_message.signed_pre_key_id,
+            remote_credentials.signed_pre_key.key_id
+        );
+
+        let remote_material = test_signal_local_key_material(remote_credentials);
+        let remote_pre_key =
+            test_signal_local_pre_key(remote_one_time_pre_key_id, remote_one_time_pre_key);
+        let decrypted = wa_core::decrypt_signal_inbound_pre_key_session_message(
+            &remote_material,
+            Some(&remote_pre_key),
+            &ciphertext,
+        )
+        .unwrap();
+        let unpadded = wa_core::unpad_random_max16(&decrypted.plaintext).unwrap();
+        let decoded = wa_proto::proto::Message::decode(unpadded).unwrap();
+        assert_eq!(decoded.conversation.as_deref(), Some(expected_text));
+    }
+
+    #[cfg(feature = "noise")]
     fn test_signal_session() -> wa_core::SignalSession {
         wa_core::SignalSession {
             registration_id: 0x0102_0304,

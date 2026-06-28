@@ -2,17 +2,19 @@ use crate::{CoreError, CoreResult};
 use async_trait::async_trait;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use wa_binary::{BinaryNode, BinaryNodeContent, JidServer, jid_decode, jid_normalized_user};
 use wa_proto::proto::message::{
     AlbumMessage, AudioMessage, ButtonsResponseMessage, ContactMessage, ContactsArrayMessage,
-    DocumentMessage, EventMessage, ExtendedTextMessage, FutureProofMessage, GroupInviteMessage,
-    ImageMessage, ListResponseMessage, LiveLocationMessage, LocationMessage,
-    PeerDataOperationRequestMessage, PeerDataOperationRequestType, PinInChatMessage,
-    PollCreationMessage, ProductMessage, ProtocolMessage, ReactionMessage,
-    RequestPhoneNumberMessage, StickerMessage, TemplateButtonReplyMessage, VideoMessage,
-    buttons_response_message, extended_text_message, group_invite_message, list_response_message,
+    DocumentMessage, EncEventResponseMessage, EventMessage, ExtendedTextMessage,
+    FutureProofMessage, GroupInviteMessage, ImageMessage, ListResponseMessage, LiveLocationMessage,
+    LocationMessage, PeerDataOperationRequestMessage, PeerDataOperationRequestType,
+    PinInChatMessage, PollCreationMessage, PollEncValue, PollUpdateMessage,
+    PollUpdateMessageMetadata, ProductMessage, ProtocolMessage, ReactionMessage,
+    RequestPhoneNumberMessage, SenderKeyDistributionMessage as ProtoSenderKeyDistributionMessage,
+    StickerMessage, TemplateButtonReplyMessage, VideoMessage, buttons_response_message,
+    event_response_message, extended_text_message, group_invite_message, list_response_message,
     peer_data_operation_request_message, pin_in_chat_message, poll_creation_message,
     product_message, protocol_message,
 };
@@ -20,8 +22,17 @@ use wa_proto::proto::{
     ContextInfo, DisappearingMode, LimitSharing, Message, MessageContextInfo, MessageKey,
     disappearing_mode, limit_sharing,
 };
+#[cfg(feature = "noise")]
+use zeroize::Zeroize;
 
 const MESSAGE_ID_PREFIX: &str = "3EB0";
+#[cfg(feature = "noise")]
+const POLL_EVENT_ENCRYPTION_IV_LEN: usize = 12;
+#[cfg(feature = "noise")]
+const POLL_VOTE_CRYPTO_LABEL: &str = "Poll Vote";
+#[cfg(feature = "noise")]
+const EVENT_RESPONSE_CRYPTO_LABEL: &str = "Event Response";
+pub const STATUS_BROADCAST_JID: &str = "status@broadcast";
 
 #[derive(Clone, Default, PartialEq)]
 pub struct MessageContext {
@@ -517,6 +528,215 @@ impl EventContent {
 }
 
 #[derive(Clone, PartialEq)]
+pub struct PollUpdateContent {
+    pub poll_creation_message_key: MessageKey,
+    pub encrypted_payload: Bytes,
+    pub encrypted_iv: Bytes,
+    pub sender_timestamp_ms: Option<i64>,
+    pub include_metadata: bool,
+}
+
+impl PollUpdateContent {
+    #[must_use]
+    pub fn new(
+        poll_creation_message_key: MessageKey,
+        encrypted_payload: impl Into<Bytes>,
+        encrypted_iv: impl Into<Bytes>,
+    ) -> Self {
+        Self {
+            poll_creation_message_key,
+            encrypted_payload: encrypted_payload.into(),
+            encrypted_iv: encrypted_iv.into(),
+            sender_timestamp_ms: None,
+            include_metadata: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_sender_timestamp_ms(mut self, sender_timestamp_ms: i64) -> Self {
+        self.sender_timestamp_ms = Some(sender_timestamp_ms);
+        self
+    }
+
+    #[must_use]
+    pub fn without_metadata(mut self) -> Self {
+        self.include_metadata = false;
+        self
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PollVoteContent {
+    pub poll_creation_message_key: MessageKey,
+    pub selected_option_hashes: Vec<Bytes>,
+    pub poll_message_secret: Bytes,
+    pub poll_creator_jid: String,
+    pub voter_jid: String,
+    pub sender_timestamp_ms: Option<i64>,
+    pub include_metadata: bool,
+}
+
+impl PollVoteContent {
+    #[must_use]
+    pub fn new<I, T>(
+        poll_creation_message_key: MessageKey,
+        selected_option_hashes: I,
+        poll_message_secret: impl Into<Bytes>,
+        poll_creator_jid: impl Into<String>,
+        voter_jid: impl Into<String>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Bytes>,
+    {
+        Self {
+            poll_creation_message_key,
+            selected_option_hashes: selected_option_hashes.into_iter().map(Into::into).collect(),
+            poll_message_secret: poll_message_secret.into(),
+            poll_creator_jid: poll_creator_jid.into(),
+            voter_jid: voter_jid.into(),
+            sender_timestamp_ms: None,
+            include_metadata: true,
+        }
+    }
+
+    pub fn from_option_names<I, T>(
+        poll_creation_message_key: MessageKey,
+        selected_option_names: I,
+        poll_message_secret: impl Into<Bytes>,
+        poll_creator_jid: impl Into<String>,
+        voter_jid: impl Into<String>,
+    ) -> CoreResult<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        let mut hashes = Vec::new();
+        for name in selected_option_names {
+            let name = name.into();
+            validate_non_empty("selected poll option", &name)?;
+            hashes.push(Bytes::copy_from_slice(&Sha256::digest(name.as_bytes())));
+        }
+        Ok(Self::new(
+            poll_creation_message_key,
+            hashes,
+            poll_message_secret,
+            poll_creator_jid,
+            voter_jid,
+        ))
+    }
+
+    #[must_use]
+    pub fn with_sender_timestamp_ms(mut self, sender_timestamp_ms: i64) -> Self {
+        self.sender_timestamp_ms = Some(sender_timestamp_ms);
+        self
+    }
+
+    #[must_use]
+    pub fn without_metadata(mut self) -> Self {
+        self.include_metadata = false;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventResponseKind {
+    Unknown,
+    Going,
+    NotGoing,
+    Maybe,
+}
+
+impl EventResponseKind {
+    #[must_use]
+    pub fn as_proto_i32(self) -> i32 {
+        match self {
+            Self::Unknown => event_response_message::EventResponseType::Unknown as i32,
+            Self::Going => event_response_message::EventResponseType::Going as i32,
+            Self::NotGoing => event_response_message::EventResponseType::NotGoing as i32,
+            Self::Maybe => event_response_message::EventResponseType::Maybe as i32,
+        }
+    }
+}
+
+impl From<event_response_message::EventResponseType> for EventResponseKind {
+    fn from(value: event_response_message::EventResponseType) -> Self {
+        match value {
+            event_response_message::EventResponseType::Unknown => Self::Unknown,
+            event_response_message::EventResponseType::Going => Self::Going,
+            event_response_message::EventResponseType::NotGoing => Self::NotGoing,
+            event_response_message::EventResponseType::Maybe => Self::Maybe,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct EventResponsePayload {
+    pub event_creation_message_key: MessageKey,
+    pub response: EventResponseKind,
+    pub event_message_secret: Bytes,
+    pub event_creator_jid: String,
+    pub responder_jid: String,
+    pub timestamp_ms: Option<i64>,
+    pub extra_guest_count: Option<i32>,
+}
+
+impl EventResponsePayload {
+    #[must_use]
+    pub fn new(
+        event_creation_message_key: MessageKey,
+        response: EventResponseKind,
+        event_message_secret: impl Into<Bytes>,
+        event_creator_jid: impl Into<String>,
+        responder_jid: impl Into<String>,
+    ) -> Self {
+        Self {
+            event_creation_message_key,
+            response,
+            event_message_secret: event_message_secret.into(),
+            event_creator_jid: event_creator_jid.into(),
+            responder_jid: responder_jid.into(),
+            timestamp_ms: None,
+            extra_guest_count: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_timestamp_ms(mut self, timestamp_ms: i64) -> Self {
+        self.timestamp_ms = Some(timestamp_ms);
+        self
+    }
+
+    #[must_use]
+    pub fn with_extra_guest_count(mut self, extra_guest_count: i32) -> Self {
+        self.extra_guest_count = Some(extra_guest_count);
+        self
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct EventResponseContent {
+    pub event_creation_message_key: MessageKey,
+    pub encrypted_payload: Bytes,
+    pub encrypted_iv: Bytes,
+}
+
+impl EventResponseContent {
+    #[must_use]
+    pub fn new(
+        event_creation_message_key: MessageKey,
+        encrypted_payload: impl Into<Bytes>,
+        encrypted_iv: impl Into<Bytes>,
+    ) -> Self {
+        Self {
+            event_creation_message_key,
+            encrypted_payload: encrypted_payload.into(),
+            encrypted_iv: encrypted_iv.into(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct EditContent {
     pub key: MessageKey,
     pub message: Message,
@@ -608,6 +828,39 @@ impl UploadedMedia {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteMediaThumbnail {
+    pub direct_path: String,
+    pub sha256: Bytes,
+    pub enc_sha256: Bytes,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+impl RemoteMediaThumbnail {
+    #[must_use]
+    pub fn new(
+        direct_path: impl Into<String>,
+        sha256: impl Into<Bytes>,
+        enc_sha256: impl Into<Bytes>,
+    ) -> Self {
+        Self {
+            direct_path: direct_path.into(),
+            sha256: sha256.into(),
+            enc_sha256: enc_sha256.into(),
+            width: None,
+            height: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct ImageContent {
     pub media: UploadedMedia,
@@ -640,6 +893,19 @@ impl ImageContent {
         self.context = context;
         self
     }
+
+    #[cfg(feature = "image")]
+    pub fn with_generated_jpeg_thumbnail(
+        mut self,
+        source_image: &[u8],
+        options: crate::JpegThumbnailOptions,
+    ) -> CoreResult<Self> {
+        let thumbnail = crate::generate_jpeg_thumbnail(source_image, options)?;
+        self.width = Some(thumbnail.source_width);
+        self.height = Some(thumbnail.source_height);
+        self.jpeg_thumbnail = Some(thumbnail.jpeg);
+        Ok(self)
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -651,6 +917,7 @@ pub struct VideoContent {
     pub height: Option<u32>,
     pub width: Option<u32>,
     pub jpeg_thumbnail: Option<Bytes>,
+    pub remote_thumbnail: Option<RemoteMediaThumbnail>,
     pub gif_playback: bool,
     pub view_once: bool,
     pub streaming_sidecar: Option<Bytes>,
@@ -668,6 +935,7 @@ impl VideoContent {
             height: None,
             width: None,
             jpeg_thumbnail: None,
+            remote_thumbnail: None,
             gif_playback: false,
             view_once: false,
             streaming_sidecar: None,
@@ -679,6 +947,25 @@ impl VideoContent {
     pub fn with_context(mut self, context: MessageContext) -> Self {
         self.context = context;
         self
+    }
+
+    #[must_use]
+    pub fn with_remote_thumbnail(mut self, thumbnail: RemoteMediaThumbnail) -> Self {
+        self.remote_thumbnail = Some(thumbnail);
+        self
+    }
+
+    #[cfg(feature = "image")]
+    pub fn with_generated_jpeg_thumbnail(
+        mut self,
+        source_image: &[u8],
+        options: crate::JpegThumbnailOptions,
+    ) -> CoreResult<Self> {
+        let thumbnail = crate::generate_jpeg_thumbnail(source_image, options)?;
+        self.width = Some(thumbnail.source_width);
+        self.height = Some(thumbnail.source_height);
+        self.jpeg_thumbnail = Some(thumbnail.jpeg);
+        Ok(self)
     }
 }
 
@@ -731,6 +1018,9 @@ pub struct DocumentContent {
     pub caption: Option<String>,
     pub page_count: Option<u32>,
     pub jpeg_thumbnail: Option<Bytes>,
+    pub thumbnail_height: Option<u32>,
+    pub thumbnail_width: Option<u32>,
+    pub remote_thumbnail: Option<RemoteMediaThumbnail>,
     pub context: MessageContext,
 }
 
@@ -745,6 +1035,9 @@ impl DocumentContent {
             caption: None,
             page_count: None,
             jpeg_thumbnail: None,
+            thumbnail_height: None,
+            thumbnail_width: None,
+            remote_thumbnail: None,
             context: MessageContext::default(),
         }
     }
@@ -753,6 +1046,38 @@ impl DocumentContent {
     pub fn with_context(mut self, context: MessageContext) -> Self {
         self.context = context;
         self
+    }
+
+    #[must_use]
+    pub fn with_remote_thumbnail(mut self, thumbnail: RemoteMediaThumbnail) -> Self {
+        self.remote_thumbnail = Some(thumbnail);
+        self
+    }
+
+    #[cfg(feature = "image")]
+    pub fn with_generated_jpeg_thumbnail(
+        mut self,
+        source_image: &[u8],
+        options: crate::JpegThumbnailOptions,
+    ) -> CoreResult<Self> {
+        let thumbnail = crate::generate_jpeg_thumbnail(source_image, options)?;
+        self.thumbnail_width = Some(thumbnail.width);
+        self.thumbnail_height = Some(thumbnail.height);
+        self.jpeg_thumbnail = Some(thumbnail.jpeg);
+        Ok(self)
+    }
+
+    #[cfg(feature = "image")]
+    pub fn with_generated_pdf_thumbnail(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+        options: crate::PdfThumbnailOptions,
+    ) -> CoreResult<Self> {
+        let thumbnail = crate::generate_pdf_thumbnail_from_file(path, options)?;
+        self.thumbnail_width = Some(thumbnail.width);
+        self.thumbnail_height = Some(thumbnail.height);
+        self.jpeg_thumbnail = Some(thumbnail.jpeg);
+        Ok(self)
     }
 }
 
@@ -1141,6 +1466,22 @@ impl ListReplyContent {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SenderKeyDistributionContent {
+    pub group_id: String,
+    pub distribution: Bytes,
+}
+
+impl SenderKeyDistributionContent {
+    #[must_use]
+    pub fn new(group_id: impl Into<String>, distribution: impl Into<Bytes>) -> Self {
+        Self {
+            group_id: group_id.into(),
+            distribution: distribution.into(),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub enum MessageContent {
     Text(Box<TextMessage>),
@@ -1151,6 +1492,8 @@ pub enum MessageContent {
     Reaction(Box<ReactionContent>),
     Poll(Box<PollContent>),
     Event(Box<EventContent>),
+    PollUpdate(Box<PollUpdateContent>),
+    EventResponse(Box<EventResponseContent>),
     Edit(Box<EditContent>),
     Delete(Box<DeleteContent>),
     Pin(Box<PinContent>),
@@ -1170,6 +1513,7 @@ pub enum MessageContent {
     ButtonReply(Box<ButtonReplyContent>),
     TemplateButtonReply(Box<TemplateButtonReplyContent>),
     ListReply(Box<ListReplyContent>),
+    SenderKeyDistribution(Box<SenderKeyDistributionContent>),
     ViewOnce(Box<MessageContent>),
 }
 
@@ -1217,6 +1561,16 @@ impl MessageContent {
     #[must_use]
     pub fn event(event: EventContent) -> Self {
         Self::Event(Box::new(event))
+    }
+
+    #[must_use]
+    pub fn poll_update(update: PollUpdateContent) -> Self {
+        Self::PollUpdate(Box::new(update))
+    }
+
+    #[must_use]
+    pub fn event_response(response: EventResponseContent) -> Self {
+        Self::EventResponse(Box::new(response))
     }
 
     #[must_use]
@@ -1315,6 +1669,11 @@ impl MessageContent {
     }
 
     #[must_use]
+    pub fn sender_key_distribution(content: SenderKeyDistributionContent) -> Self {
+        Self::SenderKeyDistribution(Box::new(content))
+    }
+
+    #[must_use]
     pub fn view_once(content: MessageContent) -> Self {
         Self::ViewOnce(Box::new(content))
     }
@@ -1329,6 +1688,8 @@ impl MessageContent {
             Self::Reaction(reaction) => build_reaction_message(*reaction),
             Self::Poll(poll) => build_poll_message(*poll),
             Self::Event(event) => build_event_message(*event),
+            Self::PollUpdate(update) => build_poll_update_message(*update),
+            Self::EventResponse(response) => build_event_response_message(*response),
             Self::Edit(edit) => build_edit_message(*edit),
             Self::Delete(delete) => build_delete_message(*delete),
             Self::Pin(pin) => build_pin_message(*pin),
@@ -1348,6 +1709,7 @@ impl MessageContent {
             Self::ButtonReply(content) => build_button_reply_message(*content),
             Self::TemplateButtonReply(content) => build_template_button_reply_message(*content),
             Self::ListReply(content) => build_list_reply_message(*content),
+            Self::SenderKeyDistribution(content) => build_sender_key_distribution_message(*content),
             Self::ViewOnce(content) => build_view_once_message(*content),
         }
     }
@@ -1707,11 +2069,15 @@ pub fn build_poll_message(poll: PollContent) -> CoreResult<Message> {
             "poll selectable option count exceeds option count".to_owned(),
         ));
     }
+    let mut seen_options = BTreeSet::new();
     let options = poll
         .options
         .into_iter()
         .map(|option| {
             validate_non_empty("poll option", &option)?;
+            if !seen_options.insert(option.clone()) {
+                return Err(CoreError::Payload("poll options must be unique".to_owned()));
+            }
             Ok(poll_creation_message::Option {
                 option_name: Some(option),
                 option_hash: None,
@@ -1785,6 +2151,256 @@ pub fn build_event_message(event: EventContent) -> CoreResult<Message> {
         }),
         ..Message::default()
     })
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_poll_update_content(vote: PollVoteContent) -> CoreResult<PollUpdateContent> {
+    let iv: [u8; POLL_EVENT_ENCRYPTION_IV_LEN] = rand::random();
+    build_encrypted_poll_update_content_with_iv(vote, Bytes::copy_from_slice(&iv))
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_poll_update_content_with_iv(
+    vote: PollVoteContent,
+    iv: impl Into<Bytes>,
+) -> CoreResult<PollUpdateContent> {
+    validate_message_key(&vote.poll_creation_message_key)?;
+    validate_poll_event_message_secret("poll message secret", &vote.poll_message_secret)?;
+    let mut selected_hashes = BTreeSet::new();
+    for hash in &vote.selected_option_hashes {
+        validate_bytes_len("selected poll option hash", hash, 32)?;
+        if !selected_hashes.insert(hash.as_ref()) {
+            return Err(CoreError::Payload(
+                "selected poll option hashes must be unique".to_owned(),
+            ));
+        }
+    }
+    let poll_message_id = vote
+        .poll_creation_message_key
+        .id
+        .as_deref()
+        .ok_or_else(|| CoreError::Payload("poll creation message key missing id".to_owned()))?
+        .to_owned();
+    let poll_creator_jid = normalize_crypto_jid("poll creator JID", &vote.poll_creator_jid)?;
+    let voter_jid = normalize_crypto_jid("poll voter JID", &vote.voter_jid)?;
+    let iv = iv.into();
+    validate_bytes_len("encrypted poll vote iv", &iv, POLL_EVENT_ENCRYPTION_IV_LEN)?;
+    let plaintext = wa_proto::proto::message::PollVoteMessage {
+        selected_options: vote.selected_option_hashes,
+    };
+    let encrypted_payload = encrypt_poll_event_payload(
+        &prost::Message::encode_to_vec(&plaintext),
+        &vote.poll_message_secret,
+        &poll_message_id,
+        &poll_creator_jid,
+        &voter_jid,
+        POLL_VOTE_CRYPTO_LABEL,
+        &iv,
+    )?;
+    let mut update = PollUpdateContent::new(vote.poll_creation_message_key, encrypted_payload, iv);
+    update.sender_timestamp_ms = vote.sender_timestamp_ms;
+    update.include_metadata = vote.include_metadata;
+    Ok(update)
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_poll_update_message(vote: PollVoteContent) -> CoreResult<Message> {
+    build_poll_update_message(build_encrypted_poll_update_content(vote)?)
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_poll_update_message_with_iv(
+    vote: PollVoteContent,
+    iv: impl Into<Bytes>,
+) -> CoreResult<Message> {
+    build_poll_update_message(build_encrypted_poll_update_content_with_iv(vote, iv)?)
+}
+
+pub fn build_poll_update_message(update: PollUpdateContent) -> CoreResult<Message> {
+    validate_message_key(&update.poll_creation_message_key)?;
+    validate_non_empty_bytes("encrypted poll vote payload", &update.encrypted_payload)?;
+    validate_non_empty_bytes("encrypted poll vote iv", &update.encrypted_iv)?;
+    Ok(Message {
+        poll_update_message: Some(PollUpdateMessage {
+            poll_creation_message_key: Some(update.poll_creation_message_key),
+            vote: Some(PollEncValue {
+                enc_payload: Some(update.encrypted_payload),
+                enc_iv: Some(update.encrypted_iv),
+            }),
+            metadata: update
+                .include_metadata
+                .then_some(PollUpdateMessageMetadata {}),
+            sender_timestamp_ms: update.sender_timestamp_ms,
+        }),
+        ..Message::default()
+    })
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_event_response_content(
+    response: EventResponsePayload,
+) -> CoreResult<EventResponseContent> {
+    let iv: [u8; POLL_EVENT_ENCRYPTION_IV_LEN] = rand::random();
+    build_encrypted_event_response_content_with_iv(response, Bytes::copy_from_slice(&iv))
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_event_response_content_with_iv(
+    response: EventResponsePayload,
+    iv: impl Into<Bytes>,
+) -> CoreResult<EventResponseContent> {
+    validate_message_key(&response.event_creation_message_key)?;
+    validate_poll_event_message_secret("event message secret", &response.event_message_secret)?;
+    let event_message_id = response
+        .event_creation_message_key
+        .id
+        .as_deref()
+        .ok_or_else(|| CoreError::Payload("event creation message key missing id".to_owned()))?
+        .to_owned();
+    let event_creator_jid = normalize_crypto_jid("event creator JID", &response.event_creator_jid)?;
+    let responder_jid = normalize_crypto_jid("event responder JID", &response.responder_jid)?;
+    let iv = iv.into();
+    validate_bytes_len(
+        "encrypted event response iv",
+        &iv,
+        POLL_EVENT_ENCRYPTION_IV_LEN,
+    )?;
+    if let Some(extra_guest_count) = response.extra_guest_count
+        && extra_guest_count < 0
+    {
+        return Err(CoreError::Payload(
+            "event response extra guest count must not be negative".to_owned(),
+        ));
+    }
+    let plaintext = wa_proto::proto::message::EventResponseMessage {
+        response: Some(response.response.as_proto_i32()),
+        timestamp_ms: response.timestamp_ms,
+        extra_guest_count: response.extra_guest_count,
+    };
+    let encrypted_payload = encrypt_poll_event_payload(
+        &prost::Message::encode_to_vec(&plaintext),
+        &response.event_message_secret,
+        &event_message_id,
+        &event_creator_jid,
+        &responder_jid,
+        EVENT_RESPONSE_CRYPTO_LABEL,
+        &iv,
+    )?;
+    Ok(EventResponseContent::new(
+        response.event_creation_message_key,
+        encrypted_payload,
+        iv,
+    ))
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_event_response_message(
+    response: EventResponsePayload,
+) -> CoreResult<Message> {
+    build_event_response_message(build_encrypted_event_response_content(response)?)
+}
+
+#[cfg(feature = "noise")]
+pub fn build_encrypted_event_response_message_with_iv(
+    response: EventResponsePayload,
+    iv: impl Into<Bytes>,
+) -> CoreResult<Message> {
+    build_event_response_message(build_encrypted_event_response_content_with_iv(
+        response, iv,
+    )?)
+}
+
+pub fn build_event_response_message(response: EventResponseContent) -> CoreResult<Message> {
+    validate_message_key(&response.event_creation_message_key)?;
+    validate_non_empty_bytes(
+        "encrypted event response payload",
+        &response.encrypted_payload,
+    )?;
+    validate_non_empty_bytes("encrypted event response iv", &response.encrypted_iv)?;
+    Ok(Message {
+        enc_event_response_message: Some(EncEventResponseMessage {
+            event_creation_message_key: Some(response.event_creation_message_key),
+            enc_payload: Some(response.encrypted_payload),
+            enc_iv: Some(response.encrypted_iv),
+        }),
+        ..Message::default()
+    })
+}
+
+#[cfg(feature = "noise")]
+pub fn decrypt_poll_vote_message(
+    encrypted_vote: &PollEncValue,
+    poll_message_id: &str,
+    poll_creator_jid: &str,
+    voter_jid: &str,
+    poll_message_secret: &[u8],
+) -> CoreResult<wa_proto::proto::message::PollVoteMessage> {
+    let enc_payload = encrypted_vote
+        .enc_payload
+        .as_ref()
+        .ok_or_else(|| CoreError::Payload("encrypted poll vote missing payload".to_owned()))?;
+    let enc_iv = encrypted_vote
+        .enc_iv
+        .as_ref()
+        .ok_or_else(|| CoreError::Payload("encrypted poll vote missing iv".to_owned()))?;
+    validate_non_empty("poll message id", poll_message_id)?;
+    validate_poll_event_message_secret("poll message secret", poll_message_secret)?;
+    validate_bytes_len(
+        "encrypted poll vote iv",
+        enc_iv,
+        POLL_EVENT_ENCRYPTION_IV_LEN,
+    )?;
+    let poll_creator_jid = normalize_crypto_jid("poll creator JID", poll_creator_jid)?;
+    let voter_jid = normalize_crypto_jid("poll voter JID", voter_jid)?;
+    let decrypted = decrypt_poll_event_payload(
+        enc_payload,
+        poll_message_secret,
+        poll_message_id,
+        &poll_creator_jid,
+        &voter_jid,
+        POLL_VOTE_CRYPTO_LABEL,
+        enc_iv,
+    )?;
+    <wa_proto::proto::message::PollVoteMessage as prost::Message>::decode(decrypted.as_slice())
+        .map_err(CoreError::from)
+}
+
+#[cfg(feature = "noise")]
+pub fn decrypt_event_response_message(
+    encrypted_response: &EncEventResponseMessage,
+    event_message_id: &str,
+    event_creator_jid: &str,
+    responder_jid: &str,
+    event_message_secret: &[u8],
+) -> CoreResult<wa_proto::proto::message::EventResponseMessage> {
+    let enc_payload = encrypted_response
+        .enc_payload
+        .as_ref()
+        .ok_or_else(|| CoreError::Payload("encrypted event response missing payload".to_owned()))?;
+    let enc_iv = encrypted_response
+        .enc_iv
+        .as_ref()
+        .ok_or_else(|| CoreError::Payload("encrypted event response missing iv".to_owned()))?;
+    validate_non_empty("event message id", event_message_id)?;
+    validate_poll_event_message_secret("event message secret", event_message_secret)?;
+    validate_bytes_len(
+        "encrypted event response iv",
+        enc_iv,
+        POLL_EVENT_ENCRYPTION_IV_LEN,
+    )?;
+    let event_creator_jid = normalize_crypto_jid("event creator JID", event_creator_jid)?;
+    let responder_jid = normalize_crypto_jid("event responder JID", responder_jid)?;
+    let decrypted = decrypt_poll_event_payload(
+        enc_payload,
+        event_message_secret,
+        event_message_id,
+        &event_creator_jid,
+        &responder_jid,
+        EVENT_RESPONSE_CRYPTO_LABEL,
+        enc_iv,
+    )?;
+    <wa_proto::proto::message::EventResponseMessage as prost::Message>::decode(decrypted.as_slice())
+        .map_err(CoreError::from)
 }
 
 pub fn build_edit_message(edit: EditContent) -> CoreResult<Message> {
@@ -1951,6 +2567,10 @@ pub fn build_ptv_message(video: VideoContent) -> CoreResult<Message> {
 fn video_message_proto(video: VideoContent) -> CoreResult<VideoMessage> {
     validate_uploaded_media(&video.media)?;
     validate_non_empty("video mimetype", &video.mimetype)?;
+    let remote_thumbnail = video
+        .remote_thumbnail
+        .map(validate_remote_media_thumbnail)
+        .transpose()?;
     Ok(VideoMessage {
         url: video.media.url,
         mimetype: Some(video.mimetype),
@@ -1969,6 +2589,13 @@ fn video_message_proto(video: VideoContent) -> CoreResult<VideoMessage> {
         context_info: context_info(video.context)?,
         streaming_sidecar: video.streaming_sidecar,
         view_once: flag(video.view_once),
+        thumbnail_direct_path: remote_thumbnail
+            .as_ref()
+            .map(|thumbnail| thumbnail.direct_path.clone()),
+        thumbnail_sha256: remote_thumbnail
+            .as_ref()
+            .map(|thumbnail| thumbnail.sha256.clone()),
+        thumbnail_enc_sha256: remote_thumbnail.map(|thumbnail| thumbnail.enc_sha256),
         ..VideoMessage::default()
     })
 }
@@ -2001,6 +2628,10 @@ pub fn build_audio_message(audio: AudioContent) -> CoreResult<Message> {
 pub fn build_document_message(document: DocumentContent) -> CoreResult<Message> {
     validate_uploaded_media(&document.media)?;
     validate_non_empty("document mimetype", &document.mimetype)?;
+    let remote_thumbnail = document
+        .remote_thumbnail
+        .map(validate_remote_media_thumbnail)
+        .transpose()?;
     Ok(Message {
         document_message: Some(Box::new(DocumentMessage {
             url: document.media.url,
@@ -2015,6 +2646,25 @@ pub fn build_document_message(document: DocumentContent) -> CoreResult<Message> 
             direct_path: document.media.direct_path,
             media_key_timestamp: document.media.media_key_timestamp,
             jpeg_thumbnail: document.jpeg_thumbnail,
+            thumbnail_direct_path: remote_thumbnail
+                .as_ref()
+                .map(|thumbnail| thumbnail.direct_path.clone()),
+            thumbnail_sha256: remote_thumbnail
+                .as_ref()
+                .map(|thumbnail| thumbnail.sha256.clone()),
+            thumbnail_enc_sha256: remote_thumbnail
+                .as_ref()
+                .map(|thumbnail| thumbnail.enc_sha256.clone()),
+            thumbnail_height: document.thumbnail_height.or_else(|| {
+                remote_thumbnail
+                    .as_ref()
+                    .and_then(|thumbnail| thumbnail.height)
+            }),
+            thumbnail_width: document.thumbnail_width.or_else(|| {
+                remote_thumbnail
+                    .as_ref()
+                    .and_then(|thumbnail| thumbnail.width)
+            }),
             context_info: context_info(document.context)?,
             caption: document.caption,
             ..DocumentMessage::default()
@@ -2225,6 +2875,35 @@ pub fn build_list_reply_message(content: ListReplyContent) -> CoreResult<Message
             context_info: context_info(content.context)?,
             description: content.description,
         })),
+        ..Message::default()
+    })
+}
+
+pub fn build_sender_key_distribution_message(
+    content: SenderKeyDistributionContent,
+) -> CoreResult<Message> {
+    let decoded = jid_decode(&content.group_id).ok_or_else(|| {
+        CoreError::Payload(format!(
+            "invalid sender-key distribution group JID: {}",
+            content.group_id
+        ))
+    })?;
+    if decoded.server != JidServer::GUs {
+        return Err(CoreError::Payload(format!(
+            "sender-key distribution group must use group server: {}",
+            content.group_id
+        )));
+    }
+    if content.distribution.is_empty() {
+        return Err(CoreError::Payload(
+            "sender-key distribution payload must not be empty".to_owned(),
+        ));
+    }
+    Ok(Message {
+        sender_key_distribution_message: Some(ProtoSenderKeyDistributionMessage {
+            group_id: Some(content.group_id),
+            axolotl_sender_key_distribution_message: Some(content.distribution),
+        }),
         ..Message::default()
     })
 }
@@ -2476,6 +3155,21 @@ fn validate_uploaded_media(media: &UploadedMedia) -> CoreResult<()> {
     Ok(())
 }
 
+fn validate_remote_media_thumbnail(
+    thumbnail: RemoteMediaThumbnail,
+) -> CoreResult<RemoteMediaThumbnail> {
+    validate_non_empty("remote media thumbnail direct path", &thumbnail.direct_path)?;
+    validate_bytes_len("remote media thumbnail SHA-256", &thumbnail.sha256, 32)?;
+    validate_bytes_len(
+        "encrypted remote media thumbnail SHA-256",
+        &thumbnail.enc_sha256,
+        32,
+    )?;
+    validate_optional_non_zero("remote media thumbnail width", thumbnail.width)?;
+    validate_optional_non_zero("remote media thumbnail height", thumbnail.height)?;
+    Ok(thumbnail)
+}
+
 fn validate_media_retry_payload(payload: &MediaRetryPayload) -> CoreResult<()> {
     if payload.ciphertext.is_empty() {
         return Err(CoreError::Payload(
@@ -2494,7 +3188,100 @@ fn validate_bytes_len(label: &str, value: &Bytes, expected: usize) -> CoreResult
     Ok(())
 }
 
+#[cfg(feature = "noise")]
+fn validate_poll_event_message_secret(label: &str, value: &[u8]) -> CoreResult<()> {
+    if value.len() != 32 {
+        return Err(CoreError::Payload(format!("{label} must be 32 bytes")));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "noise")]
+fn normalize_crypto_jid(label: &str, jid: &str) -> CoreResult<String> {
+    jid_normalized_user(jid).ok_or_else(|| CoreError::Payload(format!("invalid {label}: {jid}")))
+}
+
+#[cfg(feature = "noise")]
+fn encrypt_poll_event_payload(
+    plaintext: &[u8],
+    message_secret: &[u8],
+    message_id: &str,
+    creator_jid: &str,
+    actor_jid: &str,
+    label: &str,
+    iv: &[u8],
+) -> CoreResult<Bytes> {
+    let mut key =
+        derive_poll_event_content_key(message_secret, message_id, creator_jid, actor_jid, label)?;
+    let aad = poll_event_additional_data(message_id, actor_jid);
+    let encrypted = wa_crypto::aes_256_gcm_encrypt(plaintext, &key, iv, &aad);
+    key.zeroize();
+    encrypted.map(Bytes::from).map_err(CoreError::Crypto)
+}
+
+#[cfg(feature = "noise")]
+fn decrypt_poll_event_payload(
+    encrypted_payload: &[u8],
+    message_secret: &[u8],
+    message_id: &str,
+    creator_jid: &str,
+    actor_jid: &str,
+    label: &str,
+    iv: &[u8],
+) -> CoreResult<Vec<u8>> {
+    let mut key =
+        derive_poll_event_content_key(message_secret, message_id, creator_jid, actor_jid, label)?;
+    let aad = poll_event_additional_data(message_id, actor_jid);
+    let decrypted = wa_crypto::aes_256_gcm_decrypt(encrypted_payload, &key, iv, &aad);
+    key.zeroize();
+    decrypted.map_err(CoreError::Crypto)
+}
+
+#[cfg(feature = "noise")]
+fn derive_poll_event_content_key(
+    message_secret: &[u8],
+    message_id: &str,
+    creator_jid: &str,
+    actor_jid: &str,
+    label: &str,
+) -> CoreResult<[u8; 32]> {
+    validate_poll_event_message_secret("message secret", message_secret)?;
+    validate_non_empty("message id", message_id)?;
+    validate_non_empty("creator JID", creator_jid)?;
+    validate_non_empty("actor JID", actor_jid)?;
+    let zero_key = [0u8; 32];
+    let mut key0 = wa_crypto::hmac_sha256(message_secret, &zero_key).map_err(CoreError::Crypto)?;
+    let mut sign = Vec::with_capacity(
+        message_id.len() + creator_jid.len() + actor_jid.len() + label.len() + 1,
+    );
+    sign.extend_from_slice(message_id.as_bytes());
+    sign.extend_from_slice(creator_jid.as_bytes());
+    sign.extend_from_slice(actor_jid.as_bytes());
+    sign.extend_from_slice(label.as_bytes());
+    sign.push(1);
+    let derived = wa_crypto::hmac_sha256(&sign, &key0).map_err(CoreError::Crypto);
+    key0.zeroize();
+    sign.zeroize();
+    derived
+}
+
+#[cfg(feature = "noise")]
+fn poll_event_additional_data(message_id: &str, actor_jid: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(message_id.len() + actor_jid.len() + 1);
+    aad.extend_from_slice(message_id.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(actor_jid.as_bytes());
+    aad
+}
+
 fn validate_non_empty(label: &str, value: &str) -> CoreResult<()> {
+    if value.is_empty() {
+        return Err(CoreError::Payload(format!("{label} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_non_empty_bytes(label: &str, value: &Bytes) -> CoreResult<()> {
     if value.is_empty() {
         return Err(CoreError::Payload(format!("{label} must not be empty")));
     }
@@ -2614,6 +3401,38 @@ pub fn build_receipt_node(
     Ok(node)
 }
 
+pub fn build_call_reject_node(
+    from_jid: &str,
+    call_from: &str,
+    call_id: &str,
+) -> CoreResult<BinaryNode> {
+    if jid_decode(from_jid).is_none() {
+        return Err(CoreError::Payload(format!(
+            "invalid local JID for call reject: {from_jid}"
+        )));
+    }
+    if jid_decode(call_from).is_none() {
+        return Err(CoreError::Payload(format!(
+            "invalid caller JID for call reject: {call_from}"
+        )));
+    }
+    if call_id.is_empty() {
+        return Err(CoreError::Payload(
+            "call reject requires non-empty call id".to_owned(),
+        ));
+    }
+
+    Ok(BinaryNode::new("call")
+        .with_attr("from", from_jid)
+        .with_attr("to", call_from)
+        .with_content(vec![
+            BinaryNode::new("reject")
+                .with_attr("call-id", call_id)
+                .with_attr("call-creator", call_from)
+                .with_attr("count", "0"),
+        ]))
+}
+
 pub fn build_media_retry_request_node(
     key: &MessageKey,
     requester_jid: &str,
@@ -2673,9 +3492,9 @@ pub fn build_encrypted_media_retry_request_node(
 }
 
 pub fn parse_media_retry_update(node: &BinaryNode) -> CoreResult<MediaRetryUpdate> {
-    if node.tag != "receipt" {
+    if !matches!(node.tag.as_str(), "receipt" | "notification") {
         return Err(CoreError::Protocol(format!(
-            "media retry update must be a receipt node, got {}",
+            "media retry update must be a receipt or notification node, got {}",
             node.tag
         )));
     }
@@ -2683,10 +3502,10 @@ pub fn parse_media_retry_update(node: &BinaryNode) -> CoreResult<MediaRetryUpdat
         .attrs
         .get("id")
         .cloned()
-        .ok_or_else(|| CoreError::Protocol("media retry receipt missing id".to_owned()))?;
-    validate_non_empty("media retry receipt id", &id)?;
+        .ok_or_else(|| CoreError::Protocol("media retry node missing id".to_owned()))?;
+    validate_non_empty("media retry node id", &id)?;
     let retry = child_node(node, "rmr")
-        .ok_or_else(|| CoreError::Protocol("media retry receipt missing rmr node".to_owned()))?;
+        .ok_or_else(|| CoreError::Protocol("media retry node missing rmr node".to_owned()))?;
     let remote_jid = retry
         .attrs
         .get("jid")
@@ -2734,9 +3553,8 @@ pub fn parse_media_retry_update(node: &BinaryNode) -> CoreResult<MediaRetryUpdat
         });
     }
 
-    let encrypt = child_node(node, "encrypt").ok_or_else(|| {
-        CoreError::Protocol("media retry receipt missing encrypt node".to_owned())
-    })?;
+    let encrypt = child_node(node, "encrypt")
+        .ok_or_else(|| CoreError::Protocol("media retry node missing encrypt node".to_owned()))?;
     let payload = MediaRetryPayload {
         ciphertext: node_bytes(child_node(encrypt, "enc_p").ok_or_else(|| {
             CoreError::Protocol("media retry encrypt node missing enc_p".to_owned())
@@ -2953,6 +3771,80 @@ where
     })
 }
 
+pub async fn build_group_sender_key_message_relay<E>(
+    group_jid: &str,
+    message: Message,
+    encryptor: &E,
+    options: MessageRelayOptions,
+) -> CoreResult<MessageRelay>
+where
+    E: MessageEncryptor,
+{
+    let decoded = jid_decode(group_jid).ok_or_else(|| {
+        CoreError::Payload(format!(
+            "invalid group JID for sender-key message relay: {group_jid}"
+        ))
+    })?;
+    if decoded.server != JidServer::GUs {
+        return Err(CoreError::Payload(format!(
+            "sender-key message relay requires a group JID: {group_jid}"
+        )));
+    }
+
+    let MessageRelayOptions {
+        message_id,
+        sender_jid,
+        additional_attributes,
+        additional_nodes,
+        device_identity_node: _,
+        encryption_attributes,
+    } = options;
+
+    let message_id =
+        message_id.unwrap_or_else(|| generate_message_id_v2_now(sender_jid.as_deref()));
+    if message_id.is_empty() {
+        return Err(CoreError::Payload(
+            "message relay id must not be empty".to_owned(),
+        ));
+    }
+
+    let stanza_type = message_stanza_type(&message);
+    let plaintext = encode_message(&message)?;
+    let encrypted = encryptor.encrypt_message(group_jid, plaintext).await?;
+    if encrypted.ciphertext_type != MessageCiphertextType::SenderKey {
+        return Err(CoreError::Payload(format!(
+            "group sender-key relay requires skmsg ciphertext, got {}",
+            encrypted.ciphertext_type.as_stanza_type()
+        )));
+    }
+
+    let mut enc_node = BinaryNode::new("enc")
+        .with_attr("v", "2")
+        .with_attr("type", encrypted.ciphertext_type.as_stanza_type())
+        .with_content(encrypted.ciphertext);
+    for (key, value) in &encryption_attributes {
+        enc_node = enc_node.with_attr(key, value);
+    }
+
+    let mut content = vec![enc_node];
+    content.extend(additional_nodes);
+    let mut node = BinaryNode::new("message")
+        .with_attr("id", message_id.clone())
+        .with_attr("to", group_jid)
+        .with_attr("type", stanza_type)
+        .with_content(content);
+    for (key, value) in additional_attributes {
+        node = node.with_attr(key, value);
+    }
+
+    Ok(MessageRelay {
+        message_id,
+        node,
+        recipient_count: 1,
+        should_include_device_identity: false,
+    })
+}
+
 #[must_use]
 pub fn message_stanza_type(message: &Message) -> &'static str {
     let message = unwrapped_message_content(message);
@@ -2982,7 +3874,7 @@ pub fn message_stanza_type(message: &Message) -> &'static str {
     }
 }
 
-fn unwrapped_message_content(message: &Message) -> &Message {
+pub(crate) fn unwrapped_message_content(message: &Message) -> &Message {
     let mut current = message;
     for _ in 0..5 {
         let Some(inner) = future_proof_inner_message(current) else {
@@ -2993,7 +3885,7 @@ fn unwrapped_message_content(message: &Message) -> &Message {
     current
 }
 
-fn future_proof_inner_message(message: &Message) -> Option<&Message> {
+pub(crate) fn future_proof_inner_message(message: &Message) -> Option<&Message> {
     message
         .ephemeral_message
         .as_deref()
@@ -3002,9 +3894,23 @@ fn future_proof_inner_message(message: &Message) -> Option<&Message> {
         .or(message.view_once_message_v2.as_deref())
         .or(message.view_once_message_v2_extension.as_deref())
         .or(message.edited_message.as_deref())
+        .or(message.group_mentioned_message.as_deref())
+        .or(message.bot_invoke_message.as_deref())
+        .or(message.lottie_sticker_message.as_deref())
+        .or(message.event_cover_image.as_deref())
+        .or(message.status_mention_message.as_deref())
+        .or(message.poll_creation_option_image_message.as_deref())
         .or(message.associated_child_message.as_deref())
+        .or(message.group_status_mention_message.as_deref())
+        .or(message.poll_creation_message_v4.as_deref())
+        .or(message.status_add_yours.as_deref())
         .or(message.group_status_message.as_deref())
+        .or(message.limit_sharing_message.as_deref())
+        .or(message.bot_task_message.as_deref())
+        .or(message.question_message.as_deref())
         .or(message.group_status_message_v2.as_deref())
+        .or(message.bot_forwarded_message.as_deref())
+        .or(message.question_reply_message.as_deref())
         .and_then(|wrapper| wrapper.message.as_deref())
 }
 
@@ -3141,9 +4047,28 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use wa_binary::BinaryNodeContent;
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct RecordingEncryptor {
         calls: Arc<Mutex<Vec<(String, Bytes)>>>,
+        ciphertext_type: Option<MessageCiphertextType>,
+    }
+
+    impl RecordingEncryptor {
+        fn sender_key() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                ciphertext_type: Some(MessageCiphertextType::SenderKey),
+            }
+        }
+    }
+
+    impl Default for RecordingEncryptor {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                ciphertext_type: None,
+            }
+        }
     }
 
     #[async_trait]
@@ -3157,11 +4082,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((recipient_jid.to_owned(), plaintext.clone()));
-            let ciphertext_type = if recipient_jid.contains(":2@") {
-                MessageCiphertextType::PreKey
-            } else {
-                MessageCiphertextType::Message
-            };
+            let ciphertext_type = self.ciphertext_type.unwrap_or_else(|| {
+                if recipient_jid.contains(":2@") {
+                    MessageCiphertextType::PreKey
+                } else {
+                    MessageCiphertextType::Message
+                }
+            });
             Ok(MessageEncryption::new(ciphertext_type, plaintext))
         }
     }
@@ -3350,6 +4277,35 @@ mod tests {
     }
 
     #[test]
+    fn message_stanza_type_unwraps_modern_future_proof_wrappers() {
+        let lottie = Message {
+            lottie_sticker_message: Some(Box::new(future_proof_message(Message {
+                sticker_message: Some(Box::new(StickerMessage::default())),
+                ..Message::default()
+            }))),
+            ..Message::default()
+        };
+        let status_mention = Message {
+            status_mention_message: Some(Box::new(future_proof_message(Message {
+                image_message: Some(Box::new(ImageMessage::default())),
+                ..Message::default()
+            }))),
+            ..Message::default()
+        };
+        let poll_v4 = Message {
+            poll_creation_message_v4: Some(Box::new(future_proof_message(Message {
+                poll_creation_message: Some(Box::new(PollCreationMessage::default())),
+                ..Message::default()
+            }))),
+            ..Message::default()
+        };
+
+        assert_eq!(message_stanza_type(&lottie), "media");
+        assert_eq!(message_stanza_type(&status_mention), "media");
+        assert_eq!(message_stanza_type(&poll_v4), "poll");
+    }
+
+    #[test]
     fn builds_album_phone_number_and_limit_sharing_messages() {
         let album =
             build_album_message(AlbumContent::new(2, 1).with_context(MessageContext::new()))
@@ -3453,14 +4409,47 @@ mod tests {
         );
         assert_eq!(list_body.description.as_deref(), Some("First row"));
 
+        let sender_key_distribution = build_sender_key_distribution_message(
+            SenderKeyDistributionContent::new("123@g.us", Bytes::from_static(b"sender-key")),
+        )
+        .unwrap();
+        let sender_key_distribution_body = sender_key_distribution
+            .sender_key_distribution_message
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            sender_key_distribution_body.group_id.as_deref(),
+            Some("123@g.us")
+        );
+        assert_eq!(
+            sender_key_distribution_body
+                .axolotl_sender_key_distribution_message
+                .as_deref(),
+            Some(&b"sender-key"[..])
+        );
+
         assert!(build_button_reply_message(ButtonReplyContent::new("", "Open")).is_err());
         assert!(
             build_template_button_reply_message(TemplateButtonReplyContent::new("tpl", ""))
                 .is_err()
         );
         assert!(build_list_reply_message(ListReplyContent::new("Menu", "")).is_err());
+        assert!(
+            build_sender_key_distribution_message(SenderKeyDistributionContent::new(
+                "123@s.whatsapp.net",
+                Bytes::from_static(b"sender-key"),
+            ))
+            .is_err()
+        );
+        assert!(
+            build_sender_key_distribution_message(SenderKeyDistributionContent::new(
+                "123@g.us",
+                Bytes::new(),
+            ))
+            .is_err()
+        );
 
-        for message in [button, template, list] {
+        for message in [button, template, list, sender_key_distribution] {
             assert_eq!(message_stanza_type(&message), "text");
             let encoded = encode_message(&message).unwrap();
             assert_eq!(Message::decode(encoded).unwrap(), message);
@@ -3566,9 +4555,24 @@ mod tests {
         let mut video = VideoContent::new(sample_uploaded_media(), "video/mp4");
         video.caption = Some("clip".to_owned());
         video.seconds = Some(5);
+        video = video.with_remote_thumbnail(RemoteMediaThumbnail::new(
+            "/thumb/video",
+            Bytes::from(vec![6; 32]),
+            Bytes::from(vec![7; 32]),
+        ));
         video.gif_playback = true;
         let video = build_video_message(video).unwrap();
-        assert_eq!(video.video_message.unwrap().gif_playback, Some(true));
+        let video_body = video.video_message.unwrap();
+        assert_eq!(video_body.gif_playback, Some(true));
+        assert_eq!(
+            video_body.thumbnail_direct_path.as_deref(),
+            Some("/thumb/video")
+        );
+        assert_eq!(video_body.thumbnail_sha256, Some(Bytes::from(vec![6; 32])));
+        assert_eq!(
+            video_body.thumbnail_enc_sha256,
+            Some(Bytes::from(vec![7; 32]))
+        );
 
         let mut ptv = VideoContent::new(sample_uploaded_media(), "video/mp4");
         ptv.seconds = Some(7);
@@ -3596,10 +4600,32 @@ mod tests {
         document.title = Some("Report".to_owned());
         document.file_name = Some("report.pdf".to_owned());
         document.page_count = Some(2);
+        document = document.with_remote_thumbnail(
+            RemoteMediaThumbnail::new(
+                "/thumb/document",
+                Bytes::from(vec![8; 32]),
+                Bytes::from(vec![9; 32]),
+            )
+            .with_dimensions(320, 180),
+        );
         let document = build_document_message(document).unwrap();
         let document_body = document.document_message.unwrap();
         assert_eq!(document_body.title.as_deref(), Some("Report"));
         assert_eq!(document_body.page_count, Some(2));
+        assert_eq!(
+            document_body.thumbnail_direct_path.as_deref(),
+            Some("/thumb/document")
+        );
+        assert_eq!(
+            document_body.thumbnail_sha256,
+            Some(Bytes::from(vec![8; 32]))
+        );
+        assert_eq!(
+            document_body.thumbnail_enc_sha256,
+            Some(Bytes::from(vec![9; 32]))
+        );
+        assert_eq!(document_body.thumbnail_width, Some(320));
+        assert_eq!(document_body.thumbnail_height, Some(180));
 
         let mut sticker = StickerContent::new(sample_uploaded_media(), "image/webp");
         sticker.height = Some(512);
@@ -3613,6 +4639,149 @@ mod tests {
                 .into_proto()
                 .unwrap();
         assert!(enum_message.image_message.is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_remote_media_thumbnail_metadata() {
+        let video = VideoContent::new(sample_uploaded_media(), "video/mp4").with_remote_thumbnail(
+            RemoteMediaThumbnail::new("", Bytes::from(vec![1; 32]), Bytes::from(vec![2; 32])),
+        );
+        assert!(build_video_message(video).is_err());
+
+        let document = DocumentContent::new(sample_uploaded_media(), "application/pdf")
+            .with_remote_thumbnail(RemoteMediaThumbnail::new(
+                "/thumb/document",
+                Bytes::from(vec![1; 31]),
+                Bytes::from(vec![2; 32]),
+            ));
+        assert!(build_document_message(document).is_err());
+
+        let document = DocumentContent::new(sample_uploaded_media(), "application/pdf")
+            .with_remote_thumbnail(
+                RemoteMediaThumbnail::new(
+                    "/thumb/document",
+                    Bytes::from(vec![1; 32]),
+                    Bytes::from(vec![2; 32]),
+                )
+                .with_dimensions(0, 180),
+            );
+        assert!(build_document_message(document).is_err());
+    }
+
+    #[cfg(feature = "image")]
+    #[test]
+    fn generated_image_thumbnail_sets_dimensions_and_proto_thumbnail_for_media() {
+        use image::codecs::jpeg::JpegEncoder;
+        use image::{Rgb, RgbImage};
+
+        let source = RgbImage::from_fn(80, 40, |x, y| {
+            Rgb([(x % 255) as u8, (y % 255) as u8, ((x + y) % 255) as u8])
+        });
+        let mut source_bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut source_bytes, 90)
+            .encode_image(&source)
+            .unwrap();
+
+        let content = ImageContent::new(sample_uploaded_media(), "image/jpeg")
+            .with_generated_jpeg_thumbnail(&source_bytes, crate::JpegThumbnailOptions::default())
+            .unwrap();
+        assert_eq!(content.width, Some(80));
+        assert_eq!(content.height, Some(40));
+        let thumbnail = content.jpeg_thumbnail.clone().unwrap();
+        assert!(thumbnail.starts_with(&[0xff, 0xd8]));
+
+        let message = build_image_message(content).unwrap();
+        let image = message.image_message.unwrap();
+        assert_eq!(image.width, Some(80));
+        assert_eq!(image.height, Some(40));
+        assert_eq!(image.jpeg_thumbnail, Some(thumbnail));
+
+        let video_content = VideoContent::new(sample_uploaded_media(), "video/mp4")
+            .with_generated_jpeg_thumbnail(&source_bytes, crate::JpegThumbnailOptions::default())
+            .unwrap();
+        assert_eq!(video_content.width, Some(80));
+        assert_eq!(video_content.height, Some(40));
+        let video_thumbnail = video_content.jpeg_thumbnail.clone().unwrap();
+        assert!(video_thumbnail.starts_with(&[0xff, 0xd8]));
+
+        let video = build_video_message(video_content).unwrap();
+        let video = video.video_message.unwrap();
+        assert_eq!(video.width, Some(80));
+        assert_eq!(video.height, Some(40));
+        assert_eq!(video.jpeg_thumbnail, Some(video_thumbnail));
+
+        let document_content = DocumentContent::new(sample_uploaded_media(), "application/pdf")
+            .with_generated_jpeg_thumbnail(&source_bytes, crate::JpegThumbnailOptions::default())
+            .unwrap();
+        assert_eq!(document_content.thumbnail_width, Some(32));
+        assert_eq!(document_content.thumbnail_height, Some(16));
+        let document_thumbnail = document_content.jpeg_thumbnail.clone().unwrap();
+        assert!(document_thumbnail.starts_with(&[0xff, 0xd8]));
+
+        let document = build_document_message(document_content).unwrap();
+        let document = document.document_message.unwrap();
+        assert_eq!(document.thumbnail_width, Some(32));
+        assert_eq!(document.thumbnail_height, Some(16));
+        assert_eq!(document.jpeg_thumbnail, Some(document_thumbnail));
+    }
+
+    #[cfg(all(feature = "image", unix))]
+    #[test]
+    fn generated_pdf_thumbnail_sets_document_proto_thumbnail() {
+        use image::codecs::jpeg::JpegEncoder;
+        use image::{Rgb, RgbImage};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = test_message_path("pdf-thumbnail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let frame_path = dir.join("page.jpg");
+        let log_path = dir.join("args.log");
+        let renderer_path = dir.join("fake-pdftoppm");
+        let pdf_path = dir.join("doc.pdf");
+        let frame = RgbImage::from_fn(96, 48, |x, y| {
+            Rgb([(x % 255) as u8, (y % 255) as u8, ((x + y) % 255) as u8])
+        });
+        let mut frame_bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut frame_bytes, 90)
+            .encode_image(&frame)
+            .unwrap();
+        std::fs::write(&frame_path, frame_bytes).unwrap();
+        std::fs::write(&pdf_path, b"%PDF-1.7\n").unwrap();
+        std::fs::write(
+            &renderer_path,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > {}\nout=\"\"\nfor arg do out=\"$arg\"; done\ncp {} \"$out.jpg\"\n",
+                shell_quote(&log_path),
+                shell_quote(&frame_path),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&renderer_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&renderer_path, permissions).unwrap();
+
+        let content = DocumentContent::new(sample_uploaded_media(), "application/pdf")
+            .with_generated_pdf_thumbnail(
+                &pdf_path,
+                crate::PdfThumbnailOptions {
+                    pdftoppm_path: renderer_path,
+                    page: 1,
+                    dpi: 72,
+                    output: crate::JpegThumbnailOptions::default(),
+                    temp_dir: Some(dir),
+                },
+            )
+            .unwrap();
+        assert_eq!(content.thumbnail_width, Some(32));
+        assert_eq!(content.thumbnail_height, Some(16));
+        let thumbnail = content.jpeg_thumbnail.clone().unwrap();
+        assert!(thumbnail.starts_with(&[0xff, 0xd8]));
+
+        let document = build_document_message(content).unwrap();
+        let document = document.document_message.unwrap();
+        assert_eq!(document.thumbnail_width, Some(32));
+        assert_eq!(document.thumbnail_height, Some(16));
+        assert_eq!(document.jpeg_thumbnail, Some(thumbnail));
     }
 
     #[test]
@@ -3721,6 +4890,61 @@ mod tests {
             Some("https://call.example.invalid/room")
         );
 
+        let update_key = build_message_key(
+            "123@g.us",
+            false,
+            "poll-1",
+            Some("456@s.whatsapp.net".to_owned()),
+        )
+        .unwrap();
+        let poll_update = build_poll_update_message(
+            PollUpdateContent::new(
+                update_key.clone(),
+                Bytes::from_static(b"encrypted-vote"),
+                Bytes::from_static(b"vote-iv"),
+            )
+            .with_sender_timestamp_ms(1_700_000_001),
+        )
+        .unwrap();
+        let poll_update_body = poll_update.poll_update_message.as_ref().unwrap();
+        assert_eq!(
+            poll_update_body.poll_creation_message_key.as_ref(),
+            Some(&update_key)
+        );
+        assert_eq!(poll_update_body.sender_timestamp_ms, Some(1_700_000_001));
+        assert!(poll_update_body.metadata.is_some());
+        let vote = poll_update_body.vote.as_ref().unwrap();
+        assert_eq!(vote.enc_payload.as_deref(), Some(&b"encrypted-vote"[..]));
+        assert_eq!(vote.enc_iv.as_deref(), Some(&b"vote-iv"[..]));
+        assert_eq!(message_stanza_type(&poll_update), "poll");
+
+        let response_key = build_message_key(
+            "123@g.us",
+            false,
+            "event-1",
+            Some("456@s.whatsapp.net".to_owned()),
+        )
+        .unwrap();
+        let event_response = build_event_response_message(EventResponseContent::new(
+            response_key.clone(),
+            Bytes::from_static(b"encrypted-response"),
+            Bytes::from_static(b"response-iv"),
+        ))
+        .unwrap();
+        let event_response_body = event_response.enc_event_response_message.unwrap();
+        assert_eq!(
+            event_response_body.event_creation_message_key.as_ref(),
+            Some(&response_key)
+        );
+        assert_eq!(
+            event_response_body.enc_payload.as_deref(),
+            Some(&b"encrypted-response"[..])
+        );
+        assert_eq!(
+            event_response_body.enc_iv.as_deref(),
+            Some(&b"response-iv"[..])
+        );
+
         let placeholder_key =
             build_message_key("123@s.whatsapp.net", false, "missing-1", None).unwrap();
         let placeholder =
@@ -3790,6 +5014,120 @@ mod tests {
         assert_eq!(message_stanza_type(&disappearing), "text");
     }
 
+    #[cfg(feature = "noise")]
+    #[test]
+    fn derives_and_decrypts_poll_vote_and_event_response_payloads() {
+        let poll_key = build_message_key(
+            "123@g.us",
+            false,
+            "poll-parent-1",
+            Some("456@s.whatsapp.net".to_owned()),
+        )
+        .unwrap();
+        let poll_secret = Bytes::from(vec![7u8; 32]);
+        let poll_vote = PollVoteContent::from_option_names(
+            poll_key.clone(),
+            ["Rice"],
+            poll_secret.clone(),
+            "456@s.whatsapp.net",
+            "789:1@s.whatsapp.net",
+        )
+        .unwrap()
+        .with_sender_timestamp_ms(1_700_000_001);
+        let poll_update = build_encrypted_poll_update_content_with_iv(
+            poll_vote,
+            Bytes::from_static(b"poll-vote-iv"),
+        )
+        .unwrap();
+        assert_eq!(poll_update.encrypted_iv.as_ref(), b"poll-vote-iv");
+        assert_eq!(poll_update.sender_timestamp_ms, Some(1_700_000_001));
+        assert!(poll_update.include_metadata);
+        let poll_message = build_poll_update_message(poll_update).unwrap();
+        let poll_update = poll_message.poll_update_message.as_ref().unwrap();
+        let vote = poll_update.vote.as_ref().unwrap();
+        let selected_hash = Bytes::copy_from_slice(&Sha256::digest(b"Rice"));
+        let plaintext_vote = wa_proto::proto::message::PollVoteMessage {
+            selected_options: vec![selected_hash.clone()],
+        }
+        .encode_to_vec();
+        assert_ne!(vote.enc_payload.as_deref(), Some(plaintext_vote.as_slice()));
+
+        let decrypted_vote = decrypt_poll_vote_message(
+            vote,
+            "poll-parent-1",
+            "456@s.whatsapp.net",
+            "789@s.whatsapp.net",
+            &poll_secret,
+        )
+        .unwrap();
+        assert_eq!(decrypted_vote.selected_options.len(), 1);
+        assert_eq!(decrypted_vote.selected_options[0], selected_hash);
+        assert!(
+            decrypt_poll_vote_message(
+                vote,
+                "poll-parent-1",
+                "456@s.whatsapp.net",
+                "790@s.whatsapp.net",
+                &poll_secret,
+            )
+            .is_err()
+        );
+
+        let event_key = build_message_key(
+            "123@g.us",
+            false,
+            "event-parent-1",
+            Some("456@s.whatsapp.net".to_owned()),
+        )
+        .unwrap();
+        let event_secret = Bytes::from(vec![9u8; 32]);
+        let event_payload = EventResponsePayload::new(
+            event_key.clone(),
+            EventResponseKind::Going,
+            event_secret.clone(),
+            "456@s.whatsapp.net",
+            "789:1@s.whatsapp.net",
+        )
+        .with_timestamp_ms(1_700_000_002)
+        .with_extra_guest_count(2);
+        let event_response = build_encrypted_event_response_content_with_iv(
+            event_payload,
+            Bytes::from_static(b"event-rsvpiv"),
+        )
+        .unwrap();
+        assert_eq!(event_response.encrypted_iv.as_ref(), b"event-rsvpiv");
+        let event_message = build_event_response_message(event_response).unwrap();
+        let encrypted_event = event_message.enc_event_response_message.as_ref().unwrap();
+        assert_eq!(
+            encrypted_event.event_creation_message_key.as_ref(),
+            Some(&event_key)
+        );
+        let decrypted_event = decrypt_event_response_message(
+            encrypted_event,
+            "event-parent-1",
+            "456@s.whatsapp.net",
+            "789@s.whatsapp.net",
+            &event_secret,
+        )
+        .unwrap();
+        assert_eq!(
+            decrypted_event.response,
+            Some(event_response_message::EventResponseType::Going as i32)
+        );
+        assert_eq!(decrypted_event.timestamp_ms, Some(1_700_000_002));
+        assert_eq!(decrypted_event.extra_guest_count, Some(2));
+        assert!(
+            decrypt_event_response_message(
+                encrypted_event,
+                "event-parent-1",
+                "456@s.whatsapp.net",
+                "789@s.whatsapp.net",
+                &[9u8; 31],
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn rejects_invalid_content_builder_inputs() {
         assert!(
@@ -3828,6 +5166,19 @@ mod tests {
             ))
             .is_err()
         );
+        let err = match build_poll_message(PollContent::new(
+            "Poll",
+            ["A", "A"],
+            1,
+            Bytes::from(vec![1u8; 32]),
+        )) {
+            Ok(_) => panic!("duplicate poll options should be rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CoreError::Payload(message) if message == "poll options must be unique"
+        ));
         assert!(
             build_event_message(EventContent {
                 end_time: Some(9),
@@ -3841,6 +5192,123 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            build_poll_update_message(PollUpdateContent::new(
+                MessageKey::default(),
+                Bytes::from_static(b"payload"),
+                Bytes::from_static(b"iv")
+            ))
+            .is_err()
+        );
+        let key = build_message_key(
+            "123@g.us",
+            false,
+            "poll-1",
+            Some("456@s.whatsapp.net".to_owned()),
+        )
+        .unwrap();
+        assert!(
+            build_poll_update_message(PollUpdateContent::new(
+                key.clone(),
+                Bytes::new(),
+                Bytes::from_static(b"iv")
+            ))
+            .is_err()
+        );
+        assert!(
+            build_event_response_message(EventResponseContent::new(
+                key,
+                Bytes::from_static(b"payload"),
+                Bytes::new()
+            ))
+            .is_err()
+        );
+        #[cfg(feature = "noise")]
+        {
+            let key = build_message_key(
+                "123@g.us",
+                false,
+                "poll-1",
+                Some("456@s.whatsapp.net".to_owned()),
+            )
+            .unwrap();
+            assert!(
+                build_encrypted_poll_update_content_with_iv(
+                    PollVoteContent::new(
+                        key.clone(),
+                        [Bytes::from(vec![1u8; 31])],
+                        Bytes::from(vec![1u8; 32]),
+                        "456@s.whatsapp.net",
+                        "789@s.whatsapp.net",
+                    ),
+                    Bytes::from_static(b"poll-vote-iv"),
+                )
+                .is_err()
+            );
+            assert!(
+                build_encrypted_poll_update_content_with_iv(
+                    PollVoteContent::new(
+                        key.clone(),
+                        [Bytes::from(vec![1u8; 32])],
+                        Bytes::from(vec![1u8; 31]),
+                        "456@s.whatsapp.net",
+                        "789@s.whatsapp.net",
+                    ),
+                    Bytes::from_static(b"poll-vote-iv"),
+                )
+                .is_err()
+            );
+            let err = match build_encrypted_poll_update_content_with_iv(
+                PollVoteContent::new(
+                    key.clone(),
+                    [Bytes::from(vec![1u8; 32]), Bytes::from(vec![1u8; 32])],
+                    Bytes::from(vec![1u8; 32]),
+                    "456@s.whatsapp.net",
+                    "789@s.whatsapp.net",
+                ),
+                Bytes::from_static(b"poll-vote-iv"),
+            ) {
+                Ok(_) => panic!("duplicate selected poll option hashes should be rejected"),
+                Err(err) => err,
+            };
+            assert!(matches!(
+                err,
+                CoreError::Payload(message)
+                    if message == "selected poll option hashes must be unique"
+            ));
+            assert!(
+                build_encrypted_event_response_content_with_iv(
+                    EventResponsePayload::new(
+                        key.clone(),
+                        EventResponseKind::Going,
+                        Bytes::from(vec![1u8; 32]),
+                        "456@s.whatsapp.net",
+                        "789@s.whatsapp.net",
+                    ),
+                    Bytes::from_static(b"short-iv"),
+                )
+                .is_err()
+            );
+            let err = match build_encrypted_event_response_content_with_iv(
+                EventResponsePayload::new(
+                    key,
+                    EventResponseKind::Going,
+                    Bytes::from(vec![1u8; 32]),
+                    "456@s.whatsapp.net",
+                    "789@s.whatsapp.net",
+                )
+                .with_extra_guest_count(-1),
+                Bytes::from_static(b"event-rsvpiv"),
+            ) {
+                Ok(_) => panic!("negative extra guest count should be rejected"),
+                Err(err) => err,
+            };
+            assert!(matches!(
+                err,
+                CoreError::Payload(message)
+                    if message == "event response extra guest count must not be negative"
+            ));
+        }
         assert!(
             build_image_message(ImageContent::new(
                 sample_uploaded_media_without_path(),
@@ -3961,6 +5429,28 @@ mod tests {
     }
 
     #[test]
+    fn builds_call_reject_node() {
+        let node =
+            build_call_reject_node("999:2@s.whatsapp.net", "123@s.whatsapp.net", "call-1").unwrap();
+
+        assert_eq!(node.tag, "call");
+        assert_eq!(node.attrs["from"], "999:2@s.whatsapp.net");
+        assert_eq!(node.attrs["to"], "123@s.whatsapp.net");
+        let Some(BinaryNodeContent::Nodes(children)) = &node.content else {
+            panic!("call reject should contain reject child");
+        };
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].tag, "reject");
+        assert_eq!(children[0].attrs["call-id"], "call-1");
+        assert_eq!(children[0].attrs["call-creator"], "123@s.whatsapp.net");
+        assert_eq!(children[0].attrs["count"], "0");
+
+        assert!(build_call_reject_node("invalid", "123@s.whatsapp.net", "call-1").is_err());
+        assert!(build_call_reject_node("999@s.whatsapp.net", "invalid", "call-1").is_err());
+        assert!(build_call_reject_node("999@s.whatsapp.net", "123@s.whatsapp.net", "").is_err());
+    }
+
+    #[test]
     fn builds_and_parses_media_retry_request_node() {
         let key = build_message_key(
             "123@s.whatsapp.net",
@@ -4026,6 +5516,43 @@ mod tests {
                 status_code: 404,
             })
         );
+    }
+
+    #[test]
+    fn parses_media_retry_notification_update() {
+        let node = BinaryNode::new("notification")
+            .with_attr("id", "msg-2")
+            .with_attr("type", "mediaretry")
+            .with_content(vec![
+                BinaryNode::new("rmr")
+                    .with_attr("jid", "123@s.whatsapp.net")
+                    .with_attr("from_me", "false")
+                    .with_attr("participant", "456@s.whatsapp.net"),
+                BinaryNode::new("encrypt").with_content(vec![
+                    BinaryNode::new("enc_p").with_content(Bytes::from_static(b"retry-payload")),
+                    BinaryNode::new("enc_iv").with_content(Bytes::from(vec![7u8; 12])),
+                ]),
+            ]);
+
+        let update = parse_media_retry_update(&node).unwrap();
+        assert_eq!(
+            update.key,
+            build_message_key(
+                "123@s.whatsapp.net",
+                false,
+                "msg-2",
+                Some("456@s.whatsapp.net".to_owned())
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            update.media,
+            Some(MediaRetryPayload::new(
+                Bytes::from_static(b"retry-payload"),
+                Bytes::from(vec![7u8; 12])
+            ))
+        );
+        assert_eq!(update.error, None);
     }
 
     #[cfg(feature = "noise")]
@@ -4230,6 +5757,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builds_group_sender_key_message_relay_with_root_encryption() {
+        let message = build_text_message("hello group").unwrap();
+        let encryptor = RecordingEncryptor::sender_key();
+        let relay = build_group_sender_key_message_relay(
+            "123@g.us",
+            message.clone(),
+            &encryptor,
+            MessageRelayOptions::new()
+                .with_message_id("group-msg-1")
+                .with_attribute("category", "peer")
+                .with_encryption_attribute("decrypt-fail", "hide")
+                .with_device_identity_node(
+                    BinaryNode::new("device-identity").with_content(Bytes::from_static(b"ignore")),
+                )
+                .with_node(BinaryNode::new("meta").with_attr("source", "test")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(relay.message_id, "group-msg-1");
+        assert_eq!(relay.recipient_count, 1);
+        assert!(!relay.should_include_device_identity);
+        assert_eq!(relay.node.tag, "message");
+        assert_eq!(relay.node.attrs["id"], "group-msg-1");
+        assert_eq!(relay.node.attrs["to"], "123@g.us");
+        assert_eq!(relay.node.attrs["type"], "text");
+        assert_eq!(relay.node.attrs["category"], "peer");
+        assert!(!relay.node.attrs.contains_key("phash"));
+
+        let Some(BinaryNodeContent::Nodes(content)) = &relay.node.content else {
+            panic!("relay node should contain child nodes");
+        };
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0].tag, "enc");
+        assert_eq!(content[0].attrs["v"], "2");
+        assert_eq!(content[0].attrs["type"], "skmsg");
+        assert_eq!(content[0].attrs["decrypt-fail"], "hide");
+        assert_eq!(content[1].tag, "meta");
+        assert_eq!(content[1].attrs["source"], "test");
+        assert!(content.iter().all(|node| node.tag != "participants"));
+        assert!(content.iter().all(|node| node.tag != "device-identity"));
+
+        let calls = encryptor.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "123@g.us");
+        let plaintext = Message::decode(calls[0].1.clone()).unwrap();
+        assert_eq!(plaintext, message);
+        assert_eq!(
+            content[0].content,
+            Some(BinaryNodeContent::Bytes(calls[0].1.clone()))
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_group_sender_key_message_relay_inputs() {
+        let message = build_text_message("hello").unwrap();
+        let sender_key_encryptor = RecordingEncryptor::sender_key();
+        assert!(
+            build_group_sender_key_message_relay(
+                "123@s.whatsapp.net",
+                message.clone(),
+                &sender_key_encryptor,
+                MessageRelayOptions::new(),
+            )
+            .await
+            .is_err()
+        );
+
+        let message_encryptor = RecordingEncryptor::default();
+        assert!(
+            build_group_sender_key_message_relay(
+                "123@g.us",
+                message,
+                &message_encryptor,
+                MessageRelayOptions::new(),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_invalid_message_relay_inputs() {
         let message = build_text_message("hello").unwrap();
         let encryptor = RecordingEncryptor::default();
@@ -4282,6 +5891,26 @@ mod tests {
             Bytes::from(vec![3u8; 32]),
             1024,
         )
+    }
+
+    fn future_proof_message(message: Message) -> FutureProofMessage {
+        FutureProofMessage {
+            message: Some(Box::new(message)),
+        }
+    }
+
+    #[cfg(all(feature = "image", unix))]
+    fn shell_quote(path: &std::path::Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
+    #[cfg(all(feature = "image", unix))]
+    fn test_message_path(label: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("wa-core-message-{label}-{suffix}"))
     }
 
     fn only_child(node: &BinaryNode) -> &BinaryNode {

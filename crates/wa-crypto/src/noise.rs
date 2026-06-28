@@ -1,13 +1,12 @@
 use crate::{
     CryptoError, KeyPair, aes_256_gcm_decrypt, aes_256_gcm_encrypt, hkdf_sha256, sha256_hash,
-    shared_key,
+    shared_key, verify_curve25519_signature,
 };
 use bytes::{BufMut, Bytes, BytesMut};
 use prost::Message;
 use wa_proto::proto::cert_chain::noise_certificate::Details as CertificateDetails;
 use wa_proto::proto::handshake_message::{ClientFinish, ClientHello, ServerHello};
 use wa_proto::proto::{CertChain, HandshakeMessage};
-use xeddsa::Verify;
 use zeroize::Zeroize;
 
 const IV_LEN: usize = 12;
@@ -77,9 +76,14 @@ impl NoiseCertificateVerifier for XEdDsaNoiseCertificateVerifier {
         let Ok(signature) = <[u8; 64]>::try_from(signature) else {
             return false;
         };
-        xeddsa::xed25519::PublicKey(public_key)
-            .verify(message, &signature)
-            .is_ok()
+        // libsignal `Curve.calculateSignature` (curve25519-donna / curve25519-js
+        // `curve25519_sign`) embeds the Edwards public-key sign bit in the high bit
+        // of signature byte 63 and verifies by restoring it onto the converted
+        // Edwards key. WhatsApp/Baileys signatures (signed pre-keys, sender keys,
+        // noise certs) all use this scheme, so verify it directly rather than via the
+        // strict-XEdDSA `xeddsa` crate (which assumes that bit is always clear and
+        // therefore rejects ~half of real libsignal signatures).
+        verify_curve25519_signature(&public_key, message, &signature)
     }
 }
 

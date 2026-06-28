@@ -603,6 +603,15 @@ pub fn unpad_random_max16(input: &[u8]) -> CoreResult<Bytes> {
     Ok(Bytes::copy_from_slice(&input[..input.len() - pad_len]))
 }
 
+#[must_use]
+pub fn pad_random_max16(input: Bytes) -> Bytes {
+    let pad_len = rand::random::<u8>() % 16 + 1;
+    let mut out = Vec::with_capacity(input.len() + usize::from(pad_len));
+    out.extend_from_slice(&input);
+    out.extend(std::iter::repeat_n(pad_len, usize::from(pad_len)));
+    Bytes::from(out)
+}
+
 fn ensure_tag(node: &BinaryNode, expected: &str) -> CoreResult<()> {
     if node.tag != expected {
         return Err(CoreError::Protocol(format!(
@@ -1216,6 +1225,23 @@ mod tests {
         assert!(unpad_random_max16(&[]).is_err());
         assert!(unpad_random_max16(&[1, 2, 17]).is_err());
         assert!(unpad_random_max16(&[1, 3, 2]).is_err());
+    }
+
+    #[test]
+    fn pads_random_max16_payloads() {
+        let padded = super::pad_random_max16(Bytes::from_static(b"hello"));
+        assert!(padded.len() > 5);
+        let pad_len = usize::from(*padded.last().unwrap());
+        assert!((1..=16).contains(&pad_len));
+        assert!(
+            padded[padded.len() - pad_len..]
+                .iter()
+                .all(|byte| usize::from(*byte) == pad_len)
+        );
+        assert_eq!(
+            unpad_random_max16(&padded).unwrap(),
+            Bytes::from_static(b"hello")
+        );
     }
 
     #[test]

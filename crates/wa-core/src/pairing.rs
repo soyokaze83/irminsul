@@ -4,8 +4,8 @@ use bytes::Bytes;
 use prost::Message;
 use wa_binary::{BinaryNode, BinaryNodeContent, JidServer, jid_encode};
 use wa_crypto::{
-    NoiseCertificateVerifier, SIGNAL_PUBLIC_KEY_VERSION, aes_256_ctr_apply,
-    derive_pairing_code_key, sign_x25519, verify_hmac_sha256,
+    NoiseCertificateVerifier, SIGNAL_PUBLIC_KEY_VERSION, aes_256_ctr_apply, aes_256_gcm_encrypt,
+    derive_pairing_code_key, hkdf_sha256, shared_key, sign_x25519, verify_hmac_sha256,
 };
 use wa_proto::proto::{
     AdvDeviceIdentity, AdvEncryptionType, AdvSignedDeviceIdentity, AdvSignedDeviceIdentityHmac,
@@ -17,6 +17,8 @@ const CROCKFORD_CHARACTERS: &[u8; 32] = b"123456789ABCDEFGHJKLMNPQRSTVWXYZ";
 const ADV_ACCOUNT_SIGNATURE_PREFIX: [u8; 2] = [6, 0];
 const ADV_DEVICE_SIGNATURE_PREFIX: [u8; 2] = [6, 1];
 const ADV_HOSTED_ACCOUNT_SIGNATURE_PREFIX: [u8; 2] = [6, 5];
+const LINK_CODE_KEY_BUNDLE_INFO: &[u8] = b"link_code_pairing_key_bundle_encryption_key";
+const ADV_SECRET_INFO: &[u8] = b"adv_secret";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PairingCodeRequest {
@@ -40,6 +42,16 @@ pub struct PairSuccess {
     pub key_index: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkCodeCompanionRegistration {
+    pub reply: BinaryNode,
+    pub credentials: AuthCredentials,
+    pub link_code_pairing_ref: Bytes,
+    pub primary_identity_public_key: Bytes,
+    pub primary_ephemeral_public_key: Bytes,
+    pub encrypted_key_bundle: Bytes,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PairingKeyMaterial {
     pub salt: [u8; 32],
@@ -50,6 +62,24 @@ impl PairingKeyMaterial {
     #[must_use]
     pub fn random() -> Self {
         Self {
+            salt: rand::random(),
+            iv: rand::random(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinkCodePairingFinishMaterial {
+    pub random: [u8; 32],
+    pub salt: [u8; 32],
+    pub iv: [u8; 12],
+}
+
+impl LinkCodePairingFinishMaterial {
+    #[must_use]
+    pub fn random() -> Self {
+        Self {
+            random: rand::random(),
             salt: rand::random(),
             iv: rand::random(),
         }
@@ -317,6 +347,144 @@ where
     })
 }
 
+pub fn handle_link_code_companion_reg_notification(
+    node: &BinaryNode,
+    credentials: &AuthCredentials,
+    tag: impl Into<String>,
+) -> CoreResult<Option<LinkCodeCompanionRegistration>> {
+    handle_link_code_companion_reg_notification_with_material(
+        node,
+        credentials,
+        tag,
+        LinkCodePairingFinishMaterial::random(),
+    )
+}
+
+pub fn handle_link_code_companion_reg_notification_with_material(
+    node: &BinaryNode,
+    credentials: &AuthCredentials,
+    tag: impl Into<String>,
+    material: LinkCodePairingFinishMaterial,
+) -> CoreResult<Option<LinkCodeCompanionRegistration>> {
+    if node.tag != "notification"
+        || node.attrs.get("type").map(String::as_str) != Some("link_code_companion_reg")
+    {
+        return Ok(None);
+    }
+    let registration = child_node(node, "link_code_companion_reg").ok_or_else(|| {
+        CoreError::Protocol("missing link_code_companion_reg notification child".to_owned())
+    })?;
+    let pairing_ref = node_bytes_required(registration, "link_code_pairing_ref")?;
+    let primary_identity_public_key = node_bytes_required(registration, "primary_identity_pub")?;
+    let wrapped_primary_ephemeral = node_bytes_required(
+        registration,
+        "link_code_pairing_wrapped_primary_ephemeral_pub",
+    )?;
+
+    let pairing_code = credentials
+        .pairing_code
+        .as_deref()
+        .ok_or_else(|| CoreError::Protocol("link-code pairing code is missing".to_owned()))?;
+    let primary_ephemeral_public_key =
+        decipher_link_code_public_key(&wrapped_primary_ephemeral, pairing_code)?;
+    let primary_identity_public_key_array =
+        key_array(&primary_identity_public_key, "primary identity public key")?;
+    let pairing_private = key_array(
+        credentials.pairing_ephemeral_key_pair.private.expose(),
+        "pairing private key",
+    )?;
+    let identity_private = key_array(
+        credentials.signed_identity_key.private.expose(),
+        "identity private key",
+    )?;
+
+    let companion_shared_key = shared_key(&pairing_private, &primary_ephemeral_public_key);
+    let mut expanded = hkdf_sha256(
+        &companion_shared_key,
+        32,
+        &material.salt,
+        LINK_CODE_KEY_BUNDLE_INFO,
+    )?;
+    let mut encrypt_payload = Vec::with_capacity(96);
+    encrypt_payload.extend_from_slice(&credentials.signed_identity_key.public);
+    encrypt_payload.extend_from_slice(&primary_identity_public_key_array);
+    encrypt_payload.extend_from_slice(&material.random);
+    let encrypted = aes_256_gcm_encrypt(&encrypt_payload, &expanded, &material.iv, &[])?;
+    expanded.zeroize();
+
+    let mut encrypted_key_bundle =
+        Vec::with_capacity(material.salt.len() + material.iv.len() + encrypted.len());
+    encrypted_key_bundle.extend_from_slice(&material.salt);
+    encrypted_key_bundle.extend_from_slice(&material.iv);
+    encrypted_key_bundle.extend_from_slice(&encrypted);
+
+    let identity_shared_key = shared_key(&identity_private, &primary_identity_public_key_array);
+    let mut identity_payload = Vec::with_capacity(96);
+    identity_payload.extend_from_slice(&companion_shared_key);
+    identity_payload.extend_from_slice(&identity_shared_key);
+    identity_payload.extend_from_slice(&material.random);
+    let adv_secret_key = hkdf_sha256(&identity_payload, 32, &[], ADV_SECRET_INFO)?;
+    identity_payload.zeroize();
+    let adv_secret_key: [u8; 32] = adv_secret_key
+        .try_into()
+        .map_err(|_| CoreError::Protocol("derived adv secret has invalid length".to_owned()))?;
+
+    let account_jid = credentials
+        .account_jid
+        .as_ref()
+        .ok_or_else(|| CoreError::Protocol("link-code account JID is missing".to_owned()))?;
+    let encrypted_key_bundle = Bytes::from(encrypted_key_bundle);
+    let reply = BinaryNode::new("iq")
+        .with_attr("to", "s.whatsapp.net")
+        .with_attr("type", "set")
+        .with_attr("id", tag)
+        .with_attr("xmlns", "md")
+        .with_content(vec![
+            BinaryNode::new("link_code_companion_reg")
+                .with_attr("jid", account_jid.clone())
+                .with_attr("stage", "companion_finish")
+                .with_content(vec![
+                    BinaryNode::new("link_code_pairing_wrapped_key_bundle")
+                        .with_content(encrypted_key_bundle.clone()),
+                    BinaryNode::new("companion_identity_public").with_content(
+                        Bytes::copy_from_slice(&credentials.signed_identity_key.public),
+                    ),
+                    BinaryNode::new("link_code_pairing_ref").with_content(pairing_ref.clone()),
+                ]),
+        ]);
+
+    let mut updated = credentials.clone();
+    updated.adv_secret_key = adv_secret_key.into();
+    updated.registered = true;
+    updated.pairing_code = None;
+
+    Ok(Some(LinkCodeCompanionRegistration {
+        reply,
+        credentials: updated,
+        link_code_pairing_ref: pairing_ref,
+        primary_identity_public_key,
+        primary_ephemeral_public_key: Bytes::copy_from_slice(&primary_ephemeral_public_key),
+        encrypted_key_bundle,
+    }))
+}
+
+pub fn decipher_link_code_public_key(wrapped: &[u8], pairing_code: &str) -> CoreResult<[u8; 32]> {
+    if wrapped.len() < 80 {
+        return Err(CoreError::Protocol(
+            "wrapped link-code public key is too short".to_owned(),
+        ));
+    }
+    let salt = &wrapped[..32];
+    let iv = &wrapped[32..48];
+    let payload = &wrapped[48..80];
+    let mut key = derive_pairing_code_key(pairing_code, salt);
+    let public_key = aes_256_ctr_apply(payload, &key, iv)?;
+    key.zeroize();
+    public_key
+        .try_into()
+        .map_err(|_| CoreError::Protocol("invalid link-code public key length".to_owned()))
+}
+
 pub fn wrap_pairing_ephemeral_public_key(
     credentials: &AuthCredentials,
     pairing_code: &str,
@@ -442,6 +610,18 @@ fn node_bytes(node: &BinaryNode) -> CoreResult<Bytes> {
     }
 }
 
+fn node_bytes_required(parent: &BinaryNode, tag: &str) -> CoreResult<Bytes> {
+    let node = child_node(parent, tag)
+        .ok_or_else(|| CoreError::Protocol(format!("missing {tag} node")))?;
+    node_bytes(node)
+}
+
+fn key_array(bytes: &[u8], label: &str) -> CoreResult<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| CoreError::Protocol(format!("{label} must be 32 bytes")))
+}
+
 fn x25519_public_key(public_key: &[u8]) -> CoreResult<[u8; 32]> {
     if public_key.len() == 33 && public_key[0] == SIGNAL_PUBLIC_KEY_VERSION {
         public_key[1..]
@@ -461,7 +641,8 @@ mod tests {
     use base64::Engine;
     use wa_crypto::{
         NoiseCertificateVerifier, XEdDsaNoiseCertificateVerifier, aes_256_ctr_apply,
-        derive_pairing_code_key, generate_key_pair, hmac_sha256,
+        aes_256_gcm_decrypt, derive_pairing_code_key, generate_key_pair, hkdf_sha256, hmac_sha256,
+        shared_key,
     };
 
     #[test]
@@ -669,6 +850,147 @@ mod tests {
             &device_message,
             &signed.device_signature.unwrap()
         ));
+    }
+
+    #[test]
+    fn handles_link_code_companion_registration_notification() {
+        let mut credentials = create_initial_credentials().unwrap();
+        credentials.pairing_code = Some("ABCDEFGH".to_owned());
+        credentials.account_jid = Some("1234567@s.whatsapp.net".to_owned());
+        let primary_identity = generate_key_pair();
+        let primary_ephemeral = generate_key_pair();
+        let wrap_salt = [7u8; 32];
+        let wrap_iv = [8u8; 16];
+        let mut pairing_key = derive_pairing_code_key("ABCDEFGH", &wrap_salt);
+        let wrapped_primary_ephemeral =
+            aes_256_ctr_apply(&primary_ephemeral.public, &pairing_key, &wrap_iv).unwrap();
+        pairing_key.zeroize();
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(&wrap_salt);
+        wrapped.extend_from_slice(&wrap_iv);
+        wrapped.extend_from_slice(&wrapped_primary_ephemeral);
+        let notification = BinaryNode::new("notification")
+            .with_attr("id", "link-code-1")
+            .with_attr("from", "server@s.whatsapp.net")
+            .with_attr("type", "link_code_companion_reg")
+            .with_content(vec![
+                BinaryNode::new("link_code_companion_reg").with_content(vec![
+                    BinaryNode::new("link_code_pairing_ref")
+                        .with_content(Bytes::from_static(b"pair-ref")),
+                    BinaryNode::new("primary_identity_pub")
+                        .with_content(Bytes::copy_from_slice(&primary_identity.public)),
+                    BinaryNode::new("link_code_pairing_wrapped_primary_ephemeral_pub")
+                        .with_content(Bytes::from(wrapped)),
+                ]),
+            ]);
+        let material = LinkCodePairingFinishMaterial {
+            random: [9u8; 32],
+            salt: [10u8; 32],
+            iv: [11u8; 12],
+        };
+
+        let finish = handle_link_code_companion_reg_notification_with_material(
+            &notification,
+            &credentials,
+            "finish-1",
+            material,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(finish.credentials.registered);
+        assert!(finish.credentials.pairing_code.is_none());
+        assert_eq!(
+            finish.link_code_pairing_ref,
+            Bytes::from_static(b"pair-ref")
+        );
+        assert_eq!(
+            finish.primary_identity_public_key,
+            Bytes::copy_from_slice(&primary_identity.public)
+        );
+        assert_eq!(
+            finish.primary_ephemeral_public_key,
+            Bytes::copy_from_slice(&primary_ephemeral.public)
+        );
+        let registration = only_child(&finish.reply, "link_code_companion_reg");
+        assert_eq!(registration.attrs["jid"], "1234567@s.whatsapp.net");
+        assert_eq!(registration.attrs["stage"], "companion_finish");
+        assert_eq!(
+            bytes_content(only_child(registration, "companion_identity_public")),
+            Bytes::copy_from_slice(&credentials.signed_identity_key.public)
+        );
+        assert_eq!(
+            bytes_content(only_child(registration, "link_code_pairing_ref")),
+            Bytes::from_static(b"pair-ref")
+        );
+
+        let bundle = bytes_content(only_child(
+            registration,
+            "link_code_pairing_wrapped_key_bundle",
+        ));
+        assert_eq!(&bundle[..32], &material.salt);
+        assert_eq!(&bundle[32..44], &material.iv);
+        let pairing_private: [u8; 32] = credentials
+            .pairing_ephemeral_key_pair
+            .private
+            .expose()
+            .try_into()
+            .unwrap();
+        let companion_shared_key = shared_key(&pairing_private, &primary_ephemeral.public);
+        let expanded = hkdf_sha256(
+            &companion_shared_key,
+            32,
+            &material.salt,
+            LINK_CODE_KEY_BUNDLE_INFO,
+        )
+        .unwrap();
+        let decrypted = aes_256_gcm_decrypt(&bundle[44..], &expanded, &material.iv, &[]).unwrap();
+        let mut expected_payload = Vec::new();
+        expected_payload.extend_from_slice(&credentials.signed_identity_key.public);
+        expected_payload.extend_from_slice(&primary_identity.public);
+        expected_payload.extend_from_slice(&material.random);
+        assert_eq!(decrypted, expected_payload);
+
+        let identity_private: [u8; 32] = credentials
+            .signed_identity_key
+            .private
+            .expose()
+            .try_into()
+            .unwrap();
+        let identity_shared_key = shared_key(&identity_private, &primary_identity.public);
+        let mut expected_secret_payload = Vec::new();
+        expected_secret_payload.extend_from_slice(&companion_shared_key);
+        expected_secret_payload.extend_from_slice(&identity_shared_key);
+        expected_secret_payload.extend_from_slice(&material.random);
+        let expected_adv_secret =
+            hkdf_sha256(&expected_secret_payload, 32, &[], ADV_SECRET_INFO).unwrap();
+        assert_eq!(
+            finish.credentials.adv_secret_key.expose(),
+            expected_adv_secret.as_slice()
+        );
+    }
+
+    #[test]
+    fn rejects_link_code_registration_without_pairing_state() {
+        let credentials = create_initial_credentials().unwrap();
+        let notification = BinaryNode::new("notification")
+            .with_attr("type", "link_code_companion_reg")
+            .with_content(vec![BinaryNode::new("link_code_companion_reg")]);
+
+        assert!(
+            handle_link_code_companion_reg_notification_with_material(
+                &notification,
+                &credentials,
+                "finish-1",
+                LinkCodePairingFinishMaterial {
+                    random: [1u8; 32],
+                    salt: [2u8; 32],
+                    iv: [3u8; 12],
+                },
+            )
+            .is_err()
+        );
+        assert!(decipher_link_code_public_key(&[0u8; 79], "ABCDEFGH").is_err());
     }
 
     #[test]

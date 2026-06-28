@@ -1,4 +1,8 @@
-use crate::{CoreError, CoreResult, MessageCappingInfo, ReachoutTimelockState};
+use crate::{
+    AppStateCollection, BlocklistAction, CoreError, CoreResult, MessageCappingInfo,
+    MessageCappingMultiVariationStatus, MessageCappingOneTimeExtensionStatus, MessageCappingStatus,
+    ReachoutTimelockEnforcementType, ReachoutTimelockState,
+};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::broadcast;
@@ -9,13 +13,24 @@ const STORED_MESSAGE_UPDATE_MAGIC: &[u8; 4] = b"MSUP";
 const STORED_CHAT_EVENT_MAGIC: &[u8; 4] = b"CHTE";
 const STORED_CONTACT_EVENT_MAGIC: &[u8; 4] = b"CNTE";
 const STORED_GROUP_EVENT_MAGIC: &[u8; 4] = b"GRPE";
+const STORED_BUSINESS_NOTIFICATION_EVENT_MAGIC: &[u8; 4] = b"BZNF";
+const STORED_NEWSLETTER_REACTION_EVENT_MAGIC: &[u8; 4] = b"NLRC";
+const STORED_NEWSLETTER_VIEW_EVENT_MAGIC: &[u8; 4] = b"NLVW";
+const STORED_NEWSLETTER_PARTICIPANT_EVENT_MAGIC: &[u8; 4] = b"NLPT";
+const STORED_NEWSLETTER_SETTINGS_EVENT_MAGIC: &[u8; 4] = b"NLST";
+const STORED_REACHOUT_TIMELOCK_MAGIC: &[u8; 4] = b"RTLK";
+const STORED_MESSAGE_CAPPING_INFO_MAGIC: &[u8; 4] = b"MCAP";
+const STORED_DEFAULT_DISAPPEARING_MODE_MAGIC: &[u8; 4] = b"DDMD";
+const STORED_ACCOUNT_SETTINGS_EVENT_MAGIC: &[u8; 4] = b"ACST";
 const STORED_LABEL_EVENT_MAGIC: &[u8; 4] = b"LBLE";
 const STORED_LABEL_ASSOCIATION_MAGIC: &[u8; 4] = b"LBLA";
 const STORED_QUICK_REPLY_EVENT_MAGIC: &[u8; 4] = b"QRPE";
 const STORED_RECEIPT_EVENT_MAGIC: &[u8; 4] = b"RCPT";
 const STORED_REACTION_EVENT_MAGIC: &[u8; 4] = b"RCTN";
 const STORED_MEDIA_RETRY_EVENT_MAGIC: &[u8; 4] = b"MDRT";
+const STORED_RECENT_STICKER_EVENT_MAGIC: &[u8; 4] = b"RSTK";
 const STORED_CALL_EVENT_MAGIC: &[u8; 4] = b"CALL";
+const STORED_PRESENCE_EVENT_MAGIC: &[u8; 4] = b"PRES";
 const STORED_EVENT_RECORD_VERSION: u8 = 1;
 const MAX_STORED_EVENT_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STORED_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -152,6 +167,119 @@ impl ContactEvent {
     pub fn new(jid: impl Into<String>) -> Self {
         Self {
             jid: jid.into(),
+            fields: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.insert(key.into(), value.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PresenceEvent {
+    pub jid: String,
+    pub presence_type: String,
+    pub participant: Option<String>,
+    pub timestamp: Option<u64>,
+    pub fields: BTreeMap<String, String>,
+}
+
+impl PresenceEvent {
+    #[must_use]
+    pub fn new(jid: impl Into<String>, presence_type: impl Into<String>) -> Self {
+        Self {
+            jid: jid.into(),
+            presence_type: presence_type.into(),
+            participant: None,
+            timestamp: None,
+            fields: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_participant(mut self, participant: impl Into<String>) -> Self {
+        self.participant = Some(participant.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_timestamp(mut self, timestamp: u64) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    #[must_use]
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.insert(key.into(), value.into());
+        self
+    }
+
+    fn buffer_key(&self) -> PresenceBufferKey {
+        PresenceBufferKey {
+            jid: self.jid.clone(),
+            participant: self.participant.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct PresenceBufferKey {
+    jid: String,
+    participant: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlocklistUpdateEvent {
+    pub jid: String,
+    pub action: BlocklistAction,
+}
+
+impl BlocklistUpdateEvent {
+    #[must_use]
+    pub fn new(jid: impl Into<String>, action: BlocklistAction) -> Self {
+        Self {
+            jid: jid.into(),
+            action,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefaultDisappearingMode {
+    pub duration_seconds: u32,
+    pub timestamp: Option<u64>,
+}
+
+impl DefaultDisappearingMode {
+    #[must_use]
+    pub fn new(duration_seconds: u32) -> Self {
+        Self {
+            duration_seconds,
+            timestamp: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_timestamp(mut self, timestamp: u64) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountSettingsEvent {
+    pub id: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+impl AccountSettingsEvent {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
             fields: BTreeMap::new(),
         }
     }
@@ -424,6 +552,52 @@ impl MediaRetryEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecentStickerEvent {
+    pub id: String,
+    pub file_sha256: Option<Bytes>,
+    pub file_enc_sha256: Option<Bytes>,
+    pub media_key: Option<Bytes>,
+    pub fields: BTreeMap<String, String>,
+}
+
+impl RecentStickerEvent {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            file_sha256: None,
+            file_enc_sha256: None,
+            media_key: None,
+            fields: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_file_sha256(mut self, value: Bytes) -> Self {
+        self.file_sha256 = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn with_file_enc_sha256(mut self, value: Bytes) -> Self {
+        self.file_enc_sha256 = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn with_media_key(mut self, value: Bytes) -> Self {
+        self.media_key = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.insert(key.into(), value.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LidMappingEvent {
     pub lid_jid: String,
     pub pn_jid: String,
@@ -436,6 +610,36 @@ impl LidMappingEvent {
             lid_jid: lid_jid.into(),
             pn_jid: pn_jid.into(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BusinessNotificationEvent {
+    pub from: String,
+    pub notification_id: String,
+    pub event_type: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+impl BusinessNotificationEvent {
+    #[must_use]
+    pub fn new(
+        from: impl Into<String>,
+        notification_id: impl Into<String>,
+        event_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            from: from.into(),
+            notification_id: notification_id.into(),
+            event_type: event_type.into(),
+            fields: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.insert(key.into(), value.into());
+        self
     }
 }
 
@@ -639,7 +843,11 @@ pub struct EventBatch {
     pub receipts_update: Vec<ReceiptEvent>,
     pub reactions_update: Vec<ReactionEvent>,
     pub media_retry: Vec<MediaRetryEvent>,
+    pub recent_stickers: Vec<RecentStickerEvent>,
+    pub account_settings: Vec<AccountSettingsEvent>,
+    pub business_notifications: Vec<BusinessNotificationEvent>,
     pub calls_update: Vec<CallEvent>,
+    pub presence_update: Vec<PresenceEvent>,
 }
 
 impl EventBatch {
@@ -669,7 +877,11 @@ impl EventBatch {
             + self.receipts_update.len()
             + self.reactions_update.len()
             + self.media_retry.len()
+            + self.recent_stickers.len()
+            + self.account_settings.len()
+            + self.business_notifications.len()
             + self.calls_update.len()
+            + self.presence_update.len()
     }
 }
 
@@ -709,6 +921,69 @@ pub fn media_retry_event_store_key(event: &MediaRetryEvent) -> String {
 }
 
 #[must_use]
+pub fn recent_sticker_event_store_key(event: &RecentStickerEvent) -> String {
+    event.id.clone()
+}
+
+#[must_use]
+pub fn business_notification_event_store_key(event: &BusinessNotificationEvent) -> String {
+    format!(
+        "{}|{}|{}",
+        event.from, event.notification_id, event.event_type
+    )
+}
+
+#[must_use]
+pub fn newsletter_reaction_event_store_key(event: &NewsletterReactionEvent) -> String {
+    format!(
+        "{}|{}|{}",
+        event.id,
+        event.server_id,
+        event.code.as_deref().unwrap_or_default()
+    )
+}
+
+#[must_use]
+pub fn newsletter_view_event_store_key(event: &NewsletterViewEvent) -> String {
+    format!("{}|{}", event.id, event.server_id)
+}
+
+#[must_use]
+pub fn newsletter_participant_update_event_store_key(
+    event: &NewsletterParticipantUpdateEvent,
+) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        event.id, event.user, event.action, event.new_role
+    )
+}
+
+#[must_use]
+pub fn newsletter_settings_update_event_store_key(event: &NewsletterSettingsUpdateEvent) -> String {
+    event.id.clone()
+}
+
+#[must_use]
+pub fn reachout_timelock_store_key() -> &'static str {
+    "account"
+}
+
+#[must_use]
+pub fn message_capping_info_store_key() -> &'static str {
+    "new-chat"
+}
+
+#[must_use]
+pub fn default_disappearing_mode_store_key() -> &'static str {
+    "account"
+}
+
+#[must_use]
+pub fn account_settings_event_store_key(event: &AccountSettingsEvent) -> String {
+    event.id.clone()
+}
+
+#[must_use]
 pub fn call_event_store_key(event: &CallEvent) -> String {
     match &event.call_id {
         Some(call_id) => format!(
@@ -716,6 +991,14 @@ pub fn call_event_store_key(event: &CallEvent) -> String {
             event.from, event.id, event.event_type, call_id
         ),
         None => format!("{}|{}|{}", event.from, event.id, event.event_type),
+    }
+}
+
+#[must_use]
+pub fn presence_event_store_key(event: &PresenceEvent) -> String {
+    match &event.participant {
+        Some(participant) => format!("{}|{}", event.jid, participant),
+        None => event.jid.clone(),
     }
 }
 
@@ -811,6 +1094,356 @@ pub fn encode_stored_group_event(event: &GroupUpdateEvent) -> CoreResult<Vec<u8>
 pub fn decode_stored_group_event(value: &[u8]) -> CoreResult<GroupUpdateEvent> {
     let (jid, fields) = decode_stored_jid_fields_record(value, STORED_GROUP_EVENT_MAGIC, "group")?;
     Ok(GroupUpdateEvent { jid, fields })
+}
+
+pub fn encode_stored_business_notification_event(
+    event: &BusinessNotificationEvent,
+) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_BUSINESS_NOTIFICATION_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.from)?;
+    put_string(&mut out, &event.notification_id)?;
+    put_string(&mut out, &event.event_type)?;
+    put_string_map(&mut out, &event.fields)?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_business_notification_event(
+    value: &[u8],
+) -> CoreResult<BusinessNotificationEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_BUSINESS_NOTIFICATION_EVENT_MAGIC,
+        "business notification",
+    )?;
+    let from = read_string(&mut input)?;
+    let notification_id = read_string(&mut input)?;
+    let event_type = read_string(&mut input)?;
+    let fields = read_string_map(&mut input)?;
+    reject_trailing_stored_bytes(input, "business notification")?;
+    Ok(BusinessNotificationEvent {
+        from,
+        notification_id,
+        event_type,
+        fields,
+    })
+}
+
+pub fn encode_stored_newsletter_reaction_event(
+    event: &NewsletterReactionEvent,
+) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_NEWSLETTER_REACTION_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.id)?;
+    put_string(&mut out, &event.server_id)?;
+    put_optional_string(&mut out, event.code.as_deref())?;
+    put_optional_u64(&mut out, event.count);
+    out.put_u8(u8::from(event.removed));
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_newsletter_reaction_event(
+    value: &[u8],
+) -> CoreResult<NewsletterReactionEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_NEWSLETTER_REACTION_EVENT_MAGIC,
+        "newsletter reaction",
+    )?;
+    let id = read_string(&mut input)?;
+    let server_id = read_string(&mut input)?;
+    let code = read_optional_string(&mut input)?;
+    let count = read_optional_u64(&mut input)?;
+    if input.remaining() < 1 {
+        return Err(CoreError::Protocol(
+            "stored newsletter reaction missing removed flag".to_owned(),
+        ));
+    }
+    let removed = match input.get_u8() {
+        0 => false,
+        1 => true,
+        value => {
+            return Err(CoreError::Protocol(format!(
+                "stored newsletter reaction has invalid removed flag {value}"
+            )));
+        }
+    };
+    reject_trailing_stored_bytes(input, "newsletter reaction")?;
+    Ok(NewsletterReactionEvent {
+        id,
+        server_id,
+        code,
+        count,
+        removed,
+    })
+}
+
+pub fn encode_stored_newsletter_view_event(event: &NewsletterViewEvent) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_NEWSLETTER_VIEW_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.id)?;
+    put_string(&mut out, &event.server_id)?;
+    out.put_u64(event.count);
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_newsletter_view_event(value: &[u8]) -> CoreResult<NewsletterViewEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_NEWSLETTER_VIEW_EVENT_MAGIC,
+        "newsletter view",
+    )?;
+    let id = read_string(&mut input)?;
+    let server_id = read_string(&mut input)?;
+    if input.remaining() < 8 {
+        return Err(CoreError::Protocol(
+            "stored newsletter view has truncated count".to_owned(),
+        ));
+    }
+    let count = input.get_u64();
+    reject_trailing_stored_bytes(input, "newsletter view")?;
+    Ok(NewsletterViewEvent {
+        id,
+        server_id,
+        count,
+    })
+}
+
+pub fn encode_stored_newsletter_participant_update_event(
+    event: &NewsletterParticipantUpdateEvent,
+) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_NEWSLETTER_PARTICIPANT_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.id)?;
+    put_string(&mut out, &event.author)?;
+    put_string(&mut out, &event.user)?;
+    put_string(&mut out, &event.action)?;
+    put_string(&mut out, &event.new_role)?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_newsletter_participant_update_event(
+    value: &[u8],
+) -> CoreResult<NewsletterParticipantUpdateEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_NEWSLETTER_PARTICIPANT_EVENT_MAGIC,
+        "newsletter participant",
+    )?;
+    let id = read_string(&mut input)?;
+    let author = read_string(&mut input)?;
+    let user = read_string(&mut input)?;
+    let action = read_string(&mut input)?;
+    let new_role = read_string(&mut input)?;
+    reject_trailing_stored_bytes(input, "newsletter participant")?;
+    Ok(NewsletterParticipantUpdateEvent {
+        id,
+        author,
+        user,
+        action,
+        new_role,
+    })
+}
+
+pub fn encode_stored_newsletter_settings_update_event(
+    event: &NewsletterSettingsUpdateEvent,
+) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_NEWSLETTER_SETTINGS_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.id)?;
+    put_string_map(&mut out, &event.fields)?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_newsletter_settings_update_event(
+    value: &[u8],
+) -> CoreResult<NewsletterSettingsUpdateEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_NEWSLETTER_SETTINGS_EVENT_MAGIC,
+        "newsletter settings",
+    )?;
+    let id = read_string(&mut input)?;
+    let fields = read_string_map(&mut input)?;
+    reject_trailing_stored_bytes(input, "newsletter settings")?;
+    Ok(NewsletterSettingsUpdateEvent { id, fields })
+}
+
+pub fn encode_stored_reachout_timelock_state(state: &ReachoutTimelockState) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_REACHOUT_TIMELOCK_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    out.put_u8(u8::from(state.is_active));
+    put_optional_u64(&mut out, state.time_enforcement_ends);
+    put_string(&mut out, state.enforcement_type.as_wire_str())?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_reachout_timelock_state(value: &[u8]) -> CoreResult<ReachoutTimelockState> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_REACHOUT_TIMELOCK_MAGIC,
+        "reachout timelock",
+    )?;
+    if input.remaining() < 1 {
+        return Err(CoreError::Protocol(
+            "stored reachout timelock missing active flag".to_owned(),
+        ));
+    }
+    let is_active = match input.get_u8() {
+        0 => false,
+        1 => true,
+        value => {
+            return Err(CoreError::Protocol(format!(
+                "stored reachout timelock has invalid active flag {value}"
+            )));
+        }
+    };
+    let time_enforcement_ends = read_optional_u64(&mut input)?;
+    let enforcement_type = ReachoutTimelockEnforcementType::from_wire(&read_string(&mut input)?);
+    reject_trailing_stored_bytes(input, "reachout timelock")?;
+    Ok(ReachoutTimelockState {
+        is_active,
+        time_enforcement_ends,
+        enforcement_type,
+    })
+}
+
+pub fn encode_stored_message_capping_info(info: &MessageCappingInfo) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_MESSAGE_CAPPING_INFO_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_optional_u64(&mut out, info.total_quota);
+    put_optional_u64(&mut out, info.used_quota);
+    put_optional_u64(&mut out, info.cycle_start_timestamp);
+    put_optional_u64(&mut out, info.cycle_end_timestamp);
+    put_optional_u64(&mut out, info.server_sent_timestamp);
+    put_optional_string(
+        &mut out,
+        info.one_time_extension_status
+            .as_ref()
+            .map(MessageCappingOneTimeExtensionStatus::as_wire_str),
+    )?;
+    put_optional_string(
+        &mut out,
+        info.multi_variation_status
+            .as_ref()
+            .map(MessageCappingMultiVariationStatus::as_wire_str),
+    )?;
+    put_optional_string(
+        &mut out,
+        info.capping_status
+            .as_ref()
+            .map(MessageCappingStatus::as_wire_str),
+    )?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_message_capping_info(value: &[u8]) -> CoreResult<MessageCappingInfo> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_MESSAGE_CAPPING_INFO_MAGIC,
+        "message capping info",
+    )?;
+    let total_quota = read_optional_u64(&mut input)?;
+    let used_quota = read_optional_u64(&mut input)?;
+    let cycle_start_timestamp = read_optional_u64(&mut input)?;
+    let cycle_end_timestamp = read_optional_u64(&mut input)?;
+    let server_sent_timestamp = read_optional_u64(&mut input)?;
+    let one_time_extension_status = read_optional_string(&mut input)?
+        .map(|value| MessageCappingOneTimeExtensionStatus::from_wire(&value));
+    let multi_variation_status = read_optional_string(&mut input)?
+        .map(|value| MessageCappingMultiVariationStatus::from_wire(&value));
+    let capping_status =
+        read_optional_string(&mut input)?.map(|value| MessageCappingStatus::from_wire(&value));
+    reject_trailing_stored_bytes(input, "message capping info")?;
+    Ok(MessageCappingInfo {
+        total_quota,
+        used_quota,
+        cycle_start_timestamp,
+        cycle_end_timestamp,
+        server_sent_timestamp,
+        one_time_extension_status,
+        multi_variation_status,
+        capping_status,
+    })
+}
+
+pub fn encode_stored_default_disappearing_mode(
+    mode: &DefaultDisappearingMode,
+) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_DEFAULT_DISAPPEARING_MODE_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    out.put_u32(mode.duration_seconds);
+    put_optional_u64(&mut out, mode.timestamp);
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_default_disappearing_mode(
+    value: &[u8],
+) -> CoreResult<DefaultDisappearingMode> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_DEFAULT_DISAPPEARING_MODE_MAGIC,
+        "default disappearing mode",
+    )?;
+    if input.remaining() < 4 {
+        return Err(CoreError::Protocol(
+            "stored default disappearing mode missing duration".to_owned(),
+        ));
+    }
+    let duration_seconds = input.get_u32();
+    let timestamp = read_optional_u64(&mut input)?;
+    reject_trailing_stored_bytes(input, "default disappearing mode")?;
+    Ok(DefaultDisappearingMode {
+        duration_seconds,
+        timestamp,
+    })
+}
+
+pub fn encode_stored_account_settings_event(event: &AccountSettingsEvent) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_ACCOUNT_SETTINGS_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.id)?;
+    put_string_map(&mut out, &event.fields)?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_account_settings_event(value: &[u8]) -> CoreResult<AccountSettingsEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_ACCOUNT_SETTINGS_EVENT_MAGIC,
+        "account settings",
+    )?;
+    let id = read_string(&mut input)?;
+    let fields = read_string_map(&mut input)?;
+    reject_trailing_stored_bytes(input, "account settings")?;
+    Ok(AccountSettingsEvent { id, fields })
 }
 
 pub fn encode_stored_label_event(event: &LabelEvent) -> CoreResult<Vec<u8>> {
@@ -1033,6 +1666,41 @@ pub fn decode_stored_media_retry_event(value: &[u8]) -> CoreResult<MediaRetryEve
     })
 }
 
+pub fn encode_stored_recent_sticker_event(event: &RecentStickerEvent) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_RECENT_STICKER_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.id)?;
+    put_optional_bytes(&mut out, event.file_sha256.as_ref().map(Bytes::as_ref))?;
+    put_optional_bytes(&mut out, event.file_enc_sha256.as_ref().map(Bytes::as_ref))?;
+    put_optional_bytes(&mut out, event.media_key.as_ref().map(Bytes::as_ref))?;
+    put_string_map(&mut out, &event.fields)?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_recent_sticker_event(value: &[u8]) -> CoreResult<RecentStickerEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(
+        &mut input,
+        STORED_RECENT_STICKER_EVENT_MAGIC,
+        "recent sticker",
+    )?;
+    let id = read_string(&mut input)?;
+    let file_sha256 = read_optional_bytes(&mut input)?.map(Bytes::from);
+    let file_enc_sha256 = read_optional_bytes(&mut input)?.map(Bytes::from);
+    let media_key = read_optional_bytes(&mut input)?.map(Bytes::from);
+    let fields = read_string_map(&mut input)?;
+    reject_trailing_stored_bytes(input, "recent sticker")?;
+    Ok(RecentStickerEvent {
+        id,
+        file_sha256,
+        file_enc_sha256,
+        media_key,
+        fields,
+    })
+}
+
 pub fn encode_stored_call_event(event: &CallEvent) -> CoreResult<Vec<u8>> {
     let mut out = BytesMut::new();
     out.extend_from_slice(STORED_CALL_EVENT_MAGIC);
@@ -1064,6 +1732,37 @@ pub fn decode_stored_call_event(value: &[u8]) -> CoreResult<CallEvent> {
         from,
         event_type,
         call_id,
+        participant,
+        timestamp,
+        fields,
+    })
+}
+
+pub fn encode_stored_presence_event(event: &PresenceEvent) -> CoreResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    out.extend_from_slice(STORED_PRESENCE_EVENT_MAGIC);
+    out.put_u8(STORED_EVENT_RECORD_VERSION);
+    put_string(&mut out, &event.jid)?;
+    put_string(&mut out, &event.presence_type)?;
+    put_optional_string(&mut out, event.participant.as_deref())?;
+    put_optional_u64(&mut out, event.timestamp);
+    put_string_map(&mut out, &event.fields)?;
+    Ok(out.to_vec())
+}
+
+pub fn decode_stored_presence_event(value: &[u8]) -> CoreResult<PresenceEvent> {
+    validate_stored_record_len(value)?;
+    let mut input = value;
+    read_magic(&mut input, STORED_PRESENCE_EVENT_MAGIC, "presence")?;
+    let jid = read_string(&mut input)?;
+    let presence_type = read_string(&mut input)?;
+    let participant = read_optional_string(&mut input)?;
+    let timestamp = read_optional_u64(&mut input)?;
+    let fields = read_string_map(&mut input)?;
+    reject_trailing_stored_bytes(input, "presence")?;
+    Ok(PresenceEvent {
+        jid,
+        presence_type,
         participant,
         timestamp,
         fields,
@@ -1393,14 +2092,23 @@ pub enum Event {
     ReceiptsUpdate(Vec<ReceiptEvent>),
     ReactionsUpdate(Vec<ReactionEvent>),
     MediaRetry(Vec<MediaRetryEvent>),
+    RecentStickersUpdate(Vec<RecentStickerEvent>),
+    #[cfg(feature = "noise")]
+    MediaRetryProcessed(crate::MediaRetryBatchOutcome),
     LidMappingUpdate(Vec<LidMappingEvent>),
+    AccountSettingsUpdate(Vec<AccountSettingsEvent>),
+    BusinessNotificationUpdate(Vec<BusinessNotificationEvent>),
     NewsletterReactionUpdate(Vec<NewsletterReactionEvent>),
     NewsletterViewUpdate(Vec<NewsletterViewEvent>),
     NewsletterParticipantsUpdate(Vec<NewsletterParticipantUpdateEvent>),
     NewsletterSettingsUpdate(Vec<NewsletterSettingsUpdateEvent>),
     ReachoutTimelockUpdate(ReachoutTimelockState),
     MessageCappingUpdate(MessageCappingInfo),
+    DefaultDisappearingModeUpdate(DefaultDisappearingMode),
+    BlocklistUpdate(Vec<BlocklistUpdateEvent>),
+    ServerSyncCollections(Vec<AppStateCollection>),
     CallsUpdate(Vec<CallEvent>),
+    PresenceUpdate(Vec<PresenceEvent>),
 }
 
 #[derive(Clone)]
@@ -1463,7 +2171,11 @@ pub struct EventBuffer {
     receipts_update: BTreeMap<ReceiptBufferKey, ReceiptEvent>,
     reactions_update: BTreeMap<ReactionBufferKey, ReactionEvent>,
     media_retry: BTreeMap<MessageEventKey, MediaRetryEvent>,
+    recent_stickers: BTreeMap<String, RecentStickerEvent>,
+    account_settings: BTreeMap<String, AccountSettingsEvent>,
+    business_notifications: BTreeMap<String, BusinessNotificationEvent>,
     calls_update: BTreeMap<String, CallEvent>,
+    presence_update: BTreeMap<PresenceBufferKey, PresenceEvent>,
     immediate: Vec<Event>,
 }
 
@@ -1489,7 +2201,11 @@ impl EventBuffer {
             receipts_update: BTreeMap::new(),
             reactions_update: BTreeMap::new(),
             media_retry: BTreeMap::new(),
+            recent_stickers: BTreeMap::new(),
+            account_settings: BTreeMap::new(),
+            business_notifications: BTreeMap::new(),
             calls_update: BTreeMap::new(),
+            presence_update: BTreeMap::new(),
             immediate: Vec::new(),
         }
     }
@@ -1520,7 +2236,11 @@ impl EventBuffer {
             + self.receipts_update.len()
             + self.reactions_update.len()
             + self.media_retry.len()
+            + self.recent_stickers.len()
+            + self.account_settings.len()
+            + self.business_notifications.len()
             + self.calls_update.len()
+            + self.presence_update.len()
             + self.immediate.len()
     }
 
@@ -1562,7 +2282,11 @@ impl EventBuffer {
             receipts_update: drain_map_values(&mut self.receipts_update),
             reactions_update: drain_map_values(&mut self.reactions_update),
             media_retry: drain_map_values(&mut self.media_retry),
+            recent_stickers: drain_map_values(&mut self.recent_stickers),
+            account_settings: drain_map_values(&mut self.account_settings),
+            business_notifications: drain_map_values(&mut self.business_notifications),
             calls_update: drain_map_values(&mut self.calls_update),
+            presence_update: drain_map_values(&mut self.presence_update),
         };
 
         if batch.is_empty() { None } else { Some(batch) }
@@ -1697,9 +2421,29 @@ impl EventBuffer {
                     self.media_retry.insert(update.key.clone(), update);
                 }
             }
+            Event::RecentStickersUpdate(stickers) => {
+                for sticker in stickers {
+                    merge_recent_sticker_event(&mut self.recent_stickers, sticker);
+                }
+            }
+            Event::AccountSettingsUpdate(settings) => {
+                for setting in settings {
+                    merge_account_settings_event(&mut self.account_settings, setting);
+                }
+            }
+            Event::BusinessNotificationUpdate(updates) => {
+                for update in updates {
+                    merge_business_notification_event(&mut self.business_notifications, update);
+                }
+            }
             Event::CallsUpdate(calls) => {
                 for call in calls {
                     merge_call_event(&mut self.calls_update, call);
+                }
+            }
+            Event::PresenceUpdate(updates) => {
+                for update in updates {
+                    self.presence_update.insert(update.buffer_key(), update);
                 }
             }
             event => self.immediate.push(event),
@@ -1726,7 +2470,13 @@ impl EventBuffer {
         self.apply(Event::ReceiptsUpdate(batch.receipts_update));
         self.apply(Event::ReactionsUpdate(batch.reactions_update));
         self.apply(Event::MediaRetry(batch.media_retry));
+        self.apply(Event::RecentStickersUpdate(batch.recent_stickers));
+        self.apply(Event::AccountSettingsUpdate(batch.account_settings));
+        self.apply(Event::BusinessNotificationUpdate(
+            batch.business_notifications,
+        ));
         self.apply(Event::CallsUpdate(batch.calls_update));
+        self.apply(Event::PresenceUpdate(batch.presence_update));
     }
 }
 
@@ -1776,6 +2526,47 @@ fn merge_quick_reply_event(events: &mut BTreeMap<String, QuickReplyEvent>, event
 fn merge_group_event(events: &mut BTreeMap<String, GroupUpdateEvent>, event: GroupUpdateEvent) {
     events
         .entry(event.jid.clone())
+        .and_modify(|existing| merge_fields(&mut existing.fields, event.fields.clone()))
+        .or_insert(event);
+}
+
+fn merge_recent_sticker_event(
+    events: &mut BTreeMap<String, RecentStickerEvent>,
+    event: RecentStickerEvent,
+) {
+    events
+        .entry(event.id.clone())
+        .and_modify(|existing| {
+            merge_fields(&mut existing.fields, event.fields.clone());
+            if event.file_sha256.is_some() {
+                existing.file_sha256 = event.file_sha256.clone();
+            }
+            if event.file_enc_sha256.is_some() {
+                existing.file_enc_sha256 = event.file_enc_sha256.clone();
+            }
+            if event.media_key.is_some() {
+                existing.media_key = event.media_key.clone();
+            }
+        })
+        .or_insert(event);
+}
+
+fn merge_account_settings_event(
+    events: &mut BTreeMap<String, AccountSettingsEvent>,
+    event: AccountSettingsEvent,
+) {
+    events
+        .entry(event.id.clone())
+        .and_modify(|existing| merge_fields(&mut existing.fields, event.fields.clone()))
+        .or_insert(event);
+}
+
+fn merge_business_notification_event(
+    events: &mut BTreeMap<String, BusinessNotificationEvent>,
+    event: BusinessNotificationEvent,
+) {
+    events
+        .entry(business_notification_event_store_key(&event))
         .and_modify(|existing| merge_fields(&mut existing.fields, event.fields.clone()))
         .or_insert(event);
 }
@@ -1870,6 +2661,22 @@ mod tests {
     }
 
     #[test]
+    fn stored_presence_event_round_trips() {
+        let event = PresenceEvent::new("123@g.us", "composing")
+            .with_participant("456@s.whatsapp.net")
+            .with_timestamp(1_700_000_008)
+            .with_field("last", "1700000000")
+            .with_field("child_composing_media", "audio");
+
+        let encoded = encode_stored_presence_event(&event).unwrap();
+        assert_eq!(decode_stored_presence_event(&encoded).unwrap(), event);
+        assert_eq!(
+            presence_event_store_key(&event),
+            "123@g.us|456@s.whatsapp.net"
+        );
+    }
+
+    #[test]
     fn stored_label_association_and_quick_reply_events_round_trip() {
         let label = LabelEvent::new("7")
             .with_field("name", "Important")
@@ -1953,6 +2760,42 @@ mod tests {
     }
 
     #[test]
+    fn stored_recent_sticker_event_round_trips() {
+        let event = RecentStickerEvent::new("file_sha256:010203")
+            .with_file_sha256(Bytes::from_static(&[1, 2, 3]))
+            .with_file_enc_sha256(Bytes::from_static(&[4, 5, 6]))
+            .with_media_key(Bytes::from_static(&[7; 32]))
+            .with_field("mimetype", "image/webp")
+            .with_field("direct_path", "/sticker");
+
+        let encoded = encode_stored_recent_sticker_event(&event).unwrap();
+        assert_eq!(decode_stored_recent_sticker_event(&encoded).unwrap(), event);
+        assert_eq!(recent_sticker_event_store_key(&event), "file_sha256:010203");
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_stored_recent_sticker_event(&trailing).is_err());
+    }
+
+    #[test]
+    fn stored_account_settings_event_round_trips() {
+        let event = AccountSettingsEvent::new("history_sync")
+            .with_field("media_visibility", "ON")
+            .with_field("thread_id_user_secret_present", "true");
+
+        let encoded = encode_stored_account_settings_event(&event).unwrap();
+        assert_eq!(
+            decode_stored_account_settings_event(&encoded).unwrap(),
+            event
+        );
+        assert_eq!(account_settings_event_store_key(&event), "history_sync");
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_stored_account_settings_event(&trailing).is_err());
+    }
+
+    #[test]
     fn stored_call_event_round_trips() {
         let event = CallEvent::new("call-stanza-1", "123@s.whatsapp.net", "offer")
             .with_call_id("call-1")
@@ -1967,6 +2810,139 @@ mod tests {
             call_event_store_key(&event),
             "123@s.whatsapp.net|call-stanza-1|offer|call-1"
         );
+    }
+
+    #[test]
+    fn stored_business_notification_event_round_trips() {
+        let event =
+            BusinessNotificationEvent::new("server@s.whatsapp.net", "biz-1", "product_catalog")
+                .with_field("attr_version", "1")
+                .with_field("child_product_id", "sku-1");
+
+        let encoded = encode_stored_business_notification_event(&event).unwrap();
+        assert_eq!(
+            decode_stored_business_notification_event(&encoded).unwrap(),
+            event
+        );
+        assert_eq!(
+            business_notification_event_store_key(&event),
+            "server@s.whatsapp.net|biz-1|product_catalog"
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_stored_business_notification_event(&trailing).is_err());
+    }
+
+    #[test]
+    fn stored_newsletter_events_round_trip() {
+        let reaction = NewsletterReactionEvent::new("abc@newsletter", "server-1")
+            .with_code("+")
+            .with_count(4);
+        let view = NewsletterViewEvent::new("abc@newsletter", "server-1", 42);
+        let participant = NewsletterParticipantUpdateEvent::new(
+            "abc@newsletter",
+            "111@s.whatsapp.net",
+            "222@s.whatsapp.net",
+            "promote",
+            "ADMIN",
+        );
+        let settings = NewsletterSettingsUpdateEvent::new("abc@newsletter")
+            .with_field("name", "Updates")
+            .with_field("description", "Daily notes");
+
+        let encoded_reaction = encode_stored_newsletter_reaction_event(&reaction).unwrap();
+        let encoded_view = encode_stored_newsletter_view_event(&view).unwrap();
+        let encoded_participant =
+            encode_stored_newsletter_participant_update_event(&participant).unwrap();
+        let encoded_settings = encode_stored_newsletter_settings_update_event(&settings).unwrap();
+
+        assert_eq!(
+            decode_stored_newsletter_reaction_event(&encoded_reaction).unwrap(),
+            reaction
+        );
+        assert_eq!(
+            decode_stored_newsletter_view_event(&encoded_view).unwrap(),
+            view
+        );
+        assert_eq!(
+            decode_stored_newsletter_participant_update_event(&encoded_participant).unwrap(),
+            participant
+        );
+        assert_eq!(
+            decode_stored_newsletter_settings_update_event(&encoded_settings).unwrap(),
+            settings
+        );
+        assert_eq!(
+            newsletter_reaction_event_store_key(&reaction),
+            "abc@newsletter|server-1|+"
+        );
+        assert_eq!(
+            newsletter_view_event_store_key(&view),
+            "abc@newsletter|server-1"
+        );
+        assert_eq!(
+            newsletter_participant_update_event_store_key(&participant),
+            "abc@newsletter|222@s.whatsapp.net|promote|ADMIN"
+        );
+        assert_eq!(
+            newsletter_settings_update_event_store_key(&settings),
+            "abc@newsletter"
+        );
+
+        let mut trailing = encoded_settings;
+        trailing.push(0);
+        assert!(decode_stored_newsletter_settings_update_event(&trailing).is_err());
+    }
+
+    #[test]
+    fn stored_account_state_records_round_trip() {
+        let reachout = ReachoutTimelockState {
+            is_active: true,
+            time_enforcement_ends: Some(1_700_000_000),
+            enforcement_type: ReachoutTimelockEnforcementType::WebCompanionOnly,
+        };
+        let capping = MessageCappingInfo {
+            total_quota: Some(50),
+            used_quota: Some(12),
+            cycle_start_timestamp: Some(1_700_000_001),
+            cycle_end_timestamp: Some(1_700_000_002),
+            server_sent_timestamp: Some(1_700_000_003),
+            one_time_extension_status: Some(MessageCappingOneTimeExtensionStatus::Eligible),
+            multi_variation_status: Some(MessageCappingMultiVariationStatus::Active),
+            capping_status: Some(MessageCappingStatus::FirstWarning),
+        };
+        let default_disappearing_mode =
+            DefaultDisappearingMode::new(604_800).with_timestamp(1_700_000_004);
+
+        let encoded_reachout = encode_stored_reachout_timelock_state(&reachout).unwrap();
+        let encoded_capping = encode_stored_message_capping_info(&capping).unwrap();
+        let encoded_disappearing =
+            encode_stored_default_disappearing_mode(&default_disappearing_mode).unwrap();
+
+        assert_eq!(
+            decode_stored_reachout_timelock_state(&encoded_reachout).unwrap(),
+            reachout
+        );
+        assert_eq!(
+            decode_stored_message_capping_info(&encoded_capping).unwrap(),
+            capping
+        );
+        assert_eq!(
+            decode_stored_default_disappearing_mode(&encoded_disappearing).unwrap(),
+            default_disappearing_mode
+        );
+        assert_eq!(reachout_timelock_store_key(), "account");
+        assert_eq!(message_capping_info_store_key(), "new-chat");
+        assert_eq!(default_disappearing_mode_store_key(), "account");
+
+        let mut trailing = encoded_capping;
+        trailing.push(0);
+        assert!(decode_stored_message_capping_info(&trailing).is_err());
+
+        let mut trailing = encoded_disappearing;
+        trailing.push(0);
+        assert!(decode_stored_default_disappearing_mode(&trailing).is_err());
     }
 
     #[test]
@@ -2098,6 +3074,19 @@ mod tests {
                 MediaRetryEvent::new(key, false).with_error(2, Some("missing".to_owned()), 404),
             ]))
             .unwrap();
+        buffer
+            .push(Event::BusinessNotificationUpdate(vec![
+                BusinessNotificationEvent::new("server@s.whatsapp.net", "biz-1", "product_catalog")
+                    .with_field("attr_version", "1"),
+                BusinessNotificationEvent::new("server@s.whatsapp.net", "biz-1", "product_catalog")
+                    .with_field("child_product_id", "sku-1"),
+            ]))
+            .unwrap();
+        buffer
+            .push(Event::PresenceUpdate(vec![
+                PresenceEvent::new("123@s.whatsapp.net", "available").with_timestamp(1_700_000_008),
+            ]))
+            .unwrap();
 
         let batch = buffer.flush().unwrap();
         assert_eq!(batch.chats_update.len(), 1);
@@ -2131,6 +3120,14 @@ mod tests {
         assert_eq!(batch.media_retry.len(), 1);
         assert_eq!(batch.media_retry[0].error_code, Some(2));
         assert_eq!(batch.media_retry[0].status_code, Some(404));
+        assert_eq!(batch.business_notifications.len(), 1);
+        assert_eq!(batch.business_notifications[0].fields["attr_version"], "1");
+        assert_eq!(
+            batch.business_notifications[0].fields["child_product_id"],
+            "sku-1"
+        );
+        assert_eq!(batch.presence_update.len(), 1);
+        assert_eq!(batch.presence_update[0].presence_type, "available");
     }
 
     #[test]

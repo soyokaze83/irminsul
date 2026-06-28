@@ -1,0 +1,46 @@
+{
+  "note": "Authoritative libsignal (Baileys) conformance vectors. Rust provider must decrypt these.",
+  "bob": {
+    "registrationId": 189,
+    "identityKeyPub": "054312044f6d637c9729fc01e394d139808c27cdc46be52bbf1cf4f1e95cf8c469",
+    "identityKeyPriv": "989952d1670066a57b80fd6fad520a9dd0abfcd05cf468e1f4cff8ee39be1f67",
+    "preKeyId": 31337,
+    "preKeyPub": "051fa3d1cf5cdb992e2e8eaab159f2c26ac1b688dc7f98f911e1d78ca00769a724",
+    "preKeyPriv": "e0c76dfde2d43efb8e35d52b0a7a21a22997b556103ba62605ec9e686043ce4f",
+    "signedPreKeyId": 22,
+    "signedPreKeyPub": "053fc0200950cc84f364eb381cd3528e7e7fde5be3fc8cf526ba1abee2b1ed3658",
+    "signedPreKeyPriv": "9877d77edb5e7ac7d3be7114288337431fa53b707186212d577ba8448225f051",
+    "signedPreKeySig": "81a4b6eb27fa5607339980d2d4810b56984b7ee84624cdff5b82c0fbbaea0f4daca32583fce443c5b2881869f704b582254d4f8395f0c5af0533a84fce8cf407"
+  },
+  "alice": {
+    "registrationId": 233,
+    "identityKeyPub": "05571efe0d8b93238f1de9894333bb62096d907cac0ccd6b44ef936ce506cdad41"
+  },
+  "vectors": [
+    {
+      "dir": "alice->bob",
+      "kind": "prekey",
+      "type": 3,
+      "body": "3308e9f4011221053a8ef30dbe7fe58e87876b977db054b346ea88a6003f9bd60760f6c41ca5cc661a2105571efe0d8b93238f1de9894333bb62096d907cac0ccd6b44ef936ce506cdad412242330a21053a71b03fde14a6c0126e9e019bf09a201f1dc7449017ce36f224d9375fffe753100018002210bbfb2b18ee5205de228fcdc4a105244db725d99c2b483d9428e9013016",
+      "plaintext": "hello bob"
+    },
+    {
+      "dir": "alice->bob",
+      "kind": "whisper",
+      "type": 1,
+      "body": "330a2105f5f1421e6a0a2425ae0be8836efe7829a53d5c23813bb6507087ee603d819707100018002220ac3ec0f0990bd178ee6762baafd942a26ce3cad63d600efb62e79cb090f05a4adf4404c3b0d7f9fd",
+      "plaintext": "second from alice"
+    }
+  ],
+  "bobRatchetAfterM2": {
+    "pub": "05ea23d92002b754c13e533ea7c59c64a29700c1d8976d5b21e431eeb455569805",
+    "priv": "788b834fd5f3ca724d8b2cba47111e08fa758e58b54041053090465d4d59d15e"
+  },
+  "bobToAlice": {
+    "dir": "bob->alice",
+    "kind": "whisper",
+    "type": 1,
+    "body": "330a2105ea23d92002b754c13e533ea7c59c64a29700c1d8976d5b21e431eeb45556980510001800222075e4dff938b5e608b6c60d38e2c654769e1b46531357ec5c9448b2e835843770d78aeecabe401fe2",
+    "plaintext": "hi alice from bob"
+  }
+}
