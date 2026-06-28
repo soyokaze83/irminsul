@@ -10,3 +10,6 @@ Baileys
 
 # local env (copy of .env.example)
 .env
+
+# hephaes wiki builder
+.hephaes
