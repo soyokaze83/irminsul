@@ -7,3 +7,6 @@ Baileys
 
 # agent build logs
 *.log
+
+# local env (copy of .env.example)
+.env

@@ -141,10 +141,12 @@ set and — except `live_pairing_code` — require an already-paired session in
 
 ² optional, for downloading the retry response.
 
-Common variables: `WA_SESSION_DB`, `WA_TARGET_JID`, `WA_MESSAGE_KIND`,
-`WA_MEDIA_KIND` / `WA_MEDIA_PATH`, `WA_STATUS_JIDS`, …
+Run any example with `cargo run -p wa-client [--features <flags>] --example <name>`
+after setting the relevant variables (each example exits cleanly if its required
+`WA_*` vars are unset).
 
-➡️ **Full per-example environment-variable reference: [docs/examples.md](docs/examples.md)**
+➡️ **Every example variable is documented in [`.env.example`](.env.example)** —
+copy it to `.env` and source it: `cp .env.example .env && set -a && . ./.env && set +a`.
 
 ## Running the tests
 
@@ -187,7 +189,7 @@ status and the pre-1.0 compatibility policy.
 
 ## Documentation
 
-- [docs/examples.md](docs/examples.md) — full example environment-variable reference
+- [`.env.example`](.env.example) — all example environment variables (copy to `.env`)
 - [docs/api_transition_guide.md](docs/api_transition_guide.md) — API concept mapping from the upstream TypeScript reference to Rust
 - [docs/feature_support_matrix.md](docs/feature_support_matrix.md) — capability status & pre-1.0 compatibility policy
 
